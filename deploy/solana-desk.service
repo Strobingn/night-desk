@@ -1,0 +1,22 @@
+[Unit]
+Description=Night Desk Solana memecoin paper trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/night-desk
+Environment=LIVE_TRADING=false
+Environment=DEMO_FEED=1
+Environment=FEED_MODE=auto
+Environment=PORT=4721
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run paper
+Restart=always
+RestartSec=5
+# Paper mode does not need a key. For a gated live host, drop in an EnvironmentFile
+# that sets LIVE_TRADING=true and WALLET_KEYPAIR_PATH. Do not put the key in this unit.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

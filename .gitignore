@@ -1,0 +1,16 @@
+node_modules
+dist
+web/dist
+data/*.sqlite
+data/*.sqlite-*
+data/*.jsonl
+data/ruggers.json
+data/advisor.json
+data/advisor.json.tmp
+android/.gradle
+android/build
+android/app/build
+android/local.properties
+.env
+*.log
+.DS_Store
