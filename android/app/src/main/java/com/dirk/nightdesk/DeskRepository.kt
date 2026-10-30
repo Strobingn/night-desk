@@ -7,6 +7,9 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +45,35 @@ data class DeskLink(val baseUrl: String, val token: String, val useManual: Boole
 
 data class ResolvedDesk(val baseUrl: String, val source: String)
 
+/**
+ * v12.2. Every URL the app could use, best first, without duplicates. The URL that last
+ * worked comes before the beacon, so a stale beacon (its row is only updated with the
+ * Supabase service key) can never override a tunnel that answers. connect() health-checks
+ * all of them in parallel and takes the first one that answers.
+ */
+internal fun candidateUrls(saved: DeskLink, beaconUrl: String?, lastGood: String?, discovered: String?): List<ResolvedDesk> {
+    val out = LinkedHashMap<String, String>()
+    fun add(raw: String?, source: String) {
+        val url = raw?.trim()?.trimEnd('/')?.takeIf { it.startsWith("http://") || it.startsWith("https://") } ?: return
+        if (!out.containsKey(url)) out[url] = source
+    }
+    // The URL Dirk typed on the Link tab always comes first; the beacon is last of the public ones.
+    add(saved.baseUrl, "saved")
+    add(lastGood, "last")
+    add(discovered, "desk")
+    add(beaconUrl, "beacon")
+    add(DeskBeacon.LAN_URL, "lan")
+    add(DeskBeacon.DEFAULT_PUBLIC_URL, "default")
+    return out.map { (url, source) -> ResolvedDesk(url, source) }
+}
+
+/** The desk's own public tunnel URL from /api/health (v12.2 desks), or null. */
+internal fun parseHealthPublicUrl(body: String): String? = runCatching {
+    val json = JSONObject(body)
+    if (!json.optBoolean("ok", false)) return@runCatching null
+    json.optString("publicUrl").trim().trimEnd('/').takeIf { Regex("""^https://[a-z0-9-]+\.trycloudflare\.com$""").matches(it) }
+}.getOrNull()
+
 class DeskRepository private constructor(private val context: Context) {
     private val crashHandler = CoroutineExceptionHandler { _, error ->
         if (error is CancellationException) return@CoroutineExceptionHandler
@@ -51,6 +83,12 @@ class DeskRepository private constructor(private val context: Context) {
     private val http = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
         .callTimeout(12, TimeUnit.SECONDS)
+        .build()
+    /** Health checks through the tunnel need more than the 2s LAN probe. */
+    private val healthHttp = OkHttpClient.Builder()
+        .callTimeout(6, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
         .build()
     private val probeHttp = OkHttpClient.Builder()
         .callTimeout(2, TimeUnit.SECONDS)
@@ -201,14 +239,22 @@ class DeskRepository private constructor(private val context: Context) {
         connectLock.withLock {
             if (gen != generation.get()) return@withLock
             val saved = currentLink()
-            val lastGood = context.deskStore.data.first()[KEY_LAST_GOOD]
+            val prefs = context.deskStore.data.first()
+            val lastGood = prefs[KEY_LAST_GOOD]
+            val discovered = prefs[KEY_DISCOVERED]
             _status.value = if (afterFailure) "Reconnecting" else "Checking the beacon"
             _error.value = null
             val beacon = runCatching { DeskBeacon.fetchPublicUrl() }.getOrNull()
             if (gen != generation.get()) return@withLock
-            val lanUp = if (beacon == null) probe(DeskBeacon.LAN_URL) else false
+            // v12.2: health-check every candidate in parallel and take the best one that answers.
+            val candidates = candidateUrls(saved, beacon, lastGood, discovered)
+            val answers = probeAll(candidates.map { it.baseUrl })
             if (gen != generation.get()) return@withLock
-            val resolved = resolve(saved, beacon, lanUp, lastGood, afterFailure)
+            val healthy = candidates.firstOrNull { answers.containsKey(it.baseUrl) }
+            // Nothing answered: stay on the saved/last URL and retry, never fall over to a stale beacon.
+            val resolved = healthy ?: candidates.firstOrNull { it.source == "saved" || it.source == "last" }
+                ?: resolve(saved, beacon, false, lastGood, afterFailure)
+            answers[resolved.baseUrl]?.let { rememberDiscovered(it) }
             link = DeskLink(resolved.baseUrl, saved.token, saved.useManual)
             _activeUrl.value = resolved.baseUrl
             _linkSource.value = resolved.source
@@ -268,6 +314,29 @@ class DeskRepository private constructor(private val context: Context) {
             }
         }
         return result.isSuccess
+    }
+
+    /** url -> the desk's reported public URL ("" when it reports none), for each URL whose /api/health answered ok. */
+    private suspend fun probeAll(urls: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
+        coroutineScope {
+            urls.map { url ->
+                async {
+                    runCatching {
+                        val request = Request.Builder().url(withToken("$url/api/health")).authed().build()
+                        healthHttp.newCall(request).execute().use { response ->
+                            val body = response.body?.string().orEmpty()
+                            if (!response.isSuccessful || !body.contains("\"ok\"")) return@runCatching null
+                            if (runCatching { JSONObject(body).optBoolean("ok", false) }.getOrDefault(false)) url to (parseHealthPublicUrl(body) ?: "") else null
+                        }
+                    }.getOrNull()
+                }
+            }.awaitAll().filterNotNull().toMap()
+        }
+    }
+
+    private fun rememberDiscovered(url: String) {
+        if (url.isBlank()) return
+        scope.launch { context.deskStore.edit { prefs -> prefs[KEY_DISCOVERED] = url } }
     }
 
     private suspend fun probe(url: String): Boolean = withContext(Dispatchers.IO) {
@@ -737,6 +806,8 @@ class DeskRepository private constructor(private val context: Context) {
         private val KEY_TOKEN = stringPreferencesKey("desk_token")
         private val KEY_MANUAL = booleanPreferencesKey("use_manual_url")
         private val KEY_LAST_GOOD = stringPreferencesKey("last_good_url")
+        /** v12.2: the public URL the desk itself reported on /api/health. */
+        private val KEY_DISCOVERED = stringPreferencesKey("desk_reported_url")
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private const val SNAPSHOT_FILE = "last-snapshot.json"
     }

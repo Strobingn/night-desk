@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -7,6 +7,49 @@ import type { Desk } from "../desk/orchestrator.js";
 import { deskSessionCookie, requestAuthorized } from "./auth.js";
 
 const DEFAULT_DIST = path.resolve("web/dist");
+
+let publicUrlCache: { at: number; file: string; url: string | null } | null = null;
+
+/** data/public-url.txt next to the database, if it holds an https trycloudflare URL. Cached 10s. */
+export function readPublicUrl(dbPath: string, now = Date.now()): string | null {
+  const file = path.join(path.dirname(dbPath), "public-url.txt");
+  if (publicUrlCache && publicUrlCache.file === file && now - publicUrlCache.at < 10_000) return publicUrlCache.url;
+  let url: string | null = null;
+  try {
+    const raw = readFileSync(file, "utf8").trim();
+    const match = raw.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    url = match ? match[0] : null;
+  } catch {
+    url = null;
+  }
+  publicUrlCache = { at: now, file, url };
+  return url;
+}
+
+/** Snapshot pushes are coalesced to at most one per WS_PUSH_MS. */
+export const WS_PUSH_MS = 200;
+/** A socket with more than this still queued is behind; it skips snapshots until it drains. */
+export const WS_BACKLOG_MAX = 256 * 1024;
+export const WS_HEARTBEAT_MS = 25_000;
+
+type PushTarget = { readyState: number; OPEN: number; bufferedAmount: number; send: (data: string) => void };
+
+/**
+ * Sends one full snapshot to every open socket that is not backed up. Snapshots are whole
+ * state, so skipping a stale one loses nothing. Returns how many sockets were skipped.
+ */
+export function sendSnapshot(sockets: Iterable<PushTarget>, payload: string, backlogMax = WS_BACKLOG_MAX): number {
+  let skipped = 0;
+  for (const socket of sockets) {
+    if (socket.readyState !== socket.OPEN) continue;
+    if (socket.bufferedAmount > backlogMax) {
+      skipped += 1;
+      continue;
+    }
+    socket.send(payload);
+  }
+  return skipped;
+}
 
 export function startServer(
   desk: Desk,
@@ -21,7 +64,10 @@ export function startServer(
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (!requestAuthorized(deskToken, req, url)) return unauthorized(res);
       if (deskToken) res.setHeader("set-cookie", deskSessionCookie(deskToken));
-      if (url.pathname === "/api/health") return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now() });
+      if (url.pathname === "/api/health") {
+        // v12.2: the desk's current public tunnel URL (written by ensure-tunnel.ps1), so the phone can learn a new one.
+        return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now(), publicUrl: readPublicUrl(desk.config.dbPath) });
+      }
       if (url.pathname === "/api/state") return json(res, 200, desk.snapshot());
       if (url.pathname === "/api/events" && req.method === "GET") {
         const limit = Number(url.searchParams.get("limit") ?? "800");
@@ -151,7 +197,12 @@ export function startServer(
     }
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  // v12.2: snapshots are ~80 KB of JSON. Compress them (OkHttp 4.12 and browsers negotiate
+  // permessage-deflate), and never queue more than WS_BACKLOG_MAX for a slow phone link.
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 6 }, serverNoContextTakeover: true, clientNoContextTakeover: true }
+  });
   const sockets = new Set<import("ws").WebSocket>();
   server.on("upgrade", (req, socket, head) => {
     let url: URL;
@@ -174,11 +225,33 @@ export function startServer(
       wss.emit("connection", ws, req);
     });
   });
+  const alive = new WeakMap<import("ws").WebSocket, boolean>();
   wss.on("connection", (socket) => {
     sockets.add(socket);
+    alive.set(socket, true);
+    socket.on("pong", () => alive.set(socket, true));
     socket.send(JSON.stringify({ type: "snapshot", data: desk.snapshot() }));
     socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => sockets.delete(socket));
   });
+  // Server heartbeat: drop sockets that stopped answering so they do not pile up behind a dead tunnel.
+  const heartbeat = setInterval(() => {
+    for (const socket of sockets) {
+      if (alive.get(socket) === false) {
+        sockets.delete(socket);
+        socket.terminate();
+        continue;
+      }
+      alive.set(socket, false);
+      try {
+        socket.ping();
+      } catch {
+        /* closing */
+      }
+    }
+  }, WS_HEARTBEAT_MS);
+  heartbeat.unref();
+  server.on("close", () => clearInterval(heartbeat));
 
   let pending: NodeJS.Timeout | null = null;
   const push = () => {
@@ -186,10 +259,9 @@ export function startServer(
     pending = setTimeout(() => {
       pending = null;
       const payload = JSON.stringify({ type: "snapshot", data: desk.snapshot() });
-      for (const socket of sockets) {
-        if (socket.readyState === socket.OPEN) socket.send(payload);
-      }
-    }, 200);
+      // A socket still draining an older snapshot skips this one and gets the latest once it drains.
+      if (sendSnapshot(sockets, payload) > 0) push();
+    }, WS_PUSH_MS);
   };
   desk.bus.on("log.event", () => push());
   desk.bus.on("market.tick", () => push());
