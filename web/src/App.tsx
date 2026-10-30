@@ -9,6 +9,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
+import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
 export const TABS = [
   { id: "home", label: "Home", icon: "home" },
@@ -42,6 +43,8 @@ export interface DeskActions {
   askBuy: (ask: BuyAsk) => void;
   sell: (mint: string, symbol: string, percent: 25 | 50 | 100) => Promise<void>;
   openAddCoin: (q: string) => void;
+  theme: ThemePref;
+  setTheme: (pref: ThemePref) => void;
 }
 
 function tabFromHash(): TabId {
@@ -59,6 +62,20 @@ export function App() {
   const [buyAsk, setBuyAsk] = useState<BuyAsk | null>(null);
   const [addQuery, setAddQuery] = useState<{ q: string; n: number }>(() => ({ q: new URLSearchParams(location.search).get("add") ?? "", n: 0 }));
   const [busy, setBusy] = useState<string | null>(null);
+  const [theme, setThemeState] = useState<ThemePref>(() => readThemePref());
+  const setTheme = useCallback((pref: ThemePref) => {
+    setThemeState(pref);
+    saveThemePref(pref);
+  }, []);
+
+  useEffect(() => {
+    applyTheme(theme);
+    if (theme !== "system" || typeof matchMedia !== "function") return;
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
 
   const setTab = useCallback((next: TabId) => {
     setTabState(next);
@@ -193,7 +210,9 @@ export function App() {
     openAddCoin: (q) => {
       setAddQuery((prev) => ({ q, n: prev.n + 1 }));
       setTab("add");
-    }
+    },
+    theme,
+    setTheme
   };
 
   if (!snap) {
@@ -229,9 +248,20 @@ export function App() {
           </p>
           </div>
         </div>
+        <div className="top-right">
+          <button
+            className="theme-btn"
+            type="button"
+            aria-label={`Theme: ${THEME_OPTIONS.find((o) => o.id === theme)?.label}. Tap for ${THEME_OPTIONS.find((o) => o.id === nextTheme(theme))?.label}`}
+            title="Theme"
+            onClick={() => setTheme(nextTheme(theme))}
+          >
+            <Icon name={theme === "dark" ? "moon" : theme === "light" ? "sun" : "auto"} size={20} />
+          </button>
         <div className={`lamp ${snap.mode}`} aria-label={`Trading mode ${snap.mode}`}>
           <i />
           {snap.mode === "live" ? "LIVE" : "PAPER"}
+        </div>
         </div>
         <div className={`metrics${tab === "home" ? " on-home" : ""}`}>
           <Metric label={snap.mode === "live" ? "Live cash" : "Paper cash"} value={usd(snap.cashUsd)} hint={`book ${usd(snap.startingBalanceUsd)}`} />

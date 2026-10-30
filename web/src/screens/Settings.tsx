@@ -5,6 +5,7 @@ import { SETTINGS_FIELDS, SETTING_GROUPS, changedPatch, draftFrom, type Draft, t
 import type { DeskSnapshot } from "../types";
 import type { DeskActions } from "../App";
 import { Icon } from "../ui";
+import { THEME_OPTIONS } from "../theme";
 
 const GROUP_META: Record<string, { icon: string; text: string }> = {
   "Sizing / risk": { icon: "shield", text: "How much each buy uses, and the brakes on the whole book." },
@@ -77,6 +78,32 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
         </div>
       </div>
       {error ? <div className="banner">{error}</div> : null}
+      <section className="card setting-group appearance" aria-label="Appearance">
+        <header className="group-head">
+          <span className="group-icon">
+            <Icon name="palette" size={20} />
+          </span>
+          <div>
+            <h3>Appearance</h3>
+            <p>Theme for this device only. It is not a desk setting and is never sent to the desk.</p>
+          </div>
+        </header>
+        <div className="segmented" role="radiogroup" aria-label="Theme">
+          {THEME_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              role="radio"
+              aria-checked={actions.theme === opt.id}
+              className={actions.theme === opt.id ? "on" : ""}
+              onClick={() => actions.setTheme(opt.id)}
+            >
+              <Icon name={opt.id === "dark" ? "moon" : opt.id === "light" ? "sun" : "auto"} size={16} /> {opt.label}
+            </button>
+          ))}
+        </div>
+        <small className="fine">System follows the phone or computer setting.</small>
+      </section>
       {SETTING_GROUPS.map((group) => (
         <section className="card setting-group" key={group}>
           <header className="group-head">

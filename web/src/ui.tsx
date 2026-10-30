@@ -38,7 +38,20 @@ const PATHS: Record<string, ReactNode> = {
       <path d="M12 12 18 6" />
     </>
   ),
-  bell: <path d="M6 16V11a6 6 0 1 1 12 0v5l2 2H4zM10 21h4" />
+  bell: <path d="M6 16V11a6 6 0 1 1 12 0v5l2 2H4zM10 21h4" />,
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </>
+  ),
+  auto: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" />
+    </>
+  ),
+  palette: <path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.5 0-1-.8-1.4-.8-2.3 0-.9.7-1.5 1.6-1.5H17a4 4 0 0 0 4-4c0-4.7-4-8.7-9-8.7zM7.5 11h.01M10 7.5h.01M14 7.5h.01M16.5 11h.01" />
 };
 
 export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; size?: number }) {
@@ -49,7 +62,7 @@ export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; s
   );
 }
 
-const AVATAR_TONES = ["#4a4a4a", "#5a5a5a", "#3e3e3e", "#666666", "#525252", "#444444"];
+const AVATAR_TONES = ["var(--av0)", "var(--av1)", "var(--av2)", "var(--av3)", "var(--av4)", "var(--av5)"];
 
 /** Round coin avatar with initials. Gray tone from the mint so a coin keeps its look. */
 export function CoinAvatar({ symbol, mint, tone, size = 44 }: { symbol: string; mint: string; tone?: "up" | "down" | "flat"; size?: number }) {
