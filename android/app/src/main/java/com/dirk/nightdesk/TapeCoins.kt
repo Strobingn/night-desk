@@ -17,8 +17,37 @@ data class CoinCard(
     val reason: String?,
     val codes: List<String>,
     /** Latest event for this mint, so the existing Buy dialog can use it. */
-    val event: TapeEvent
+    val event: TapeEvent,
+    /** v13.1: 5m volume, 1h price change in percent, and 1-based rank by 1h volume. */
+    val vol5m: Double? = null,
+    val change1h: Double? = null,
+    val volRank: Int? = null
 )
+
+/** v13.1 per-device Tape sort. Volume is the default. */
+enum class TapeSort(val label: String) { VOLUME("Volume"), NEWEST("Newest"), SCORE("Score");
+    companion object {
+        fun parse(raw: String?): TapeSort = entries.firstOrNull { it.name == raw } ?: VOLUME
+    }
+}
+
+const val TOP_VOLUME = 10
+const val HOT_RANK = 3
+
+private val V5_RE = Regex("""5m volume \$([0-9,.]+)""")
+private val CHANGE_RE = Regex("""1h change ([+-]?)([0-9.]+)%""")
+
+private fun money(raw: String): Double? = raw.replace(",", "").trimEnd('.').toDoubleOrNull()?.takeIf { it.isFinite() }
+
+fun sortCoins(rows: List<CoinCard>, mode: TapeSort): List<CoinCard> {
+    fun vol(c: CoinCard) = c.vol1h?.takeIf { it.isFinite() } ?: -1.0
+    fun sc(c: CoinCard) = c.score?.takeIf { it.isFinite() } ?: -1.0
+    return when (mode) {
+        TapeSort.NEWEST -> rows.sortedByDescending { it.lastTs }
+        TapeSort.SCORE -> rows.sortedWith(compareByDescending<CoinCard> { sc(it) }.thenByDescending { vol(it) }.thenByDescending { it.lastTs })
+        TapeSort.VOLUME -> rows.sortedWith(compareByDescending<CoinCard> { vol(it) }.thenByDescending { it.vol5m ?: 0.0 }.thenByDescending { it.lastTs })
+    }
+}
 
 private val SCOUT_RE = Regex("""Mark ([0-9.eE-]+), 1h volume \$([0-9,.]+)""")
 
@@ -33,6 +62,10 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60):
         var reason: String? = null
         var codes: List<String> = emptyList()
         var event: TapeEvent = first
+        var vol5m: Double? = null
+        var change: Double? = null
+        var firstMark: Double? = null
+        var changeSeen: Double? = null
     }
     val map = LinkedHashMap<String, Acc>()
     for (e in events) {
@@ -49,8 +82,17 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60):
         when {
             e.stage == "scout" -> {
                 SCOUT_RE.find(e.message)?.let { m ->
-                    acc.mark = m.groupValues[1].toDoubleOrNull()?.takeIf { it > 0 }
-                    acc.vol = m.groupValues[2].replace(",", "").trimEnd('.').toDoubleOrNull()
+                    val mark = m.groupValues[1].toDoubleOrNull()?.takeIf { it > 0 && it.isFinite() }
+                    if (mark != null) {
+                        val first = acc.firstMark
+                        if (first == null) acc.firstMark = mark else acc.changeSeen = (mark / first - 1) * 100
+                    }
+                    acc.mark = mark
+                    acc.vol = money(m.groupValues[2])
+                }
+                V5_RE.find(e.message)?.let { m -> money(m.groupValues[1])?.let { acc.vol5m = it } }
+                CHANGE_RE.find(e.message)?.let { m ->
+                    m.groupValues[2].toDoubleOrNull()?.takeIf { it.isFinite() }?.let { acc.change = if (m.groupValues[1] == "-") -it else it }
                 }
                 if (!e.detail.isNullOrBlank()) acc.source = e.detail
             }
@@ -69,13 +111,23 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60):
             e.stage == "executor" && e.kind == "fill" -> bump(Verdict.BOUGHT)
         }
     }
-    return map.entries
+    val rows = map.entries
         .map { (mint, a) ->
-            CoinCard(mint, a.symbol, a.lastTs, a.source, a.mark, a.vol, a.score, if (mint in openMints) Verdict.OPEN else a.verdict, a.reason, a.codes, a.event)
+            CoinCard(
+                mint, a.symbol, a.lastTs, a.source, a.mark, a.vol, a.score, if (mint in openMints) Verdict.OPEN else a.verdict, a.reason, a.codes, a.event,
+                vol5m = a.vol5m,
+                change1h = a.change ?: a.changeSeen?.takeIf { it.isFinite() }
+            )
         }
         .filter { it.lastTs > 0 || it.verdict == Verdict.OPEN }
         .sortedByDescending { it.lastTs }
         .take(limit)
+    val ranks = rows
+        .filter { (it.vol1h ?: 0.0) > 0 && it.vol1h!!.isFinite() }
+        .sortedWith(compareByDescending<CoinCard> { it.vol1h ?: 0.0 }.thenByDescending { it.vol5m ?: 0.0 })
+        .mapIndexed { i, c -> c.mint to (i + 1) }
+        .toMap()
+    return rows.map { it.copy(volRank = ranks[it.mint]) }
 }
 
 /** Equity at the start of today (local), from the series; falls back to the book start. */

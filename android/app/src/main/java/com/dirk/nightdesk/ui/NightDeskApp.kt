@@ -15,6 +15,10 @@ import androidx.compose.ui.graphics.Brush
 import com.dirk.nightdesk.CoinCard
 import com.dirk.nightdesk.Verdict
 import com.dirk.nightdesk.coinCards
+import com.dirk.nightdesk.sortCoins
+import com.dirk.nightdesk.TapeSort
+import com.dirk.nightdesk.TOP_VOLUME
+import com.dirk.nightdesk.HOT_RANK
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -117,56 +121,124 @@ private fun stageColor(stage: String): Color = when (stage) {
     else -> P.muted
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit) {
     val vc = verdictColor(coin.verdict)
-    Row(
+    val rank = coin.volRank
+    val top = rank != null && rank <= TOP_VOLUME
+    val hot = rank != null && rank <= HOT_RANK
+    val borderColor = when {
+        selected -> P.accent
+        hot -> P.amber.copy(alpha = 0.75f)
+        top -> P.accent.copy(alpha = 0.45f)
+        else -> P.line
+    }
+    Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(P.card)
-            .border(1.dp, if (selected) P.accent else P.line, RoundedCornerShape(18.dp))
+            .border(if (selected) 2.dp else 1.dp, borderColor, RoundedCornerShape(20.dp))
             .clickable(onClick = onSelect)
-            .height(androidx.compose.foundation.layout.IntrinsicSize.Min),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(start = 16.dp, end = 14.dp, top = 14.dp, bottom = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Box(Modifier.width(4.dp).fillMaxHeight().padding(vertical = 12.dp).clip(RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)).background(vc))
-        Spacer(Modifier.width(10.dp))
-        CoinAvatar(coin.symbol, coin.mint, ring = vc, size = 42.dp)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f).padding(vertical = 12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(coin.symbol, color = P.ink, fontSize = 15.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                Spacer(Modifier.width(8.dp))
-                VerdictChip(coin.verdict)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CoinAvatar(coin.symbol, coin.mint, ring = vc, size = 46.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(coin.symbol, color = P.ink, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(top = 3.dp)) {
+                    Chip(coin.verdict.label, vc, vc.copy(alpha = 0.18f), size = 13)
+                    if (hot) Chip("HOT #$rank", if (P.isDark) Color(0xFF1A1000) else Color.White, if (P.isDark) P.amber else Color(0xFFB86E00), size = 13)
+                    else if (top) Chip("VOL #$rank", P.accent, P.accent.copy(alpha = 0.2f), size = 13)
+                }
             }
-            val bits = buildList {
-                add(coin.source ?: "scout")
-                add(clock(if (coin.lastTs > 0) coin.lastTs else System.currentTimeMillis()))
-                coin.vol1h?.let { add("1h " + compact(it)) }
-                coin.mark?.let { add(px(it)) }
-            }
-            Text(bits.joinToString(" · "), color = P.dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!coin.reason.isNullOrBlank()) {
+            coin.score?.let { sc ->
+                val pass = coin.verdict == Verdict.TRADE || coin.verdict == Verdict.BOUGHT || coin.verdict == Verdict.OPEN
                 Text(
-                    (coin.codes.firstOrNull()?.let { "$it · " } ?: "") + coin.reason,
-                    color = P.muted,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    "%.2f".format(Locale.US, sc),
+                    color = if (pass) P.up else P.ink,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (pass) P.up.copy(alpha = 0.2f) else P.card3)
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
                 )
             }
         }
-        Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(12.dp)) {
-            coin.score?.let { sc ->
-                val pass = coin.verdict == Verdict.TRADE || coin.verdict == Verdict.BOUGHT || coin.verdict == Verdict.OPEN
-                Chip("%.2f".format(Locale.US, sc), if (pass) P.up else P.ink, if (pass) P.up.copy(alpha = 0.2f) else P.card3, size = 14)
-                Spacer(Modifier.height(6.dp))
+        // Volume first: 1h volume and 1h change big on top, 5m volume and price below.
+        val ch = coin.change1h?.takeIf { it.isFinite() }
+        val chTint = when {
+            ch == null -> P.ink
+            ch > 0 -> P.up
+            ch < 0 -> P.down
+            else -> P.ink
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(P.surface)
+                .border(1.dp, P.line, RoundedCornerShape(14.dp))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row {
+                TapeStat("1H VOLUME", coin.vol1h?.let { compact(it) } ?: "—", Modifier.weight(1f), big = true)
+                Row(Modifier.weight(1f).height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
+                    Box(Modifier.width(4.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(if (ch == null || ch == 0.0) P.card3 else chTint))
+                    Spacer(Modifier.width(10.dp))
+                    TapeStat(
+                        "1H CHANGE",
+                        if (ch == null) "—" else (if (ch > 0) "+" else if (ch < 0) "−" else "") + "%.1f%%".format(Locale.US, kotlin.math.abs(ch)),
+                        Modifier.weight(1f),
+                        big = true,
+                        tint = chTint
+                    )
+                }
             }
-            if (coin.verdict != Verdict.OPEN) {
-                BigButton("Buy", P.up, P.onUp, Modifier.width(72.dp), height = 38.dp, onClick = onBuy)
+            Row {
+                TapeStat("5M VOLUME", coin.vol5m?.let { compact(it) } ?: "—", Modifier.weight(1f))
+                TapeStat("PRICE", coin.mark?.let { px(it) } ?: "—", Modifier.weight(1f).padding(start = 14.dp))
             }
         }
+        if (!coin.reason.isNullOrBlank()) {
+            Text(
+                (coin.codes.firstOrNull()?.let { "$it · " } ?: "") + coin.reason,
+                color = P.dim,
+                fontSize = 14.sp,
+                lineHeight = 19.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "${coin.source ?: "scout"} · ${clock(if (coin.lastTs > 0) coin.lastTs else System.currentTimeMillis())}",
+                color = P.dim,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (coin.verdict != Verdict.OPEN) {
+                BigButton("Buy", P.up, P.onUp, Modifier.width(104.dp), height = 46.dp, onClick = onBuy)
+            } else {
+                Chip("Holding", P.blue, P.blue.copy(alpha = 0.18f), size = 13)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TapeStat(label: String, value: String, modifier: Modifier, big: Boolean = false, tint: Color = P.ink) {
+    Column(modifier.padding(end = 6.dp)) {
+        Text(label, color = P.dim, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp, maxLines = 1)
+        Text(value, color = tint, fontSize = if (big) 22.sp else 16.sp, fontWeight = if (big) FontWeight.Black else FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -964,6 +1036,9 @@ private fun TapeScreen(
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
     var coinFilter by rememberSaveable { mutableStateOf("all") }
+    val tapeContext = LocalContext.current
+    val tapePrefs = remember { tapeContext.getSharedPreferences("night_desk_local", android.content.Context.MODE_PRIVATE) }
+    var tapeSort by remember { mutableStateOf(TapeSort.parse(tapePrefs.getString("tape_sort", null))) }
     var selected by remember { mutableStateOf<TapeEvent?>(null) }
     var askBuy by remember { mutableStateOf(false) }
     var sizeText by remember { mutableStateOf("") }
@@ -1074,20 +1149,22 @@ private fun TapeScreen(
             ) { tapeView = it }
         }
         ScoutStatusCard(feedSources)
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        // v13.1: in Coins view each card has its own Buy, so this bar shows once a coin is picked.
+        // The Raw log view always shows it, with Pause/Live for the follow behaviour.
+        if (tapeView == "log" || selected != null) Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
             val mintLabel = selected?.mint
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         if (mintLabel == null) "Select a mint on the tape" else "Selected ${selected?.symbol ?: mintLabel.take(4)}",
-                        color = Lime,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp
+                        color = P.accent,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
                     )
                     Text(
                         if (capText.isBlank()) "Buy size uses the position cap" else "Buy size starts at the cap $$capText",
                         color = Dim,
-                        fontSize = 12.sp
+                        fontSize = 13.sp
                     )
                 }
                 Button(
@@ -1110,8 +1187,35 @@ private fun TapeScreen(
             ) { Text("Buy", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold) }
         }
         if (tapeView == "coins") {
-            val coins = remember(idKey, positionMints) { coinCards(events, positionMints) }
-                .filter { coinFilter == "all" || it.verdict.name.lowercase() == coinFilter || (coinFilter == "trade" && it.verdict == Verdict.BOUGHT) }
+            val coins = sortCoins(
+                remember(idKey, positionMints) { coinCards(events, positionMints) }
+                    .filter { coinFilter == "all" || it.verdict.name.lowercase() == coinFilter || (coinFilter == "trade" && it.verdict == Verdict.BOUGHT) },
+                tapeSort
+            )
+            // v13.1 sort: Volume (default), Newest, Score. Saved on this phone only.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Sort", color = P.dim, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                TapeSort.entries.forEach { mode ->
+                    val on = tapeSort == mode
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(if (on) P.accent else P.card2)
+                            .border(1.dp, if (on) P.accent else P.lineStrong, RoundedCornerShape(50))
+                            .clickable {
+                                tapeSort = mode
+                                tapePrefs.edit().putString("tape_sort", mode.name).apply()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) { Text(mode.label, color = if (on) P.onAccent else P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1123,10 +1227,10 @@ private fun TapeScreen(
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 if (coins.isEmpty()) {
-                    item { Text("No coins for this filter yet. The Scout adds a card as each new pair lands.", color = P.muted, fontSize = 14.sp) }
+                    item { Text("No coins for this filter yet. The Scout adds a card as each new pair lands.", color = P.dim, fontSize = 16.sp) }
                 }
                 itemsIndexed(coins, key = { index, c -> "${c.mint}#$index" }) { _, coin ->
                     CoinCardRow(
@@ -1166,8 +1270,8 @@ private fun TapeScreen(
                             .deskCard(radius = 14.dp, color = if (active) P.accent.copy(alpha = 0.12f) else P.card)
                             .padding(12.dp)
                     ) {
-                        Text("${clock(event.ts)}  ${event.stage.uppercase()}", color = stageColor(event.stage), fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Text(event.message, color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                        Text("${clock(event.ts)}  ${event.stage.uppercase()}", color = stageColor(event.stage), fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text(event.message, color = Ink, fontSize = 15.sp, lineHeight = 21.sp)
                         if (event.mint != null) {
                             TextButton(onClick = { selected = event }) {
                                 Text(if (active) "Selected" else "Select", color = Lime)
@@ -1472,7 +1576,7 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
             Modifier.fillMaxWidth().clickable { open = !open }.padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Scout status", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text("Scout status", color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             Text("$live/${sources.size} live · ${sources.sumOf { it.sightingsPerMin }} coins/min", color = Dim, fontSize = 12.sp)
             Text(if (open) "  ▾" else "  ▸", color = Dim, fontSize = 14.sp)
         }
@@ -1486,7 +1590,7 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
             Row(Modifier.fillMaxWidth().padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.width(8.dp).height(8.dp).background(tint, RoundedCornerShape(4.dp)))
                 Spacer(Modifier.width(8.dp))
-                Text(src.label, color = Color.White, fontSize = 12.sp, modifier = Modifier.width(98.dp), maxLines = 1)
+                Text(src.label, color = P.ink, fontSize = 13.sp, modifier = Modifier.width(98.dp), maxLines = 1)
                 Text(feedSourceStateText(src, now), color = tint, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Text(feedSourceRateText(src), color = Dim, fontSize = 11.sp, maxLines = 1)
             }

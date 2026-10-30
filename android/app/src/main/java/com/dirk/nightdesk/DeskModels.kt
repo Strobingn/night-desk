@@ -222,6 +222,8 @@ data class DeskSnapshot(
     val sessionPnlUsd: Double,
     val minVolume1hUsd: Double,
     val analystMinScore: Double,
+    /** v13.1 analyst volume boost, 0–1. Null when the desk is older than v13.1. */
+    val volumeBoost: Double? = null,
     val maxTop10Pct: Double,
     val maxPositionPct: Double,
     val stopLossPct: Double,
@@ -601,6 +603,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         sessionPnlUsd = data.optFinite("sessionPnlUsd"),
         minVolume1hUsd = rules?.optFinite("minVolume1hUsd", 10_000.0) ?: 10_000.0,
         analystMinScore = rules?.optFinite("analystMinScore", 0.5) ?: 0.5,
+        volumeBoost = rules?.takeIf { it.has("volumeBoost") }?.optFinite("volumeBoost", 0.5),
         maxTop10Pct = rules?.optFinite("maxTop10Pct", 0.35) ?: 0.35,
         maxPositionPct = rules?.optFinite("maxPositionPct", 0.08) ?: 0.08,
         stopLossPct = rules?.optFinite("stopLossPct", 0.06) ?: 0.06,

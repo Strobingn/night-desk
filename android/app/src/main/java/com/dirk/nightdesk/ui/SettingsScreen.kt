@@ -40,6 +40,8 @@ import com.dirk.nightdesk.DeskSnapshot
 private data class Draft(
     val volume: Float,
     val score: Float,
+    /** v13.1 volume boost, percent 0–100. */
+    val boost: Float,
     val top10: Float,
     val position: Float,
     val slip: Float,
@@ -80,6 +82,7 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
     return Draft(
         volume = (snap?.minVolume1hUsd ?: 10_000.0).toFloat(),
         score = (snap?.analystMinScore ?: 0.5).toFloat(),
+        boost = ((snap?.volumeBoost ?: 0.5) * 100.0).toFloat().coerceIn(0f, 100f),
         top10 = ((snap?.maxTop10Pct ?: 0.35) * 100.0).toFloat(),
         position = ((snap?.maxPositionPct ?: 0.08) * 100.0).toFloat(),
         slip = ((snap?.maxEntrySlippage ?: 0.03) * 100.0).toFloat(),
@@ -145,6 +148,8 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         Group("Entry / Filter") {
             ExactSlider("1h volume $", draft.volume, 1_000f..500_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(volume = it) }
             ExactSlider("Trade line", draft.score, 0.10f..0.95f, 0.01f, { "%.2f".format(it) }) { draft = draft.copy(score = it) }
+            ExactSlider("Volume boost %", draft.boost, 0f..100f, 5f, { "%.0f".format(it) }) { draft = draft.copy(boost = it) }
+            Text("High 1h volume adds to the Analyst score: none at \$10k, half at \$100k, full at \$1M+. 50% = up to +0.10. 0 = off. Never lowers a score or passes 1. No volume data = no boost.", color = Dim, fontSize = 12.sp)
             ExactSlider("Top 10 cap %", draft.top10, 5f..35f, 1f, { "%.0f".format(it) }) { draft = draft.copy(top10 = it) }
             ExactSlider("Min liquidity $", draft.liquidity, 0f..200_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(liquidity = it) }
             ExactSlider("Min age min", draft.minAge, 0f..1440f, 5f, { "%.0f".format(it) }) { draft = draft.copy(minAge = it) }
@@ -220,6 +225,7 @@ internal fun changedOnly(before: Map<String, Any?>, after: Map<String, Any?>): M
 private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "minVolume1hUsd" to draft.volume.toDouble(),
     "analystMinScore" to draft.score.toDouble(),
+    "volumeBoost" to Math.round(draft.boost.toDouble()) / 100.0,
     "maxTop10Pct" to draft.top10.toDouble(),
     "maxPositionPct" to draft.position.toDouble(),
     "maxEntrySlippage" to draft.slip.toDouble(),
@@ -255,11 +261,11 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
 
 /** v13 group icons and one-line descriptions, same as the web. */
 private val GROUP_META = mapOf(
-    "Entry / Filter" to ("filter" to "What a new coin must pass before the desk will buy it."),
-    "Risk / Exits" to ("shield" to "Hard stop, cooldown, daily loss and the trailing take-profit."),
-    "Sizing" to ("coins" to "How much each buy spends and how much can be open at once."),
-    "Scout sources" to ("radar" to "Which feeds the Scout listens to for new pairs."),
-    "Alerts" to ("bell" to "When the phone should ping you.")
+    Pair("Entry / Filter", Pair("filter", "What a new coin must pass, and how the Analyst scores it.")),
+    Pair("Risk / Exits", Pair("shield", "Hard stop, cooldown, daily loss and the trailing take-profit.")),
+    Pair("Sizing", Pair("coins", "How much each buy spends and how much can be open at once.")),
+    Pair("Scout sources", Pair("radar", "Which feeds the Scout listens to for new pairs.")),
+    Pair("Alerts", Pair("bell", "When the phone should ping you."))
 )
 
 @Composable
@@ -280,7 +286,7 @@ private fun AppearanceGroup() {
         SegmentedFill(
             ThemePref.entries.map { it.name to it.label },
             ThemeState.pref.name,
-            mapOf("DARK" to "moon", "LIGHT" to "sun", "SYSTEM" to "auto")
+            mapOf(Pair("DARK", "moon"), Pair("LIGHT", "sun"), Pair("SYSTEM", "auto"))
         ) { ThemeState.set(context, ThemePref.valueOf(it)) }
         Text(
             if (ThemeState.pref == ThemePref.SYSTEM) "Following the phone: ${if (P.isDark) "dark" else "light"} right now." else "Dark is the default. System follows the phone.",
