@@ -5,6 +5,12 @@ import { clock } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
 import { ScoutStatus } from "./ScoutStatus";
+import { coinCards, VERDICT_LABEL, type CoinRow, type Verdict } from "../coins";
+import { compactUsd, px } from "../format";
+import { CoinAvatar, Icon } from "../ui";
+
+const COIN_FILTERS = ["all", "open", "trade", "near", "killed"] as const;
+const COIN_FILTER_LABEL: Record<(typeof COIN_FILTERS)[number], string> = { all: "All", open: "Open", trade: "Passed", near: "Near miss", killed: "Killed" };
 
 const LOG_STAGES = ["all", "scout", "filter", "analyst", "executor", "risk", "system", "logger"] as const;
 
@@ -21,6 +27,8 @@ export function TapeScreen({
   actions: DeskActions;
   busy: string | null;
 }) {
+  const [view, setView] = useState<"coins" | "log">("coins");
+  const [coinFilter, setCoinFilter] = useState<(typeof COIN_FILTERS)[number]>("all");
   const [stageFilter, setStageFilter] = useState<(typeof LOG_STAGES)[number]>("all");
   const [selected, setSelected] = useState<{ mint: string; symbol: string } | null>(null);
   const [buySize, setBuySize] = useState("");
@@ -181,14 +189,36 @@ export function TapeScreen({
     actions.askBuy({ mint: selected.mint, symbol: selected.symbol, sizeUsd, minutesLeft: null });
   }
 
+  const openMints = new Set(snap.positions.map((pos) => pos.mint));
+  const coins = view === "coins" ? coinCards(history, openMints).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")) : [];
+
   return (
     <div className="tape-screen">
       <div className="tape-head">
-        <h2>Activity log</h2>
+        <h2>{view === "coins" ? "Tape" : "Activity log"}</h2>
+        <div className="segmented" role="tablist" aria-label="Tape view">
+          <button type="button" role="tab" aria-selected={view === "coins"} className={view === "coins" ? "on" : ""} onClick={() => setView("coins")}>
+            <Icon name="coins" size={16} /> Coins
+          </button>
+          <button type="button" role="tab" aria-selected={view === "log"} className={view === "log" ? "on" : ""} onClick={() => setView("log")}>
+            <Icon name="list" size={16} /> Raw log
+          </button>
+        </div>
+        {view === "log" ? (
         <button className={`live-toggle${tapePaused ? " on" : ""}`} type="button" onClick={() => (tapePaused ? goLiveTape() : pauseTape())}>
           {tapePaused ? "Live" : "Pause"}
         </button>
+        ) : null}
       </div>
+      {view === "coins" ? (
+        <div className="filters" role="tablist" aria-label="Coin verdict">
+          {COIN_FILTERS.map((f) => (
+            <button key={f} type="button" className={coinFilter === f ? "on" : ""} onClick={() => setCoinFilter(f)}>
+              {COIN_FILTER_LABEL[f]}
+            </button>
+          ))}
+        </div>
+      ) : (
       <div className="filters" role="tablist" aria-label="Log stage">
         {LOG_STAGES.map((stage) => (
           <button key={stage} type="button" className={stageFilter === stage ? "on" : ""} onClick={() => setStageFilter(stage)}>
@@ -196,6 +226,7 @@ export function TapeScreen({
           </button>
         ))}
       </div>
+      )}
       {logError ? <div className="banner">{logError}</div> : null}
       <ScoutStatus feed={snap.feed} />
       <form
@@ -229,10 +260,33 @@ export function TapeScreen({
           </>
         ) : (
           <p className="empty">
-            Select a mint on the tape to buy. The size starts at the current cap{capText ? ` ($${capText})` : ""}. A larger request is filled at the cap. No add while that mint is open.
+            {view === "coins"
+              ? `Tap Buy to buy at the cap${capText ? ` ($${capText})` : ""}, or tap a card to pick a size first. No add while a mint is open.`
+              : `Select a mint on the tape to buy. The size starts at the current cap${capText ? ` ($${capText})` : ""}. A larger request is filled at the cap. No add while that mint is open.`}
           </p>
         )}
       </form>
+      {view === "coins" ? (
+        <div className="coin-list" aria-live="polite">
+          {coins.length === 0 ? (
+            <p className="empty">No coins for this filter yet. The Scout adds a card as each new pair lands.</p>
+          ) : (
+            coins.map((coin) => (
+              <CoinCard
+                key={coin.mint}
+                coin={coin}
+                selected={selected?.mint === coin.mint}
+                busy={busy === coin.mint}
+                onSelect={() => {
+                  setSelected({ mint: coin.mint, symbol: coin.symbol });
+                  setBuySize(capText);
+                }}
+                onBuy={() => actions.askBuy({ mint: coin.mint, symbol: coin.symbol, minutesLeft: null })}
+              />
+            ))
+          )}
+        </div>
+      ) : (
       <div className="rows-wrap">
         <div className="rows" aria-live="polite" ref={rowsRef} onScroll={() => noteUserScroll()}>
           <button className="ghost earlier" type="button" onClick={() => void loadEarlier()}>
@@ -264,7 +318,49 @@ export function TapeScreen({
           </button>
         ) : null}
       </div>
+      )}
     </div>
+  );
+}
+
+function CoinCard({ coin, selected, busy, onSelect, onBuy }: { coin: CoinRow; selected: boolean; busy: boolean; onSelect: () => void; onBuy: () => void }) {
+  const tone: Record<Verdict, "up" | "down" | "flat"> = { open: "up", bought: "up", trade: "up", near: "flat", killed: "down", seen: "flat" };
+  return (
+    <article className={`coin-card v-${coin.verdict}${selected ? " selected" : ""}`} onClick={onSelect} data-mint={coin.mint}>
+      <CoinAvatar symbol={coin.symbol} mint={coin.mint} tone={tone[coin.verdict]} size={42} />
+      <div className="cc-main">
+        <div className="cc-title">
+          <b>{coin.symbol}</b>
+          <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
+        </div>
+        <span className="sub">
+          {coin.source ?? "scout"} · {clock(coin.lastTs || Date.now())}
+          {coin.vol1h != null ? ` · 1h ${compactUsd(coin.vol1h)}` : ""}
+          {coin.mark ? ` · ${px(coin.mark)}` : ""}
+        </span>
+        {coin.reason ? <span className="cc-reason">{coin.codes.length ? <code>{coin.codes[0]}</code> : null} {coin.reason}</span> : null}
+      </div>
+      <div className="cc-side">
+        {coin.score != null ? (
+          <span className={`score-badge${coin.verdict === "trade" || coin.verdict === "bought" || coin.verdict === "open" ? " pass" : ""}`} title="Analyst score">
+            {coin.score.toFixed(2)}
+          </span>
+        ) : null}
+        {coin.verdict !== "open" ? (
+          <button
+            className="primary sm"
+            type="button"
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              onBuy();
+            }}
+          >
+            {busy ? "Buying" : "Buy"}
+          </button>
+        ) : null}
+      </div>
+    </article>
   );
 }
 

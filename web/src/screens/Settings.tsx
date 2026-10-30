@@ -4,6 +4,15 @@ import { usd } from "../format";
 import { SETTINGS_FIELDS, SETTING_GROUPS, changedPatch, draftFrom, type Draft, type SettingField, type SliderField } from "../settingsSchema";
 import type { DeskSnapshot } from "../types";
 import type { DeskActions } from "../App";
+import { Icon } from "../ui";
+
+const GROUP_META: Record<string, { icon: string; text: string }> = {
+  "Sizing / risk": { icon: "shield", text: "How much each buy uses, and the brakes on the whole book." },
+  "Filter / Analyst gates": { icon: "filter", text: "What a new pair must clear before the Analyst scores it." },
+  "Exits / stops": { icon: "exit", text: "The hard stop, the cooldown after it, and the optional trailing take profit." },
+  "Scout sources": { icon: "radar", text: "Where new pairs come from. Pump is always on." },
+  Alerts: { icon: "bell", text: "What the phone pings you about." }
+};
 
 export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions: DeskActions }) {
   const stateLike = snap as unknown as { rules: Record<string, unknown>; prefs: Record<string, unknown> };
@@ -70,8 +79,14 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
       {error ? <div className="banner">{error}</div> : null}
       {SETTING_GROUPS.map((group) => (
         <section className="card setting-group" key={group}>
-          <header>
-            <h3>{group}</h3>
+          <header className="group-head">
+            <span className="group-icon">
+              <Icon name={GROUP_META[group]?.icon ?? "settings"} size={20} />
+            </span>
+            <div>
+              <h3>{group}</h3>
+              <p>{GROUP_META[group]?.text}</p>
+            </div>
           </header>
           {group === "Sizing / risk" ? (
             <p className="fine">
@@ -117,6 +132,7 @@ function SliderRow({ field, value, edited, onChange }: { field: SliderField; val
   const off = value == null;
   const shown = off ? field.min : value;
   const outOfBand = !off && (value < field.min || value > field.max);
+  const fill = ((Math.min(field.max, Math.max(field.min, shown)) - field.min) / (field.max - field.min || 1)) * 100;
   return (
     <div className={`slider-row${edited ? " edited" : ""}${off ? " off" : ""}`}>
       <div className="slider-head">
@@ -132,6 +148,7 @@ function SliderRow({ field, value, edited, onChange }: { field: SliderField; val
       <div className="slider-line">
         <input
           type="range"
+          style={{ ["--fill" as string]: `${fill}%` }}
           aria-label={field.label}
           min={field.min}
           max={field.max}

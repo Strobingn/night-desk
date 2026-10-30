@@ -8,13 +8,14 @@ import { RecapScreen } from "./screens/Recap";
 import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
+import { Icon } from "./ui";
 
 export const TABS = [
-  { id: "home", label: "Home" },
-  { id: "tape", label: "Tape" },
-  { id: "add", label: "Add coin" },
-  { id: "recap", label: "Recap" },
-  { id: "settings", label: "Settings" }
+  { id: "home", label: "Home", icon: "home" },
+  { id: "tape", label: "Tape", icon: "tape" },
+  { id: "add", label: "Add coin", icon: "add" },
+  { id: "recap", label: "Recap", icon: "recap" },
+  { id: "settings", label: "Settings", icon: "settings" }
 ] as const;
 export type TabId = (typeof TABS)[number]["id"];
 
@@ -209,8 +210,12 @@ export function App() {
     <div className="shell">
       <header className="top">
         <div className="brand">
+          <span className="logo" aria-hidden="true">
+            <Icon name="moon" size={20} />
+          </span>
+          <div>
           <h1>
-            NIGHT <span>DESK</span>
+            Night <span>Desk</span>
           </h1>
           <p className={offline ? "warn" : "ok"}>
             {offline ? "Socket dropped · polling · " : ""}
@@ -222,12 +227,13 @@ export function App() {
             {snap.feed.demo ? " · Replay tape on" : " · Replay off"}
             {snap.feed.mode === "replay" ? " · feed locked to replay" : ""}
           </p>
+          </div>
         </div>
         <div className={`lamp ${snap.mode}`} aria-label={`Trading mode ${snap.mode}`}>
           <i />
           {snap.mode === "live" ? "LIVE" : "PAPER"}
         </div>
-        <div className="metrics">
+        <div className={`metrics${tab === "home" ? " on-home" : ""}`}>
           <Metric label={snap.mode === "live" ? "Live cash" : "Paper cash"} value={usd(snap.cashUsd)} hint={`book ${usd(snap.startingBalanceUsd)}`} />
           <Metric label="Marked equity" value={usd(snap.equityUsd)} hint="cash + marks" />
           <Metric label="Session P&L" value={signedUsd(snap.sessionPnlUsd)} hint={signedPct(snap.sessionPnlPct)} tone={tone(snap.sessionPnlUsd)} />
@@ -246,7 +252,10 @@ export function App() {
               setTab(t.id);
             }}
           >
-            {t.label}
+            <span className="tab-icon">
+              <Icon name={t.icon} />
+            </span>
+            <span className="tab-label">{t.label}</span>
             {t.id === "home" && snap.positions.length ? <b>{snap.positions.length}</b> : null}
             {t.id === "add" && snap.watchlist?.length ? <b>{snap.watchlist.length}</b> : null}
           </a>

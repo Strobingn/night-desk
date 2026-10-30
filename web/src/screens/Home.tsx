@@ -2,7 +2,11 @@ import { useMemo, useState } from "react";
 import { api } from "../api";
 import { chartLinks, clock, markAge, px, signedPct, signedUsd, usd } from "../format";
 import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../types";
-import { Metric, tone, type DeskActions } from "../App";
+import { tone, type DeskActions } from "../App";
+import { CoinAvatar, PnlChip, Sparkline, StopTrailBar } from "../ui";
+import { dayBase } from "../coins";
+
+
 
 const STAGES = [
   ["01", "Scout", "scouted", "New pairs"],
@@ -42,30 +46,25 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
     <div className="home">
       {snap.lastClientCrash ? <LastCrashCard crash={snap.lastClientCrash} /> : null}
 
-      <section className="hero">
-        <p className="kicker">OPEN POSITIONS</p>
-        <strong className={tone(openPnl)}>{signedUsd(openPnl)}</strong>
-        <span>
-          Total open PnL · {snap.positions.length} open · exposure {usd(snap.exposureUsd ?? 0)}
+      <HeroCard snap={snap} openPnl={openPnl} />
+
+      <div className="section-head">
+        <h2>Open positions</h2>
+        <span className={tone(openPnl)}>
+          {signedUsd(openPnl)} · {snap.positions.length} open · exposure {usd(snap.exposureUsd ?? 0)}
           {snap.prefs.maxExposurePct != null && snap.prefs.maxExposurePct < 1 ? ` of ${(snap.prefs.maxExposurePct * 100).toFixed(0)}% cap` : ""}
         </span>
-      </section>
+      </div>
 
       {snap.positions.length === 0 ? (
         <p className="empty">Flat. A name has to clear every hard filter and score at least {snap.rules.analystMinScore.toFixed(2)}. Or add one yourself on Add coin.</p>
       ) : (
         <div className="positions">
           {snap.positions.map((pos, index) => (
-            <PositionCard key={`${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} />
+            <PositionCard key={`${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} />
           ))}
         </div>
       )}
-
-      <div className="metric-row">
-        <Metric label="Equity" value={usd(snap.equityUsd)} hint="cash + marks" />
-        <Metric label="Cash" value={usd(snap.cashUsd)} hint={`cap ${usd(snap.positionCapUsd)} / buy`} />
-        <Metric label="Session" value={signedUsd(snap.sessionPnlUsd)} hint={signedPct(snap.sessionPnlPct)} tone={tone(snap.sessionPnlUsd)} />
-      </div>
 
       <section className="card chart-card">
         <header>
@@ -155,25 +154,27 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
   );
 }
 
-function PositionCard({ pos, actions, busy }: { pos: PositionView; actions: DeskActions; busy: string | null }) {
+function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionView; actions: DeskActions; busy: string | null; armPct: number; trailOn: boolean }) {
   const tag = pos.tag ?? (pos.entry === "manual" ? "manual" : null);
   const valueUsd = pos.marketValueUsd;
   const stopDist = pos.markPrice > 0 ? pos.stopPrice / pos.markPrice - 1 : null;
   return (
-    <article className={`pos-card ${pos.pnlUsd >= 0 ? "up" : "down"}`}>
+    <article className={`pos-card ${pos.pnlUsd >= 0 ? "is-up" : "is-down"}`}>
       <header>
-        <div>
+        <CoinAvatar symbol={pos.symbol} mint={pos.mint} tone={tone(pos.pnlUsd)} />
+        <div className="pos-title">
           <h3>{pos.symbol}</h3>
           <p className="sub">
             {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
             {pos.lpUnlocked ? " · LP unlocked" : ""} · mark {markAge(pos.markAgeMs)}
           </p>
         </div>
-        <div className={`pnl ${pos.pnlUsd >= 0 ? "up" : "down"}`}>
-          <strong>{signedUsd(pos.pnlUsd)}</strong>
-          <span>{signedPct(pos.pnlPct)}</span>
+        <div className="pnl">
+          <PnlChip usd={pos.pnlUsd} pct={pos.pnlPct} />
+          <span className="pos-value">{usd(valueUsd)}</span>
         </div>
       </header>
+      <StopTrailBar stop={pos.stopPrice} entry={pos.entryPrice} mark={pos.markPrice} peak={pos.peakPrice} armPct={armPct} trailOn={trailOn} />
       <dl>
         <div>
           <dt>Value</dt>
@@ -206,16 +207,9 @@ function PositionCard({ pos, actions, busy }: { pos: PositionView; actions: Desk
           </dd>
         </div>
       </dl>
-      <div className="links">
-        {chartLinks(pos.mint).map((link) => (
-          <a key={link.label} className="ghost" href={link.href} target="_blank" rel="noopener noreferrer">
-            {link.label}
-          </a>
-        ))}
-      </div>
       <div className="sells" role="group" aria-label={`Sell ${pos.symbol}`}>
         {([25, 50] as const).map((pct) => (
-          <button key={pct} className="ghost" type="button" disabled={busy === `${pos.mint}:${pct}`} onClick={() => void actions.sell(pos.mint, pos.symbol, pct)}>
+          <button key={pct} className="tonal" type="button" disabled={busy === `${pos.mint}:${pct}`} onClick={() => void actions.sell(pos.mint, pos.symbol, pct)}>
             Sell {pct}%
           </button>
         ))}
@@ -223,7 +217,55 @@ function PositionCard({ pos, actions, busy }: { pos: PositionView; actions: Desk
           {busy === `${pos.mint}:100` ? "Closing" : "Close"} 100%
         </button>
       </div>
+      <div className="links">
+        {chartLinks(pos.mint).map((link) => (
+          <a key={link.label} className="ghost" href={link.href} target="_blank" rel="noopener noreferrer">
+            {link.label}
+          </a>
+        ))}
+      </div>
     </article>
+  );
+}
+
+function HeroCard({ snap, openPnl }: { snap: DeskSnapshot; openPnl: number }) {
+  const base = dayBase(snap.equity, snap.startingBalanceUsd);
+  const day = snap.equityUsd - base;
+  const dayPct = base > 0 ? day / base : null;
+  return (
+    <section className="hero" aria-label="Book">
+      <div className="hero-top">
+        <span className="kicker">Marked equity</span>
+        <span className={`mode-chip ${snap.mode}`}>{snap.mode === "live" ? "LIVE" : "PAPER"}</span>
+      </div>
+      <strong className="hero-value">{usd(snap.equityUsd)}</strong>
+      <div className="hero-chips">
+        <span className={`hchip ${tone(day)}`}>
+          Today {signedUsd(day)} {dayPct != null ? `· ${signedPct(dayPct)}` : ""}
+        </span>
+        <span className={`hchip ${tone(snap.sessionPnlUsd)}`}>
+          Session {signedUsd(snap.sessionPnlUsd)} · {signedPct(snap.sessionPnlPct)}
+        </span>
+      </div>
+      <Sparkline points={snap.equity} baseline={snap.startingBalanceUsd} />
+      <div className="hero-stats">
+        <div>
+          <label>Cash</label>
+          <b>{usd(snap.cashUsd)}</b>
+          <em>book {usd(snap.startingBalanceUsd)}</em>
+        </div>
+        <div>
+          <label>Open</label>
+          <b>{snap.positions.length}</b>
+          <em className={tone(openPnl)}>{signedUsd(openPnl)}</em>
+        </div>
+        <div>
+          <label>Cap / buy</label>
+          <b>{usd(snap.positionCapUsd)}</b>
+          <em>exp. {usd(snap.exposureUsd ?? 0)}</em>
+        </div>
+      </div>
+    </section>
   );
 }
 
