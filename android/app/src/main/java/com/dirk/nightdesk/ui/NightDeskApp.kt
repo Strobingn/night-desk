@@ -94,8 +94,19 @@ fun NightDeskApp(desk: DeskRepository) {
     val live by desk.live.collectAsState()
     val error by desk.error.collectAsState()
     val notice by desk.notice.collectAsState()
+    val hardKill by desk.hardKillAsk.collectAsState()
+    val shared by desk.sharedCoin.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var addPrefill by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(shared) {
+        val coin = desk.consumeSharedCoin()
+        if (coin != null) {
+            addPrefill = coin to ((addPrefill?.second ?: 0) + 1)
+            tab = 2
+        }
+    }
 
     LaunchedEffect(Unit) {
         desk.boot()
@@ -105,11 +116,11 @@ fun NightDeskApp(desk: DeskRepository) {
         containerColor = Night,
         bottomBar = {
             NavigationBar(containerColor = Color(0xFF10140E)) {
-                listOf("Home", "Tape", "Recap", "Settings", "Link").forEachIndexed { index, label ->
+                listOf("Home", "Tape", "Add coin", "Recap", "Settings", "Link").forEachIndexed { index, label ->
                     NavigationBarItem(
                         selected = tab == index,
                         onClick = { tab = index },
-                        label = { Text(label) },
+                        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
                         icon = {},
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = Lime,
@@ -145,6 +156,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 0 -> BookScreen(
                     snap,
                     onClose = { mint -> scope.launch { desk.closePosition(mint) } },
+                    onSell = { mint, percent -> scope.launch { desk.sellPosition(mint, percent) } },
                     onReset = { scope.launch { desk.resetPaperBook() } },
                     onReady = { ready -> scope.launch { desk.setOperatorReady(ready) } },
                     onBuy = { mint, ignore -> scope.launch { desk.buyPosition(mint, null, ignore) } }
@@ -155,11 +167,34 @@ fun NightDeskApp(desk: DeskRepository) {
                     cooldowns = snap?.cooldowns.orEmpty(),
                     onBuy = { mint, size, ignore -> scope.launch { desk.buyPosition(mint, size, ignore) } }
                 )
-                2 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
-                3 -> SettingsScreen(snap) { patch -> scope.launch { desk.saveSettings(patch) } }
+                2 -> AddCoinScreen(desk, snap, addPrefill)
+                3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
+                4 -> SettingsScreen(snap) { patch -> scope.launch { desk.saveSettings(patch) } }
                 else -> LinkScreen(desk)
             }
         }
+    }
+    val ask = hardKill
+    if (ask != null) {
+        AlertDialog(
+            onDismissRequest = { desk.dismissHardKill() },
+            containerColor = Panel,
+            titleContentColor = Ink,
+            textContentColor = Ink,
+            title = { Text("Buy ${ask.symbol} anyway?") },
+            text = {
+                Text(ask.message + "\n\nPaper fill only. Slippage cap, pool depth, cash and the hard stop still apply.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    desk.dismissHardKill()
+                    scope.launch { desk.buyPosition(ask.mint, ask.sizeUsd, ignoreCooldown = true, confirmHardKill = true, confirmSize = ask.confirmSize, symbol = ask.symbol) }
+                }) { Text("Buy anyway", color = Coral) }
+            },
+            dismissButton = {
+                TextButton(onClick = { desk.dismissHardKill() }) { Text("Cancel", color = Dim) }
+            }
+        )
     }
 }
 
@@ -182,6 +217,7 @@ private fun Header(status: String, live: Boolean, mode: String) {
 private fun BookScreen(
     snap: DeskSnapshot?,
     onClose: (String) -> Unit,
+    onSell: (String, Int) -> Unit,
     onReset: () -> Unit,
     onReady: (Boolean) -> Unit,
     onBuy: (String, Boolean) -> Unit
@@ -189,6 +225,14 @@ private fun BookScreen(
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { LastCrashCard() }
+        if (!snap?.lastClientCrash.isNullOrBlank()) {
+            item {
+                Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
+                    Text("LAST CRASH ON THE DESK", color = Coral, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    Text(snap?.lastClientCrash.orEmpty().take(400), color = Dim, fontSize = 12.sp)
+                }
+            }
+        }
         item {
             Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
                 Text("OPEN POSITIONS", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
@@ -212,7 +256,7 @@ private fun BookScreen(
             }
         } else {
             itemsIndexed(snap.positions, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
-                OpenPositionCard(pos, onClose)
+                OpenPositionCard(pos, onClose, onSell)
             }
         }
         item {
@@ -232,7 +276,7 @@ private fun BookScreen(
         item { LiveReadyCard(snap?.readiness, onReady) }
         item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
         if (snap?.mode != "live") {
-            item { ResetCard(onReset) }
+            item { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
         }
         item { Text("Recent trades", style = androidx.compose.material3.MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp)) }
         val recent = snap?.closed.orEmpty().takeLast(20).asReversed()
@@ -394,11 +438,12 @@ private fun AdvisorCard(notes: List<AdviceNote>, cooldowns: List<MintCooldown>, 
 }
 
 @Composable
-private fun ResetCard(onReset: () -> Unit) {
+private fun ResetCard(amountUsd: Double, onReset: () -> Unit) {
+    val amount = "$" + "%,.0f".format(Locale.US, amountUsd)
     var ask by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
         Text("PAPER BOOK", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-        Text("Reset drops open positions and starts cash at $100.", color = Ink, fontSize = 13.sp)
+        Text("Reset drops open positions and starts cash at $amount.", color = Ink, fontSize = 13.sp)
         TextButton(onClick = { ask = true }) { Text("Reset book", color = Amber) }
     }
     if (ask) {
@@ -409,13 +454,13 @@ private fun ResetCard(onReset: () -> Unit) {
             textContentColor = Ink,
             title = { Text("Reset paper book?") },
             text = {
-                Text("Open positions are dropped and session PnL starts over at $100. No order is sent. The log, advisor memory, and volume floor stay. Live trading stays off.")
+                Text("Open positions are dropped and session PnL starts over at $amount. No order is sent. The log, advisor memory, and volume floor stay. Live trading stays off.")
             },
             confirmButton = {
                 TextButton(onClick = {
                     ask = false
                     onReset()
-                }) { Text("Reset to $100", color = Amber) }
+                }) { Text("Reset to $amount", color = Amber) }
             },
             dismissButton = {
                 TextButton(onClick = { ask = false }) { Text("Keep book", color = Lime) }
@@ -596,10 +641,11 @@ private fun VolumeCard(current: Double, onSave: (Map<String, Any?>) -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit) {
+private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit, onSell: (String, Int) -> Unit = { mint, _ -> onClose(mint) }) {
     val room = stopRoom(pos)
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
+    var sellAsk by remember { mutableStateOf<Int?>(null) }
     Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(pos.symbol, style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
@@ -607,6 +653,10 @@ private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit) {
                 Text(signed(pos.pnlUsd), color = if (up) Mint else Coral, fontSize = 28.sp, fontFamily = FontFamily.Monospace)
                 Text(pct(pos.pnlPct), color = if (up) Mint else Coral, fontSize = 18.sp, fontFamily = FontFamily.Monospace)
             }
+        }
+        val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
+        if (tag != null) {
+            Text(tag.uppercase(), color = Amber, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.sp)
         }
         Text("Entry ${px(pos.entryPrice)}   ·   Mark ${px(pos.markPrice)}", color = Ink, fontSize = 15.sp, modifier = Modifier.padding(top = 6.dp))
         Text("Held ${heldFor(pos.openedAt)}   ·   Size ${money(pos.costUsd)}", color = Dim, fontSize = 14.sp)
@@ -619,13 +669,33 @@ private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit) {
         )
         Text("${num(pos.stopDistancePct, "%.1f")}% under the mark before ${fmtPx(pos.stopPrice)}", color = Ink, fontSize = 13.sp)
         FlowRow(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = { onClose(pos.mint) }) { Text("Sell", color = Coral) }
+            TextButton(onClick = { sellAsk = 25 }) { Text("Sell 25%", color = Amber) }
+            TextButton(onClick = { sellAsk = 50 }) { Text("Sell 50%", color = Amber) }
+            TextButton(onClick = { sellAsk = 100 }) { Text("Sell", color = Coral) }
             chartLinks(pos.mint).forEach { (label, url) ->
                 TextButton(onClick = {
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                 }) { Text(label, color = Sky) }
             }
         }
+    }
+    val pending = sellAsk
+    if (pending != null) {
+        AlertDialog(
+            onDismissRequest = { sellAsk = null },
+            containerColor = Panel,
+            titleContentColor = Ink,
+            textContentColor = Ink,
+            title = { Text(if (pending >= 100) "Sell all of ${pos.symbol}?" else "Sell $pending% of ${pos.symbol}?") },
+            text = { Text("Paper fill at the mark against the same pool model as a stop. The hard stop keeps guarding what is left.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    sellAsk = null
+                    if (pending >= 100) onClose(pos.mint) else onSell(pos.mint, pending)
+                }) { Text("Sell", color = Coral) }
+            },
+            dismissButton = { TextButton(onClick = { sellAsk = null }) { Text("Cancel", color = Dim) } }
+        )
     }
 }
 

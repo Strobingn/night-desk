@@ -24,9 +24,11 @@ class ForegroundServicePolicyTest {
         assertTrue(manifest.contains("android.permission.FOREGROUND_SERVICE_SPECIAL_USE"))
         assertTrue(manifest.contains("android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"))
         assertTrue(manifest.contains("Live trading desk connection for the paper book and price feed."))
+        assertTrue(manifest.contains("android.intent.action.SEND"))
+        assertTrue(manifest.contains("android:mimeType=\"text/plain\""))
         val gradle = readProjectFile("build.gradle.kts")
-        assertTrue(gradle.contains("versionCode = 11"))
-        assertTrue(gradle.contains("versionName = \"v11\""))
+        assertTrue(gradle.contains("versionCode = 12"))
+        assertTrue(gradle.contains("versionName = \"v12\""))
     }
 
     @Test

@@ -51,38 +51,9 @@ export function startServer(
             error: unknown.length ? `Unknown setting: ${unknown.join(", ")}.` : "No settings to save."
           });
         }
-        const result = desk.updateSettings({
-          ...( "minVolume1hUsd" in record ? { minVolume1hUsd: record.minVolume1hUsd } : {}),
-          ...( "analystMinScore" in record ? { analystMinScore: record.analystMinScore } : {}),
-          ...( "maxTop10Pct" in record ? { maxTop10Pct: record.maxTop10Pct } : {}),
-          ...( "maxPositionPct" in record ? { maxPositionPct: record.maxPositionPct } : {}),
-          ...( "defaultBuyUsd" in record ? { defaultBuyUsd: record.defaultBuyUsd } : {}),
-          ...( "maxOpenPositions" in record ? { maxOpenPositions: record.maxOpenPositions } : {}),
-          ...( "allowUnlockedLp" in record ? { allowUnlockedLp: record.allowUnlockedLp } : {}),
-          ...( "maxEntrySlippage" in record ? { maxEntrySlippage: record.maxEntrySlippage } : {}),
-          ...( "minLiquidityUsd" in record ? { minLiquidityUsd: record.minLiquidityUsd } : {}),
-          ...( "minTokenAgeMin" in record ? { minTokenAgeMin: record.minTokenAgeMin } : {}),
-          ...( "maxTokenAgeMin" in record ? { maxTokenAgeMin: record.maxTokenAgeMin } : {}),
-          ...( "minHolderCount" in record ? { minHolderCount: record.minHolderCount } : {}),
-          ...( "maxDevHoldingPct" in record ? { maxDevHoldingPct: record.maxDevHoldingPct } : {}),
-          ...( "maxTradesPerHour" in record ? { maxTradesPerHour: record.maxTradesPerHour } : {}),
-          ...( "dailyMaxLossUsd" in record ? { dailyMaxLossUsd: record.dailyMaxLossUsd } : {}),
-          ...( "cooldownHours" in record ? { cooldownHours: record.cooldownHours } : {}),
-          ...( "stopLossPct" in record ? { stopLossPct: record.stopLossPct } : {}),
-          ...( "trailTakeProfit" in record ? { trailTakeProfit: record.trailTakeProfit } : {}),
-          ...( "trailArmPct" in record ? { trailArmPct: record.trailArmPct } : {}),
-          ...( "trailGapPct" in record ? { trailGapPct: record.trailGapPct } : {}),
-          ...( "autoBuy" in record ? { autoBuy: record.autoBuy } : {}),
-          ...( "scoutDexscreener" in record ? { scoutDexscreener: record.scoutDexscreener } : {}),
-          ...( "scoutGecko" in record ? { scoutGecko: record.scoutGecko } : {}),
-          ...( "scoutJupiter" in record ? { scoutJupiter: record.scoutJupiter } : {}),
-          ...( "scoutDexpaprika" in record ? { scoutDexpaprika: record.scoutDexpaprika } : {}),
-          ...( "scoutBitquery" in record ? { scoutBitquery: record.scoutBitquery } : {}),
-          ...( "notifyNearMiss" in record ? { notifyNearMiss: record.notifyNearMiss } : {}),
-          ...( "notifyFills" in record ? { notifyFills: record.notifyFills } : {}),
-          ...( "notifyStops" in record ? { notifyStops: record.notifyStops } : {}),
-          ...( "pnlAlertPct" in record ? { pnlAlertPct: record.pnlAlertPct } : {})
-        });
+        const patch: Record<string, unknown> = {};
+        for (const key of keys) patch[key] = record[key];
+        const result = desk.updateSettings(patch);
         if (!result.ok) return json(res, 400, result);
         return json(res, 200, { ok: true, ...result.settings, settings: result.settings });
       }
@@ -106,7 +77,11 @@ export function startServer(
           });
         }
         const ignoreCooldown = record.ignoreCooldown === true;
-        const result = await desk.manualBuy(mint, sizeUsd, { ignoreCooldown });
+        const result = await desk.manualBuy(mint, sizeUsd, {
+          ignoreCooldown,
+          confirmHardKill: record.confirmHardKill === true,
+          confirmSize: record.confirmSize === true
+        });
         return json(res, result.ok ? 200 : 400, result);
       }
       if (url.pathname === "/api/live/ready" && req.method === "GET") return json(res, 200, desk.readiness());
@@ -124,13 +99,37 @@ export function startServer(
         const result = desk.setOperatorReady(record.operatorReady);
         return json(res, result.ok ? 200 : 400, result);
       }
-      if (url.pathname === "/api/positions/close" && req.method === "POST") {
+      if ((url.pathname === "/api/positions/close" || url.pathname === "/api/positions/sell") && req.method === "POST") {
         const body = await readJson(req);
-        const mint =
-          (body && typeof body === "object" && "mint" in body && typeof body.mint === "string" ? body.mint : "") ||
-          url.searchParams.get("mint") ||
-          "";
-        const result = await desk.closePosition(mint.trim());
+        const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+        const mint = (typeof record.mint === "string" ? record.mint : "") || url.searchParams.get("mint") || "";
+        const fraction = parseSellFraction(record, url);
+        if (fraction === "bad") {
+          return json(res, 400, { ok: false, error: "Sell size must be 25, 50 or 100 percent (or a fraction above 0 and at most 1)." });
+        }
+        const result = await desk.closePosition(mint.trim(), fraction);
+        return json(res, result.ok ? 200 : result.error.startsWith("No open position") ? 404 : 400, result);
+      }
+      if (url.pathname === "/api/lookup" && req.method === "GET") {
+        const q = url.searchParams.get("q") ?? "";
+        const result = await desk.lookupCoin(q);
+        return json(res, result.ok ? 200 : result.code === "PRICE_UNAVAILABLE" ? 422 : 400, result);
+      }
+      if (url.pathname === "/api/watchlist" && req.method === "GET") {
+        return json(res, 200, { ok: true, watchlist: desk.listWatchlist() });
+      }
+      if (url.pathname === "/api/watchlist" && req.method === "POST") {
+        const body = await readJson(req);
+        const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+        const q = typeof record.q === "string" ? record.q : typeof record.mint === "string" ? record.mint : "";
+        const result = await desk.addToWatchlist(q);
+        return json(res, result.ok ? 200 : result.code === "PRICE_UNAVAILABLE" ? 422 : 400, result);
+      }
+      if ((url.pathname === "/api/watchlist/remove" && req.method === "POST") || (url.pathname === "/api/watchlist" && req.method === "DELETE")) {
+        const body = req.method === "POST" ? await readJson(req) : {};
+        const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+        const mint = (typeof record.mint === "string" ? record.mint : "") || url.searchParams.get("mint") || "";
+        const result = desk.removeFromWatchlist(mint);
         return json(res, result.ok ? 200 : 404, result);
       }
       if (url.pathname === "/api/recap") {
@@ -194,6 +193,7 @@ export function startServer(
   };
   desk.bus.on("log.event", () => push());
   desk.bus.on("market.tick", () => push());
+  desk.bus.on("desk.changed", () => push());
 
   server.listen(port, host, () => {
     const bound = server.address();
@@ -229,7 +229,7 @@ const BLOCKED_SETTINGS = new Set([
   "keypair"
 ]);
 
-const ALLOWED_SETTINGS = new Set([
+export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "minVolume1hUsd",
   "analystMinScore",
   "maxTop10Pct",
@@ -259,8 +259,22 @@ const ALLOWED_SETTINGS = new Set([
   "notifyNearMiss",
   "notifyFills",
   "notifyStops",
-  "pnlAlertPct"
+  "pnlAlertPct",
+  "positionSizeUsd",
+  "maxExposurePct",
+  "paperResetUsd"
 ]);
+
+/** 25, 50, 100 (percent) or 0.25, 0.5, 1 (fraction). Omitted = 100%. */
+export function parseSellFraction(record: Record<string, unknown>, url?: URL): number | "bad" {
+  const raw = "fraction" in record ? record.fraction : "percent" in record ? record.percent : url?.searchParams.get("percent") ?? url?.searchParams.get("fraction") ?? null;
+  if (raw == null || raw === "") return 1;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(n) || n <= 0) return "bad";
+  const fraction = n > 1 ? n / 100 : n;
+  if (!(fraction > 0) || fraction > 1) return "bad";
+  return fraction;
+}
 
 function parseSizeUsd(record: Record<string, unknown>): number | undefined | "bad" {
   if (!("sizeUsd" in record) || record.sizeUsd == null || record.sizeUsd === "") return undefined;

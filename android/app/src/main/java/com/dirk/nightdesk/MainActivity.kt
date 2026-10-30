@@ -26,11 +26,25 @@ class MainActivity : ComponentActivity() {
         DeskConnectionService.start(this)
         askForNotifications()
         askToIgnoreBatteryOptimizations()
+        takeShare(intent)
         setContent {
             NightTheme {
                 NightDeskApp(desk)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        takeShare(intent)
+    }
+
+    /** v12 share target. A link or mint shared into the app opens Add coin prefilled. Nothing is bought. */
+    private fun takeShare(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        if (intent.type?.startsWith("text/") != true) return
+        desk.offerSharedText(intent.getStringExtra(Intent.EXTRA_TEXT) ?: intent.getStringExtra(Intent.EXTRA_SUBJECT))
     }
 
     override fun onStart() {

@@ -1,4 +1,4 @@
-import { HARD_RULES, clampEntrySlippage } from "../rules.js";
+import { HARD_RULES, SIZING_BAND, clampEntrySlippage } from "../rules.js";
 import type { ResolvedRules } from "../rules.js";
 import type { CandidateToken, Rejection } from "../types.js";
 import { entryAllowed } from "./risk.js";
@@ -30,6 +30,14 @@ export function planOrder(input: {
   now: number;
   /** Set only for a manual buy the operator confirmed past the hard-stop ban. */
   ignoreCooldown?: boolean;
+  /**
+   * Highest share of equity this order may use. Defaults to the 8% hard cap, so rules widened
+   * by hand still size at 8%. The desk passes the saved cap (≤ 50%) or, for one confirmed
+   * manual buy, up to 100%. Never above SIZING_BAND.manualMaxPct.
+   */
+  ceilingPct?: number;
+  /** Dollars of new exposure still allowed under the total-exposure cap. Omitted = no extra limit. */
+  exposureRoomUsd?: number;
 }): OrderPlan | OrderRefusal {
   const gate = entryAllowed({
     hasPosition: input.hasPosition,
@@ -46,8 +54,24 @@ export function planOrder(input: {
     };
   }
 
-  const pct = Math.min(input.rules.maxPositionPct, HARD_RULES.maxPositionPct);
-  const capUsd = floorUsd(input.equityUsd * pct);
+  const pct =
+    input.ceilingPct != null
+      ? sizingCeiling(input.ceilingPct)
+      : Math.min(input.rules.maxPositionPct, HARD_RULES.maxPositionPct);
+  if (!(pct > 0) || !Number.isFinite(input.equityUsd)) {
+    return { ok: false, reason: { code: "POSITION_CAP", message: "Position cap is not a usable percent. Order refused." } };
+  }
+  let capUsd = floorUsd(input.equityUsd * pct);
+  if (input.exposureRoomUsd != null) {
+    const room = Number.isFinite(input.exposureRoomUsd) ? floorUsd(Math.max(0, input.exposureRoomUsd)) : 0;
+    if (!(room >= 0.01)) {
+      return {
+        ok: false,
+        reason: { code: "EXPOSURE_CAP", message: "Total exposure is already at the max-exposure cap. Close or trim a position first." }
+      };
+    }
+    capUsd = Math.min(capUsd, room);
+  }
   const cashUsd = floorUsd(Math.max(0, input.cashUsd));
   if (!(capUsd > 0) || !(cashUsd > 0)) {
     return {
@@ -72,6 +96,12 @@ export function planOrder(input: {
     };
   }
   return { ok: true, sizeUsd, capUsd };
+}
+
+/** Order ceiling: omitted = 8% hard cap; otherwise between 1% and SIZING_BAND.manualMaxPct. */
+export function sizingCeiling(ceilingPct?: number): number {
+  if (ceilingPct == null || !Number.isFinite(ceilingPct) || !(ceilingPct > 0)) return HARD_RULES.maxPositionPct;
+  return Math.min(SIZING_BAND.manualMaxPct, Math.max(SIZING_BAND.minPct, ceilingPct));
 }
 
 /**
@@ -287,4 +317,49 @@ export function slippageFor(notionalUsd: number, liquidityUsd: number, side: "bu
   const share = notionalUsd / reserve;
   const impact = side === "buy" ? share : share / (1 + share);
   return HARD_RULES.baseSlippage + impact;
+}
+
+/**
+ * Largest buy, in whole cents, that this pool takes under the entry slippage cap and the
+ * full-exit depth check. Unknown liquidity is 0. Used for the Add coin slider and messages.
+ */
+export function maxSizeForPool(liquidityUsd: number, maxEntrySlippage: number = HARD_RULES.maxEntrySlippage): number {
+  if (!(liquidityUsd > 0) || !Number.isFinite(liquidityUsd)) return 0;
+  const cap = clampEntrySlippage(maxEntrySlippage);
+  const reserve = liquidityUsd * HARD_RULES.poolSideShare;
+  const entryRoom = cap - HARD_RULES.baseSlippage;
+  const exitRoom = cap + HARD_RULES.exitImpactSlack - HARD_RULES.baseSlippage;
+  if (!(entryRoom > 0) || !(exitRoom > 0) || exitRoom >= 1) return 0;
+  const byEntry = entryRoom * reserve;
+  const byExit = (exitRoom * reserve) / (1 - exitRoom);
+  const raw = Math.min(byEntry, byExit);
+  // Step back a cent so float noise cannot put the edge one cent over a cap.
+  return Math.max(0, floorUsd(raw) - 0.01);
+}
+
+export interface PositionSplit {
+  ok: true;
+  fraction: number;
+  sellQty: number;
+  soldCostUsd: number;
+  remainQty: number;
+  remainCostUsd: number;
+}
+
+/**
+ * Partial sell math. Qty and cost basis are cut by the same fraction, so the average entry
+ * price of the remainder is unchanged. Cost is split in cents and the two halves always add
+ * back to the original cost. Fail closed on anything not finite and positive.
+ */
+export function splitPosition(qty: number, costUsd: number, fraction: number): PositionSplit | { ok: false; error: string } {
+  if (!(qty > 0) || !Number.isFinite(qty)) return { ok: false, error: "Position quantity is not usable." };
+  if (!(costUsd >= 0) || !Number.isFinite(costUsd)) return { ok: false, error: "Position cost is not usable." };
+  if (!(fraction > 0) || !Number.isFinite(fraction) || fraction > 1) return { ok: false, error: "Sell fraction must be above 0 and at most 1." };
+  if (fraction === 1) return { ok: true, fraction, sellQty: qty, soldCostUsd: costUsd, remainQty: 0, remainCostUsd: 0 };
+  const sellQty = qty * fraction;
+  const remainQty = qty - sellQty;
+  const soldCostUsd = roundUsd(costUsd * fraction);
+  const remainCostUsd = roundUsd(costUsd - soldCostUsd);
+  if (!(sellQty > 0) || !(remainQty > 0)) return { ok: false, error: "Sell fraction rounds to nothing." };
+  return { ok: true, fraction, sellQty, soldCostUsd, remainQty, remainCostUsd };
 }

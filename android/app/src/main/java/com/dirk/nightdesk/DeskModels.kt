@@ -27,7 +27,9 @@ data class PositionRow(
     val markAgeMs: Long,
     val costUsd: Double = 0.0,
     val marketValueUsd: Double = 0.0,
-    val openedAt: Long = 0L
+    val openedAt: Long = 0L,
+    /** v12. "manual · pump.fun" etc. Null for auto buys. */
+    val tag: String? = null
 ) {
     val stopDistancePct: Double
         get() {
@@ -69,6 +71,143 @@ data class ClosedTradeRow(
     val exitPrice: Double,
     val pnlUsd: Double
 )
+
+/** v12 watchlist row from /api/state or /api/watchlist. */
+data class WatchRow(
+    val mint: String,
+    val symbol: String,
+    val platform: String,
+    val addedAt: Long,
+    val addedPriceUsd: Double,
+    val lastPriceUsd: Double?,
+    val changePct: Double?,
+    val dexscreenerUrl: String
+)
+
+data class LookupCheck(val code: String, val pass: Boolean, val message: String)
+
+/** v12 GET /api/lookup. ok=false carries error and code (LOOKUP_FAILED or PRICE_UNAVAILABLE). */
+data class CoinLookup(
+    val ok: Boolean,
+    val error: String? = null,
+    val code: String? = null,
+    val mint: String = "",
+    val symbol: String = "",
+    val name: String = "",
+    val platform: String = "",
+    val tag: String = "manual",
+    val priceUsd: Double = 0.0,
+    val liquidityUsd: Double = 0.0,
+    val volume1hUsd: Double = 0.0,
+    val marketCapUsd: Double? = null,
+    val ageSeconds: Double = 0.0,
+    val dexscreenerUrl: String = "",
+    val priceSource: String = "dexscreener",
+    val checks: List<LookupCheck> = emptyList(),
+    val filterPass: Boolean = false,
+    val hardKills: List<LookupCheck> = emptyList(),
+    val analystScore: Double = 0.0,
+    val analystLine: Double = 0.0,
+    val analystPass: Boolean = false,
+    val poolMaxUsd: Double = 0.0,
+    val positionCapUsd: Double = 0.0,
+    val manualMaxUsd: Double = 0.0,
+    val cashUsd: Double = 0.0,
+    val maxEntrySlippage: Double = 0.03,
+    val held: Boolean = false,
+    val watching: Boolean = false,
+    val canBuy: Boolean = false,
+    val buyBlockedReason: String? = null
+) {
+    /** Largest size the slider offers: manual max (100% with confirm) and cash, never below $1. */
+    val sliderMaxUsd: Double
+        get() = kotlin.math.floor(kotlin.math.min(manualMaxUsd, cashUsd).coerceAtLeast(1.0))
+}
+
+fun parseLookup(raw: String): CoinLookup {
+    val root = try {
+        JSONObject(raw)
+    } catch (_: Throwable) {
+        return CoinLookup(ok = false, error = "Lookup failed: the desk sent a bad reply.", code = "LOOKUP_FAILED")
+    }
+    if (!root.optBoolean("ok", false)) {
+        return CoinLookup(
+            ok = false,
+            error = root.optText("error", "Lookup failed. No buy without a reliable price."),
+            code = root.optText("code", "LOOKUP_FAILED")
+        )
+    }
+    fun checks(key: String): List<LookupCheck> = buildList {
+        val rows = root.optJSONArray(key) ?: return@buildList
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            add(LookupCheck(row.optText("code"), row.optBoolean("pass", false), row.optText("message")))
+        }
+    }
+    val analyst = root.optJSONObject("analyst")
+    val price = root.optFinite("priceUsd")
+    if (!(price > 0)) return CoinLookup(ok = false, error = "No reliable price for that coin. No buy.", code = "PRICE_UNAVAILABLE")
+    return CoinLookup(
+        ok = true,
+        mint = root.optText("mint"),
+        symbol = root.optText("symbol", "—"),
+        name = root.optText("name"),
+        platform = root.optText("platform"),
+        tag = root.optText("tag", "manual"),
+        priceUsd = price,
+        liquidityUsd = root.optFinite("liquidityUsd"),
+        volume1hUsd = root.optFinite("volume1hUsd"),
+        marketCapUsd = if (root.has("marketCapUsd") && !root.isNull("marketCapUsd")) root.optFinite("marketCapUsd") else null,
+        ageSeconds = root.optFinite("ageSeconds"),
+        dexscreenerUrl = root.optText("dexscreenerUrl"),
+        priceSource = root.optText("priceSource", "dexscreener"),
+        checks = checks("checks"),
+        filterPass = root.optBoolean("filterPass", false),
+        hardKills = checks("hardKills").map { it.copy(pass = false) },
+        analystScore = analyst?.optFinite("score") ?: 0.0,
+        analystLine = analyst?.optFinite("line") ?: 0.0,
+        analystPass = analyst?.optBoolean("pass", false) ?: false,
+        poolMaxUsd = root.optFinite("poolMaxUsd"),
+        positionCapUsd = root.optFinite("positionCapUsd"),
+        manualMaxUsd = root.optFinite("manualMaxUsd"),
+        cashUsd = root.optFinite("cashUsd"),
+        maxEntrySlippage = root.optFinite("maxEntrySlippage", 0.03),
+        held = root.optBoolean("held", false),
+        watching = root.optBoolean("watching", false),
+        canBuy = root.optBoolean("canBuy", false),
+        buyBlockedReason = root.optText("buyBlockedReason").ifBlank { null }
+    )
+}
+
+fun parseWatchRows(rows: org.json.JSONArray?): List<WatchRow> = buildList {
+    if (rows == null) return@buildList
+    val seen = HashSet<String>()
+    for (i in 0 until rows.length()) {
+        val row = rows.optJSONObject(i) ?: continue
+        val mint = row.optText("mint")
+        if (mint.isBlank() || !seen.add(mint)) continue
+        add(
+            WatchRow(
+                mint = mint,
+                symbol = row.optText("symbol", mint.take(4)),
+                platform = row.optText("platform", "mint"),
+                addedAt = row.optFinite("addedAt").toLong(),
+                addedPriceUsd = row.optFinite("addedPriceUsd"),
+                lastPriceUsd = if (row.has("lastPriceUsd") && !row.isNull("lastPriceUsd")) row.optFinite("lastPriceUsd") else null,
+                changePct = if (row.has("changePct") && !row.isNull("changePct")) row.optFinite("changePct") else null,
+                dexscreenerUrl = row.optText("dexscreenerUrl", "https://dexscreener.com/solana/$mint")
+            )
+        )
+    }
+}
+
+/** First Solana mint or supported link inside shared text (a share sheet often adds a title line). */
+fun extractSharedCoin(text: String?): String? {
+    if (text.isNullOrBlank()) return null
+    val url = Regex("""https?://\S+""").find(text)?.value?.trimEnd(')', '.', ',', '"', '\'')
+    if (url != null) return url
+    return Regex("""\b[1-9A-HJ-NP-Za-km-z]{32,44}\b""").find(text)?.value
+}
 
 data class MintCooldown(val mint: String, val until: Long, val minutesLeft: Int)
 
@@ -113,7 +252,15 @@ data class DeskSnapshot(
     val notifyNearMiss: Boolean = true,
     val notifyFills: Boolean = true,
     val notifyStops: Boolean = true,
-    val pnlAlertPct: Double = 0.0
+    val pnlAlertPct: Double = 0.0,
+    /** v12 sizing. null = size from the % cap. */
+    val positionSizeUsd: Double? = null,
+    val maxExposurePct: Double = 1.0,
+    val paperResetUsd: Double = 100.0,
+    val manualMaxUsd: Double = 0.0,
+    val exposureUsd: Double = 0.0,
+    val watchlist: List<WatchRow> = emptyList(),
+    val lastClientCrash: String? = null
 )
 
 /** Same sentence the web desk shows after a manual buy. */
@@ -285,7 +432,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
                         markAgeMs = row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
                         costUsd = row.optFinite("costUsd"),
                         marketValueUsd = row.optFinite("marketValueUsd"),
-                        openedAt = row.optFinite("openedAt").toLong()
+                        openedAt = row.optFinite("openedAt").toLong(),
+                        tag = row.optText("tag").ifBlank { null }
                     )
                 )
             }
@@ -410,6 +558,13 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         notifyNearMiss = prefs?.optBoolean("notifyNearMiss", true) ?: true,
         notifyFills = prefs?.optBoolean("notifyFills", true) ?: true,
         notifyStops = prefs?.optBoolean("notifyStops", true) ?: true,
-        pnlAlertPct = prefs?.optFinite("pnlAlertPct") ?: 0.0
+        pnlAlertPct = prefs?.optFinite("pnlAlertPct") ?: 0.0,
+        positionSizeUsd = prefs?.let { row -> if (!row.has("positionSizeUsd") || row.isNull("positionSizeUsd")) null else row.optFinite("positionSizeUsd", Double.NaN).takeIf { it.isFinite() && it > 0 } },
+        maxExposurePct = (prefs?.optFinite("maxExposurePct", 1.0) ?: 1.0).let { if (it > 1) it / 100 else it }.coerceIn(0.1, 1.0),
+        paperResetUsd = (prefs?.optFinite("paperResetUsd", 100.0) ?: 100.0).coerceIn(100.0, 10_000.0),
+        manualMaxUsd = data.optFinite("manualMaxUsd"),
+        exposureUsd = data.optFinite("exposureUsd"),
+        watchlist = parseWatchRows(data.optJSONArray("watchlist")),
+        lastClientCrash = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("brief").ifBlank { null } }
     )
 }

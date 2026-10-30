@@ -77,12 +77,61 @@ export function clampTop10(raw: number, fallback = HARD_RULES.maxTop10Pct): numb
   return Math.round(clamped * 1000) / 1000;
 }
 
-/** Accepts a fraction (0.08) or a percent (8). Never above the 8% hard cap. */
-export function clampPositionPct(raw: number, fallback = HARD_RULES.maxPositionPct): number {
+/**
+ * v12 sizing bands. The boot default and any env value stay at or under the 8% hard cap.
+ * Only a saved desk setting can raise the per-position cap, and never past autoMaxPct.
+ * A single manual buy the operator confirms may go to manualMaxPct of the book.
+ * Cash, the entry slippage cap and the pool-depth exit check still apply to every size.
+ */
+export const SIZING_BAND = {
+  /** Settings slider ceiling for the per-position cap (auto and unconfirmed manual buys). */
+  autoMaxPct: 0.5,
+  /** Ceiling for one manual buy the operator confirmed. */
+  manualMaxPct: 1,
+  minPct: 0.01,
+  /** Total open exposure as a share of equity. 1 = no extra limit beyond cash. */
+  exposureMinPct: 0.1,
+  exposureMaxPct: 1,
+  exposureDefaultPct: 1,
+  /** Fixed $ per position. null = size from the % cap. */
+  positionUsdMin: 1,
+  positionUsdMax: 100_000,
+  /** Paper reset amount. */
+  resetMinUsd: 100,
+  resetMaxUsd: 10_000
+} as const;
+
+/**
+ * Accepts a fraction (0.08) or a percent (8). A value of 1 or more is a percent, so 1 = 1%.
+ * The ceiling defaults to the 8% hard cap. Saved settings pass SIZING_BAND.autoMaxPct.
+ */
+export function clampPositionPct(raw: number, fallback: number = HARD_RULES.maxPositionPct, ceiling: number = HARD_RULES.maxPositionPct): number {
   if (!Number.isFinite(raw)) return fallback;
-  const fraction = raw > 1 ? raw / 100 : raw;
-  const clamped = Math.min(HARD_RULES.maxPositionPct, Math.max(0.01, fraction));
+  const fraction = raw >= 1 ? raw / 100 : raw;
+  const top = Math.min(SIZING_BAND.autoMaxPct, Math.max(SIZING_BAND.minPct, ceiling));
+  const clamped = Math.min(top, Math.max(SIZING_BAND.minPct, fraction));
   return Math.round(clamped * 1000) / 1000;
+}
+
+/** Total exposure cap. Fraction or percent (>= 1 is a percent). 10%–100%. */
+export function clampExposurePct(raw: number, fallback: number = SIZING_BAND.exposureDefaultPct): number {
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  const fraction = raw > 1 ? raw / 100 : raw;
+  const clamped = Math.min(SIZING_BAND.exposureMaxPct, Math.max(SIZING_BAND.exposureMinPct, fraction));
+  return Math.round(clamped * 1000) / 1000;
+}
+
+/** Fixed $ per position. Blank, zero or negative means "use the % cap". */
+export function clampPositionUsd(raw: number | null | undefined): number | null {
+  if (raw == null || !Number.isFinite(raw) || !(raw > 0)) return null;
+  const cents = Math.round(raw * 100) / 100;
+  return Math.min(SIZING_BAND.positionUsdMax, Math.max(SIZING_BAND.positionUsdMin, cents));
+}
+
+/** Paper reset amount, $100–$10,000. */
+export function clampResetUsd(raw: number, fallback: number = HARD_RULES.paperStartingUsd): number {
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.min(SIZING_BAND.resetMaxUsd, Math.max(SIZING_BAND.resetMinUsd, Math.round(raw)));
 }
 
 export function clampOpenPositions(raw: number, fallback = OPEN_POSITION_BAND.fallback): number {

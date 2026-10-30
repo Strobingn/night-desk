@@ -64,7 +64,11 @@ private data class Draft(
     val near: Boolean,
     val fills: Boolean,
     val stops: Boolean,
-    val alert: Float
+    val alert: Float,
+    val sizeUsd: Float,
+    val useSizeUsd: Boolean,
+    val exposure: Float,
+    val resetUsd: Float
 )
 
 private fun draftOf(snap: DeskSnapshot?): Draft {
@@ -100,7 +104,11 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         near = snap?.notifyNearMiss != false,
         fills = snap?.notifyFills != false,
         stops = snap?.notifyStops != false,
-        alert = (snap?.pnlAlertPct ?: 0.0).toFloat()
+        alert = (snap?.pnlAlertPct ?: 0.0).toFloat(),
+        sizeUsd = (snap?.positionSizeUsd ?: snap?.positionCapUsd ?: 8.0).toFloat().coerceIn(1f, 10_000f),
+        useSizeUsd = snap?.positionSizeUsd != null,
+        exposure = ((snap?.maxExposurePct ?: 1.0) * 100.0).toFloat().coerceIn(10f, 100f),
+        resetUsd = (snap?.paperResetUsd ?: 100.0).toFloat().coerceIn(100f, 10_000f)
     )
 }
 
@@ -145,14 +153,23 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
             Text("Off by default. Winners stay until you sell. Arm cannot be easier than 12%. Gap cannot be wider than 4%.", color = Dim, fontSize = 12.sp)
         }
         Group("Sizing") {
-            ExactSlider("Max position %", draft.position, 1f..8f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(position = it) }
+            ExactSlider("Max position % of book", draft.position, 1f..50f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(position = it) }
+            Text("Cap for auto buys and normal manual buys. A confirmed manual buy on Add coin may go up to 100%.", color = Dim, fontSize = 12.sp)
+            ToggleRow("Fixed $ per auto buy", draft.useSizeUsd) { draft = draft.copy(useSizeUsd = it) }
+            if (draft.useSizeUsd) {
+                ExactSlider("Position size $", draft.sizeUsd, 1f..10_000f, 1f, { "%.0f".format(it) }) { draft = draft.copy(sizeUsd = it) }
+            }
+            ExactSlider("Max total exposure %", draft.exposure, 10f..100f, 5f, { "%.0f".format(it) }) { draft = draft.copy(exposure = it) }
+            Text("Open positions as a share of equity. 100% = only cash limits it.", color = Dim, fontSize = 12.sp)
             ExactSlider("Entry slippage %", draft.slip, 0.5f..3f, 0.1f, { "%.1f".format(it) }) { draft = draft.copy(slip = it) }
-            ExactSlider("Manual buy $", draft.buy, 1f..500f, 1f, { "%.0f".format(it) }) { draft = draft.copy(buy = it, useCap = false) }
+            ExactSlider("Manual buy $", draft.buy, 1f..10_000f, 1f, { "%.0f".format(it) }) { draft = draft.copy(buy = it, useCap = false) }
             ToggleRow("Use the position cap instead", draft.useCap) { draft = draft.copy(useCap = it) }
             ExactSlider("Max open", draft.open, 1f..24f, 1f, { "%.0f".format(it) }) { draft = draft.copy(open = it) }
             ExactSlider("Max trades / hour", draft.rate, 0f..60f, 1f, { "%.0f".format(it) }) { draft = draft.copy(rate = it) }
             ToggleRow("Auto-buy", draft.autoBuy) { draft = draft.copy(autoBuy = it) }
             Text("0 trades per hour means no hourly cap. Auto-buy off still leaves manual Buy and Buy anyway.", color = Dim, fontSize = 12.sp)
+            ExactSlider("Paper reset amount $", draft.resetUsd, 100f..10_000f, 100f, { "%.0f".format(it) }) { draft = draft.copy(resetUsd = it) }
+            Text("Slippage and the pool-depth exit check still cap every size. A bigger ask than the pool takes is refused.", color = Dim, fontSize = 12.sp)
         }
         Group("Scout sources") {
             ToggleRow("Pump", true) {}
@@ -173,7 +190,7 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
-                    onSave(payload(draft))
+                    onSave(changedOnly(payload(saved), payload(draft)))
                     saved = draft
                 },
                 enabled = dirty && snap != null,
@@ -183,6 +200,10 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         }
     }
 }
+
+/** Only the keys Dirk changed are sent, so a save never rewrites a value he did not touch. */
+internal fun changedOnly(before: Map<String, Any?>, after: Map<String, Any?>): Map<String, Any?> =
+    after.filter { (key, value) -> before[key] != value }
 
 private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "minVolume1hUsd" to draft.volume.toDouble(),
@@ -214,7 +235,10 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "notifyNearMiss" to draft.near,
     "notifyFills" to draft.fills,
     "notifyStops" to draft.stops,
-    "pnlAlertPct" to draft.alert.toDouble()
+    "pnlAlertPct" to draft.alert.toDouble(),
+    "positionSizeUsd" to if (draft.useSizeUsd) draft.sizeUsd.toDouble() else null,
+    "maxExposurePct" to draft.exposure.toDouble(),
+    "paperResetUsd" to draft.resetUsd.toDouble()
 )
 
 @Composable

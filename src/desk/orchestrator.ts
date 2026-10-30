@@ -1,11 +1,16 @@
+import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
 import { DEFAULT_SCOUT_SOURCES, type ScoutSources } from "../agents/scout.js";
 import { evaluateFilter } from "../agents/filter.js";
 import { scoreToken } from "../agents/analyst.js";
-import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd, planOrder, quotePaperBuy, quotePaperSell, resolveManualSize, roundUsd } from "../agents/execution-math.js";
+import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd, maxSizeForPool, planOrder, quotePaperBuy, quotePaperSell, resolveManualSize, roundUsd, splitPosition } from "../agents/execution-math.js";
+import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
+import { resolveCoinMint } from "../market/coin-lookup.js";
+import { enrichSighting } from "../market/enrich.js";
+import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
 import { EventBus } from "../bus.js";
 import type { DeskConfig } from "../config.js";
@@ -36,7 +41,10 @@ import type {
   ManualBuyResult,
   PipelineCounts,
   Position,
-  PositionView
+  PositionView,
+  WatchItem,
+  CoinLookup,
+  CoinLookupError
 } from "../types.js";
 import { PaperBook } from "./book.js";
 
@@ -76,6 +84,9 @@ interface DeskSettings {
   notifyFills?: boolean;
   notifyStops?: boolean;
   pnlAlertPct?: number;
+  positionSizeUsd?: number | null;
+  maxExposurePct?: number;
+  paperResetUsd?: number;
 }
 
 interface DeskSettingsView {
@@ -109,7 +120,16 @@ interface DeskSettingsView {
   notifyFills: boolean;
   notifyStops: boolean;
   pnlAlertPct: number;
+  positionSizeUsd: number | null;
+  maxExposurePct: number;
+  paperResetUsd: number;
 }
+
+/** Codes that make a manual buy ask for "Buy anyway" first. */
+const HARD_KILL_CODES = new Set(["MINT_AUTHORITY_ACTIVE", "DEV_RUG_HISTORY"]);
+/** A lookup older than this is refreshed before a buy uses its liquidity. */
+const LOOKUP_TTL_MS = 10 * 60_000;
+const WATCHLIST_MAX = 60;
 
 /**
  * Legal handoffs (nothing else may open, size, or close a position):
@@ -163,6 +183,17 @@ export class Desk {
   private notifyFills = true;
   private notifyStops = true;
   private pnlAlertPct = 0;
+  /** v12 sizing. null = size from the % cap. */
+  private positionSizeUsd: number | null = null;
+  /** v12. 1 = no extra limit beyond cash (the v11 behavior). */
+  private maxExposurePct: number = SIZING_BAND.exposureDefaultPct;
+  private paperResetUsd: number = HARD_RULES.paperStartingUsd;
+  /** Add-coin lookups by mint. Manual buys of these mints use the lookup's pool and platform tag. */
+  private readonly lookups = new Map<string, { at: number; platform: string; token: CandidateToken }>();
+  private watchlist: WatchItem[] = [];
+  private watchTimer: NodeJS.Timeout | null = null;
+  private lastClientCrash: { at: number; version: string; brief: string } | null = null;
+  private readonly lookupFetch: typeof fetch;
   private readonly lpUnlockedMints = new Set<string>();
   private readonly analystScores = new Map<string, number>();
   /** Near-miss cards still waiting on a one-tap buy. One card per mint until it is taken. */
@@ -197,8 +228,9 @@ export class Desk {
   private killReasons: Record<string, number> = {};
   private feed: FeedStatus;
 
-  constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch } = {}) {
+  constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch } = {}) {
     this.config = config;
+    this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? fetch;
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
     this.advisor = new AdvisorBook(config.advisorPath);
     const saved = this.readSettings();
@@ -212,7 +244,7 @@ export class Desk {
       this.config.rules.maxTop10Pct = clampTop10(saved.maxTop10Pct);
     }
     if (typeof saved.maxPositionPct === "number") {
-      this.config.rules.maxPositionPct = clampPositionPct(saved.maxPositionPct);
+      this.config.rules.maxPositionPct = clampPositionPct(saved.maxPositionPct, this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     }
     if (typeof saved.maxEntrySlippage === "number") {
       this.config.rules.maxEntrySlippage = clampEntrySlippage(saved.maxEntrySlippage);
@@ -240,6 +272,11 @@ export class Desk {
       this.cooldowns = new Map(restored.cooldowns.filter(([, until]) => until > Date.now()));
     }
     this.resetAt = this.ensureResetAt();
+    this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
+    const crash = this.store.readJson("lastClientCrash") as { at?: unknown; version?: unknown; brief?: unknown } | null;
+    if (crash && typeof crash.at === "number" && typeof crash.brief === "string") {
+      this.lastClientCrash = { at: crash.at, version: typeof crash.version === "string" ? crash.version : "unknown", brief: crash.brief };
+    }
     this.scout = new Scout({
       bus: this.bus,
       feedMode: config.feedMode,
@@ -327,7 +364,11 @@ export class Desk {
   start(): void {
     if (this.config.demoFeed) this.replay.start();
     this.scout.start();
-    if (this.config.feedMode !== "replay") this.pricer.start();
+    if (this.config.feedMode !== "replay") {
+      this.pricer.start();
+      this.watchTimer = setInterval(() => void this.refreshWatchlist(), 20_000);
+      setTimeout(() => void this.refreshWatchlist(), 3_000);
+    }
     this.equityTimer = setInterval(() => this.markEquity(), 2_000);
     this.commentTimer = setInterval(() => void this.commentOnce(), 60_000);
     setTimeout(() => void this.commentOnce(), 8_000);
@@ -350,6 +391,7 @@ export class Desk {
     if (this.equityTimer) clearInterval(this.equityTimer);
     if (this.commentTimer) clearInterval(this.commentTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.watchTimer) clearInterval(this.watchTimer);
     this.persist();
     this.advisor.save();
     this.store.close();
@@ -367,7 +409,7 @@ export class Desk {
   }
 
   /**
-   * Drop the paper book back to $100. Open positions are removed from the ledger
+   * Drop the paper book back to the reset amount (default $100, settings $100–$10,000). Open positions are removed from the ledger
    * and no order is sent. The event log, advisor memory, and settings (including
    * the 1h volume floor) stay. Live mode is refused and LIVE_TRADING is not changed.
    */
@@ -376,7 +418,7 @@ export class Desk {
     if (this.config.mode !== "paper") {
       return { ok: false, error: "Reset only clears the paper book. Live trading is unchanged." };
     }
-    const starting = HARD_RULES.paperStartingUsd;
+    const starting = clampResetUsd(this.paperResetUsd);
     this.bookEpoch += 1;
     this.config.startingBalanceUsd = starting;
     this.book.positions.clear();
@@ -411,6 +453,8 @@ export class Desk {
     const full = stack.slice(0, 20_000);
     const brief = full.replace(/\s+/g, " ").slice(0, 500);
     const label = version.trim().slice(0, 40) || "unknown";
+    this.lastClientCrash = { at: Date.now(), version: label, brief };
+    this.store.writeJson("lastClientCrash", this.lastClientCrash);
     this.log(
       {
         stage: "system",
@@ -474,8 +518,8 @@ export class Desk {
     }
     if ("maxPositionPct" in patch) {
       const raw = Number(patch.maxPositionPct);
-      if (!Number.isFinite(raw)) return { ok: false, error: "Position cap must be a percent from 1 to 8." };
-      next.maxPositionPct = clampPositionPct(raw);
+      if (!Number.isFinite(raw) || raw <= 0) return { ok: false, error: `Position size must be a percent from 1 to ${SIZING_BAND.autoMaxPct * 100}.` };
+      next.maxPositionPct = clampPositionPct(raw, HARD_RULES.maxPositionPct, SIZING_BAND.autoMaxPct);
     }
     if ("defaultBuyUsd" in patch) {
       const raw = patch.defaultBuyUsd;
@@ -520,12 +564,23 @@ export class Desk {
    * Operator paper/live close. Uses the same sell path as a risk exit.
    * Does not ban the mint and does not change filter rules.
    */
-  async closePosition(mint: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  async closePosition(
+    mint: string,
+    fraction = 1
+  ): Promise<{ ok: true; soldFraction?: number; proceedsUsd?: number } | { ok: false; error: string }> {
     const pos = this.book.positions.get(mint);
     if (!pos) return { ok: false, error: "No open position for that mint." };
     if (pos.closing) return { ok: false, error: "Close already in progress." };
+    if (typeof fraction !== "number" || !Number.isFinite(fraction) || !(fraction > 0) || fraction > 1) {
+      return { ok: false, error: "Sell fraction must be 25%, 50% or 100% (a number above 0 and at most 1)." };
+    }
     const mark = this.book.price(mint, pos.entryPrice);
     if (!(mark > 0)) return { ok: false, error: "No mark to close against." };
+    if (fraction < 1) {
+      const split = splitPosition(pos.qty, pos.costUsd, fraction);
+      // A remainder worth under a cent is closed in full instead of leaving dust.
+      if (split.ok && split.remainQty * mark >= 0.01) return this.partialSell(pos, mark, split);
+    }
     pos.closing = true;
     const order: ExitOrder = {
       mint: pos.mint,
@@ -553,6 +608,248 @@ export class Desk {
     return { ok: true };
   }
 
+  /** Paper partial sell. Sells part of the qty into the same pool model a full exit uses. */
+  private partialSell(
+    pos: Position,
+    mark: number,
+    split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number }
+  ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string } {
+    if (this.config.mode !== "paper") return { ok: false, error: "Partial sells are paper-only. Use a full close in live mode." };
+    const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
+    const quote = quotePaperSell(mark, split.sellQty, liquidity);
+    const proceedsUsd = roundUsd(quote.proceedsUsd ?? 0);
+    assertNonNegativeFinite("proceedsUsd", proceedsUsd);
+    const now = Date.now();
+    const id = randomUUID();
+    const pnlUsd = roundUsd(proceedsUsd - split.soldCostUsd);
+    this.book.cashUsd = roundUsd(this.book.cashUsd + proceedsUsd);
+    pos.qty = split.remainQty;
+    pos.costUsd = split.remainCostUsd;
+    this.store.openTrade({ id, mint: pos.mint, symbol: pos.symbol, openedAt: pos.openedAt, costUsd: split.soldCostUsd, score: pos.score, mode: "paper" });
+    this.store.closeTrade({
+      id,
+      mint: pos.mint,
+      symbol: pos.symbol,
+      openedAt: pos.openedAt,
+      closedAt: now,
+      costUsd: split.soldCostUsd,
+      proceedsUsd,
+      pnlUsd,
+      pnlPct: split.soldCostUsd > 0 ? pnlUsd / split.soldCostUsd : 0,
+      exitCode: "PARTIAL_SELL",
+      score: pos.score,
+      mode: "paper",
+      entryPrice: pos.entryPrice,
+      exitPrice: quote.fillPrice
+    });
+    this.pipeline.fills += 1;
+    const pct = Math.round(split.fraction * 100);
+    this.log(
+      {
+        stage: "executor",
+        kind: "fill",
+        mint: pos.mint,
+        symbol: pos.symbol,
+        code: "PARTIAL_SELL",
+        message: `Executor sold ${pct}% of ${pos.symbol} for ${money(proceedsUsd)} @ ${price(quote.fillPrice)} (paper). Realized ${signed(pnlUsd)}. ${money(split.remainCostUsd)} cost basis still open.`,
+        detail: money(proceedsUsd)
+      },
+      { fraction: split.fraction, qty: split.sellQty, proceedsUsd, pnlUsd }
+    );
+    this.persist();
+    this.markEquity(true);
+    this.publishAdvice(this.buildAdvice());
+    return { ok: true, soldFraction: split.fraction, proceedsUsd };
+  }
+
+  /**
+   * Add coin: parse a mint or link, resolve it to a Solana mint, read price/pool/holders/mint
+   * authority the same way Scout does, and run the existing Filter and Analyst as a report.
+   * No price from DexScreener means an error and no buy.
+   */
+  async lookupCoin(q: string): Promise<CoinLookup | CoinLookupError> {
+    const parsed = parseCoinInput(q);
+    if (!parsed.ok) return { ok: false, error: parsed.error, code: "LOOKUP_FAILED" };
+    const resolved = await resolveCoinMint(parsed, this.lookupFetch);
+    if (!resolved.ok) return { ok: false, error: resolved.error, code: "LOOKUP_FAILED", platform: parsed.platform };
+    const mint = resolved.mint;
+    let token: CandidateToken;
+    try {
+      token = await enrichSighting(
+        { mint, source: "raydium", observedAt: Date.now() },
+        { rpcUrl: this.config.rpcUrl || undefined, rugcheckUrl: this.config.rugcheckUrl, fetchImpl: this.lookupFetch, holderPagesMax: 0 }
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `Could not read that coin (${message}). Buy is off.`, code: "LOOKUP_FAILED", platform: parsed.platform, mint };
+    }
+    let priceSource: "dexscreener" | "jupiter" = "dexscreener";
+    if (token.priceFeed !== "dexscreener" || !(token.liquidityUsd > 0)) {
+      // Pump curve coins: DexScreener shows a price but no pool depth. Jupiter (the same feed
+      // the desk marks held coins with) gives both. Fail closed when the two disagree.
+      const fallback = await jupiterLookupQuote(mint, token.priceFeed === "dexscreener" ? token.priceUsd : 0, this.lookupFetch);
+      if (fallback.ok) {
+        token.priceUsd = fallback.priceUsd;
+        token.liquidityUsd = fallback.liquidityUsd;
+        token.priceFeed = "jupiter";
+        priceSource = "jupiter";
+      } else if (fallback.error) {
+        return { ok: false, error: fallback.error, code: "PRICE_UNAVAILABLE", platform: parsed.platform, mint };
+      }
+    }
+    if (!(token.priceUsd > 0) || !Number.isFinite(token.priceUsd) || (token.priceFeed !== "dexscreener" && token.priceFeed !== "jupiter") || !(token.liquidityUsd > 0)) {
+      return {
+        ok: false,
+        error: `No reliable price for ${token.symbol || mint.slice(0, 6)}. Neither DexScreener nor Jupiter has a priced Solana pool with depth for it, so Buy is off.`,
+        code: "PRICE_UNAVAILABLE",
+        platform: parsed.platform,
+        mint
+      };
+    }
+    this.lookups.set(mint, { at: Date.now(), platform: parsed.platform, token: { ...token, social: { ...token.social } } });
+    if (this.lookups.size > 200) {
+      const first = this.lookups.keys().next().value;
+      if (first) this.lookups.delete(first);
+    }
+    const held = this.book.positions.has(mint);
+    if (!held) {
+      this.remember(token);
+      this.book.mark(mint, token.priceUsd);
+    }
+    const rug = await this.rugs.lookup(token.devWallet);
+    const filter = evaluateFilter(token, rug, this.config.rules, {
+      allowUnlockedLp: this.allowUnlockedLp,
+      minLiquidityUsd: this.minLiquidityUsd,
+      minAgeSeconds: this.minTokenAgeMin > 0 ? this.minTokenAgeMin * 60 : 0,
+      maxAgeSeconds: this.maxTokenAgeMin > 0 ? this.maxTokenAgeMin * 60 : 0,
+      minHolderCount: this.minHolderCount,
+      maxDevHoldingPct: this.maxDevHoldingPct
+    });
+    const report = scoreToken(token, this.config.rules);
+    this.analystScores.set(mint, report.score);
+    const hardKills = filter.checks.filter((c) => !c.pass && HARD_KILL_CODES.has(c.code)).map((c) => ({ code: c.code, message: c.message }));
+    const cooldownUntil = this.cooldowns.get(mint) ?? 0;
+    const capUsd = this.positionCapUsd();
+    const manualMaxUsd = this.positionCapUsd(this.book.equity(), SIZING_BAND.manualMaxPct);
+    const poolMaxUsd = maxSizeForPool(token.liquidityUsd, this.config.rules.maxEntrySlippage);
+    const blocked = held
+      ? "Already holding it. The desk does not average down."
+      : !(capUsd >= 0.01)
+        ? "No cash or exposure room for a buy."
+        : !(poolMaxUsd >= 1)
+          ? "Pool is too thin for even $1 under the slippage and exit-depth caps."
+          : null;
+    this.log({
+      stage: "system",
+      kind: "info",
+      mint,
+      symbol: token.symbol,
+      code: "MANUAL_BUY",
+      message: `Add coin looked up ${token.symbol} from ${parsed.platform}. Mark ${price(token.priceUsd)}, liquidity ${money(token.liquidityUsd)}, 1h volume ${money(token.volume1hUsd)}. Filter ${filter.decision === "pass" ? "pass" : `kill (${filter.reasons.map((r) => r.code).join(", ")})`}, Analyst ${report.score.toFixed(2)}.`
+    });
+    return {
+      ok: true,
+      mint,
+      symbol: token.symbol,
+      name: token.name,
+      platform: parsed.platform,
+      tag: positionTag(parsed.platform),
+      priceUsd: token.priceUsd,
+      liquidityUsd: token.liquidityUsd,
+      volume1hUsd: token.volume1hUsd,
+      marketCapUsd: token.marketCapUsd ?? null,
+      ageSeconds: token.ageSeconds,
+      pairAddress: token.pairAddress ?? null,
+      dex: token.dex ?? null,
+      dexscreenerUrl: dexscreenerUrl(token.pairAddress ?? mint),
+      priceSource,
+      checks: filter.checks.map((c) => ({ code: c.code, pass: c.pass, message: c.message })),
+      filterPass: filter.decision === "pass",
+      hardKills,
+      analyst: { score: report.score, line: this.config.rules.analystMinScore, pass: report.decision === "trade" },
+      poolMaxUsd,
+      positionCapUsd: capUsd,
+      manualMaxUsd,
+      cashUsd: roundUsd(this.book.cashUsd),
+      maxEntrySlippage: this.config.rules.maxEntrySlippage,
+      held,
+      watching: this.watchlist.some((item) => item.mint === mint),
+      canBuy: blocked == null,
+      buyBlockedReason: blocked ?? (cooldownUntil > Date.now() ? `Hard-stop cooldown for ${Math.ceil((cooldownUntil - Date.now()) / 60_000)} more minutes. Buy anyway overrides it.` : null)
+    };
+  }
+
+  listWatchlist(): WatchItem[] {
+    return this.watchlist.map((item) => ({ ...item }));
+  }
+
+  /** Adds a coin from a mint or link. Needs a reliable price, same as a buy. */
+  async addToWatchlist(q: string): Promise<{ ok: true; item: WatchItem; watchlist: WatchItem[] } | CoinLookupError> {
+    const found = await this.lookupCoin(q);
+    if (!found.ok) return found;
+    const existing = this.watchlist.find((item) => item.mint === found.mint);
+    if (existing) return { ok: true, item: { ...existing }, watchlist: this.listWatchlist() };
+    if (this.watchlist.length >= WATCHLIST_MAX) {
+      return { ok: false, error: `Watchlist is full (${WATCHLIST_MAX}). Remove one first.`, code: "LOOKUP_FAILED" };
+    }
+    const item: WatchItem = {
+      mint: found.mint,
+      symbol: found.symbol,
+      name: found.name,
+      platform: found.platform,
+      addedAt: Date.now(),
+      addedPriceUsd: found.priceUsd,
+      lastPriceUsd: found.priceUsd,
+      lastAt: Date.now(),
+      changePct: 0,
+      dexscreenerUrl: found.dexscreenerUrl
+    };
+    this.watchlist.push(item);
+    this.saveWatchlist();
+    this.bus.emit("desk.changed", { reason: "watchlist", at: Date.now() });
+    this.log({ stage: "system", kind: "info", mint: item.mint, symbol: item.symbol, message: `Watchlist added ${item.symbol} at ${price(item.addedPriceUsd)} from ${item.platform}.` });
+    return { ok: true, item: { ...item }, watchlist: this.listWatchlist() };
+  }
+
+  removeFromWatchlist(mint: string): { ok: true; watchlist: WatchItem[] } | { ok: false; error: string } {
+    const cleaned = (mint ?? "").trim();
+    const before = this.watchlist.length;
+    this.watchlist = this.watchlist.filter((item) => item.mint !== cleaned);
+    if (this.watchlist.length === before) return { ok: false, error: "That coin is not on the watchlist." };
+    this.saveWatchlist();
+    this.bus.emit("desk.changed", { reason: "watchlist", at: Date.now() });
+    return { ok: true, watchlist: this.listWatchlist() };
+  }
+
+  /** One DexScreener pass over watched mints. A missing price leaves the last one and marks it stale. */
+  async refreshWatchlist(): Promise<void> {
+    if (!this.watchlist.length) return;
+    let quotes: Map<string, { priceUsd: number }>;
+    try {
+      quotes = await fetchDexQuotes(this.watchlist.map((item) => item.mint), this.lookupFetch);
+    } catch {
+      return;
+    }
+    const now = Date.now();
+    let changed = false;
+    for (const item of this.watchlist) {
+      const quote = quotes.get(item.mint);
+      if (!quote || !(quote.priceUsd > 0) || !Number.isFinite(quote.priceUsd)) continue;
+      item.lastPriceUsd = quote.priceUsd;
+      item.lastAt = now;
+      item.changePct = watchChange(item.addedPriceUsd, quote.priceUsd);
+      changed = true;
+    }
+    if (changed) {
+      this.saveWatchlist();
+      this.bus.emit("desk.changed", { reason: "watchlist", at: now });
+    }
+  }
+
+  private saveWatchlist(): void {
+    this.store.writeJson("watchlist", this.watchlist);
+  }
+
   /**
    * Operator buy from the tape. Paper fills go through quotePaperBuy.
    * Live swaps go through the existing broker only when config.mode is already live.
@@ -562,10 +859,12 @@ export class Desk {
   async manualBuy(
     mint: string,
     sizeUsd?: number,
-    opts?: { ignoreCooldown?: boolean }
+    opts?: { ignoreCooldown?: boolean; confirmHardKill?: boolean; confirmSize?: boolean }
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const cleaned = mint.trim();
     if (!cleaned) return { ok: false, error: "Mint is required.", code: "PRICE_UNAVAILABLE" };
+    const looked = this.lookups.get(cleaned);
+    if (looked && !this.sightings.has(cleaned)) this.remember(looked.token);
     const seen = this.sightings.get(cleaned);
     if (!seen) {
       this.log({
@@ -599,10 +898,36 @@ export class Desk {
       code: "MANUAL_BUY",
       message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)}.`
     });
+    // Hard kills (mint authority not revoked, dev rug link) need the operator's "Buy anyway".
+    if (!this.book.positions.has(token.mint)) {
+      const rug = await this.rugs.lookup(token.devWallet);
+      const kills = evaluateFilter(token, rug, this.config.rules, { allowUnlockedLp: this.allowUnlockedLp }).checks.filter(
+        (check) => !check.pass && HARD_KILL_CODES.has(check.code)
+      );
+      if (kills.length && opts?.confirmHardKill !== true) {
+        const message = `Hard kill on ${token.symbol}: ${kills.map((k) => k.message).join(" ")} Tap Buy anyway to paper-buy it regardless.`;
+        this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "HARD_KILL", message: `Manual buy held. ${message}` });
+        return { ok: false, error: message, code: "HARD_KILL" };
+      }
+      if (kills.length) {
+        this.log({
+          stage: "system",
+          kind: "info",
+          mint: token.mint,
+          symbol: token.symbol,
+          code: "HARD_KILL",
+          message: `Operator chose Buy anyway on ${token.symbol} past ${kills.map((k) => k.code).join(", ")}. Paper only.`
+        });
+      }
+    }
     const cached = this.analystScores.get(token.mint);
     const score = cached != null && Number.isFinite(cached) ? cached : scoreToken(token, this.config.rules).score;
     this.analystScores.set(token.mint, score);
-    return this.executeBuy(token, score, sizeUsd, "manual", opts?.ignoreCooldown === true);
+    const tag = looked ? positionTag(looked.platform) : undefined;
+    return this.executeBuy(token, score, sizeUsd, "manual", opts?.ignoreCooldown === true, {
+      confirmSize: opts?.confirmSize === true,
+      tag
+    });
   }
 
   /**
@@ -702,7 +1027,11 @@ export class Desk {
         .slice(-20),
       equity: downsample(this.store.equitySince(this.startedAt), 240),
       events: this.store.recentEvents(180),
-      advice: this.advice
+      advice: this.advice,
+      watchlist: this.watchlist.map((item) => ({ ...item })),
+      exposureUsd: roundUsd(this.exposureUsd()),
+      manualMaxUsd: this.positionCapUsd(equityUsd, SIZING_BAND.manualMaxPct),
+      lastClientCrash: this.lastClientCrash
     };
   }
 
@@ -880,7 +1209,7 @@ export class Desk {
   }
 
   private async buy(report: AnalystReport): Promise<void> {
-    await this.executeBuy(report.token, report.score, undefined, "analyst");
+    await this.executeBuy(report.token, report.score, this.positionSizeUsd ?? undefined, "analyst");
   }
 
   private async executeBuy(
@@ -888,9 +1217,15 @@ export class Desk {
     score: number,
     requestedUsd: number | undefined,
     source: "analyst" | "manual",
-    ignoreCooldown = false
+    ignoreCooldown = false,
+    extra: { confirmSize?: boolean; tag?: string } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
+    // A confirmed manual buy may use up to 100% of the book. Everything else uses the saved cap (≤ 50%).
+    const capPct =
+      source === "manual" && extra.confirmSize === true
+        ? SIZING_BAND.manualMaxPct
+        : Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     if (source === "analyst") {
       const gate = autoBuyBlock({
         autoBuy: this.autoBuy,
@@ -939,7 +1274,9 @@ export class Desk {
       hasPosition: this.book.positions.has(token.mint) || this.opening.has(token.mint),
       cooldownUntil: this.cooldowns.get(token.mint) ?? null,
       now: Date.now(),
-      ignoreCooldown: source === "manual" && ignoreCooldown
+      ignoreCooldown: source === "manual" && ignoreCooldown,
+      ceilingPct: capPct,
+      exposureRoomUsd: this.exposureRoomUsd()
     });
     if (!plan.ok) {
       this.pipeline.executorSkips += 1;
@@ -973,7 +1310,7 @@ export class Desk {
       return { ok: false, error: sized.reason.message, code: sized.reason.code };
     }
 
-    const pctLabel = (this.config.rules.maxPositionPct * 100).toFixed(0);
+    const pctLabel = (capPct * 100).toFixed(0);
     const exitGate = exitImpactAllowed(sized.sizeUsd, token.liquidityUsd, this.config.rules.maxEntrySlippage);
     if (!exitGate.ok) {
       this.pipeline.executorSkips += 1;
@@ -1057,7 +1394,9 @@ export class Desk {
             },
             token,
             score,
-            source
+            source,
+            capPct,
+            extra.tag
           );
           return this.bought(token, sized, "live");
         } catch (err) {
@@ -1114,7 +1453,9 @@ export class Desk {
         },
         token,
         score,
-        source
+        source,
+        capPct,
+        extra.tag
       );
       return this.bought(token, sized, "paper");
     } finally {
@@ -1122,8 +1463,15 @@ export class Desk {
     }
   }
 
-  private applyBuy(fill: Fill, token: CandidateToken, score: number, entry: "manual" | "analyst"): void {
-    if (fill.notionalUsd > this.book.equity() * this.config.rules.maxPositionPct + 0.02) {
+  private applyBuy(
+    fill: Fill,
+    token: CandidateToken,
+    score: number,
+    entry: "manual" | "analyst",
+    capPct: number = this.config.rules.maxPositionPct,
+    tag?: string
+  ): void {
+    if (!(capPct > 0) || fill.notionalUsd > this.book.equity() * Math.min(capPct, SIZING_BAND.manualMaxPct) + 0.02) {
       throw new Error(`Position cap breached on ${token.symbol}`);
     }
     this.book.cashUsd = roundUsd(this.book.cashUsd - fill.notionalUsd);
@@ -1146,7 +1494,8 @@ export class Desk {
       priceFeed: token.priceFeed,
       pairAddress: token.priceFeed === "dexscreener" ? token.pairAddress : undefined,
       dex: token.dex,
-      tradeId: fill.id
+      tradeId: fill.id,
+      ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {})
     };
     this.book.positions.set(token.mint, position);
     const sample = sampleOf(token, score);
@@ -1404,7 +1753,8 @@ export class Desk {
       entry: pos.entry ?? "analyst",
       lpUnlocked: pos.lpUnlocked === true,
       markAgeMs: Math.max(0, Date.now() - (this.book.markedAt(pos.mint) ?? pos.openedAt)),
-      openedAt: pos.openedAt
+      openedAt: pos.openedAt,
+      ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {})
     };
   }
 
@@ -1559,7 +1909,7 @@ export class Desk {
     if (typeof saved.minVolume1hUsd === "number") this.config.rules.minVolume1hUsd = clampVolumeUsd(saved.minVolume1hUsd);
     if (typeof saved.analystMinScore === "number") this.config.rules.analystMinScore = clampScore(saved.analystMinScore);
     if (typeof saved.maxTop10Pct === "number") this.config.rules.maxTop10Pct = clampTop10(saved.maxTop10Pct);
-    if (typeof saved.maxPositionPct === "number") this.config.rules.maxPositionPct = clampPositionPct(saved.maxPositionPct);
+    if (typeof saved.maxPositionPct === "number") this.config.rules.maxPositionPct = clampPositionPct(saved.maxPositionPct, this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     if (typeof saved.maxEntrySlippage === "number") this.config.rules.maxEntrySlippage = clampEntrySlippage(saved.maxEntrySlippage);
     if ("defaultBuyUsd" in saved) this.defaultBuyUsd = clampBuyUsd(saved.defaultBuyUsd ?? null);
     if (typeof saved.maxOpenPositions === "number") this.maxOpenPositions = clampOpenPositions(saved.maxOpenPositions);
@@ -1569,11 +1919,25 @@ export class Desk {
     this.scout.setSources(this.scoutSources);
   }
 
-  private positionCapUsd(equityUsd = this.book.equity()): number {
-    const pct = Math.min(this.config.rules.maxPositionPct, HARD_RULES.maxPositionPct);
+  private positionCapUsd(equityUsd = this.book.equity(), pct = Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct)): number {
     const cap = floorUsd(Math.max(0, equityUsd) * pct);
     const cash = floorUsd(Math.max(0, this.book.cashUsd));
-    return Math.min(cap, cash);
+    const room = this.exposureRoomUsd(equityUsd);
+    return Math.max(0, Math.min(cap, cash, room == null ? Number.POSITIVE_INFINITY : floorUsd(Math.max(0, room))));
+  }
+
+  /** Market value of open positions. */
+  private exposureUsd(): number {
+    let total = 0;
+    for (const pos of this.book.positions.values()) total += pos.qty * this.book.price(pos.mint, pos.entryPrice);
+    return Number.isFinite(total) ? total : Number.POSITIVE_INFINITY;
+  }
+
+  /** New exposure still allowed, or undefined when the cap is 100% (the v11 behavior: cash is the limit). */
+  private exposureRoomUsd(equityUsd = this.book.equity()): number | undefined {
+    if (this.maxExposurePct >= SIZING_BAND.exposureMaxPct) return undefined;
+    const room = Math.max(0, equityUsd) * this.maxExposurePct - this.exposureUsd();
+    return Number.isFinite(room) ? Math.max(0, room) : 0;
   }
 
   private bought(
@@ -1622,7 +1986,10 @@ export class Desk {
       notifyNearMiss: this.notifyNearMiss,
       notifyFills: this.notifyFills,
       notifyStops: this.notifyStops,
-      pnlAlertPct: this.pnlAlertPct
+      pnlAlertPct: this.pnlAlertPct,
+      positionSizeUsd: this.positionSizeUsd,
+      maxExposurePct: this.maxExposurePct,
+      paperResetUsd: this.paperResetUsd
     };
   }
 
@@ -1663,11 +2030,12 @@ export class Desk {
     }
     if ("stopLossPct" in patch) {
       const raw = num("stopLossPct");
-      const fraction = raw > 1 ? raw / 100 : raw;
+      // 1 means 1% here (a 100% stop is never valid), so the phone's "1" is not refused.
+      const fraction = raw >= 1 ? raw / 100 : raw;
       if (!Number.isFinite(fraction) || fraction <= 0 || fraction > HARD_RULES.stopLossPct + 1e-9) {
         return { ok: false, error: "Hard stop cannot be loosened past 6%. Tighter is allowed." };
       }
-      next.stopLossPct = clampStopLossPct(raw);
+      next.stopLossPct = clampStopLossPct(fraction);
     }
     if ("trailArmPct" in patch) {
       const raw = num("trailArmPct");
@@ -1679,11 +2047,30 @@ export class Desk {
     }
     if ("trailGapPct" in patch) {
       const raw = num("trailGapPct");
-      const fraction = raw > 1 ? raw / 100 : raw;
+      const fraction = raw >= 1 ? raw / 100 : raw;
       if (!Number.isFinite(fraction) || fraction <= 0 || fraction > HARD_RULES.trailGapPct + 1e-9) {
         return { ok: false, error: "Trail gap cannot be wider than 4%." };
       }
-      next.trailGapPct = clampTrailGapPct(raw);
+      next.trailGapPct = clampTrailGapPct(fraction);
+    }
+    if ("positionSizeUsd" in patch) {
+      const raw = patch.positionSizeUsd;
+      if (raw == null || raw === "" || raw === 0) next.positionSizeUsd = null;
+      else {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) return { ok: false, error: "Position size $ must be a dollar amount, or blank to size from the % cap." };
+        next.positionSizeUsd = clampPositionUsd(n);
+      }
+    }
+    if ("maxExposurePct" in patch) {
+      const raw = num("maxExposurePct");
+      if (!Number.isFinite(raw) || raw <= 0) return { ok: false, error: "Max total exposure must be a percent from 10 to 100." };
+      next.maxExposurePct = clampExposurePct(raw);
+    }
+    if ("paperResetUsd" in patch) {
+      const raw = num("paperResetUsd");
+      if (!Number.isFinite(raw) || raw <= 0) return { ok: false, error: "Paper reset amount must be $100 to $10,000." };
+      next.paperResetUsd = clampResetUsd(raw);
     }
     if ("pnlAlertPct" in patch) {
       if (!Number.isFinite(num("pnlAlertPct"))) return { ok: false, error: "PnL alert must be a percent, or 0 to leave it off." };
@@ -1738,6 +2125,9 @@ export class Desk {
     if (typeof saved.notifyFills === "boolean") this.notifyFills = saved.notifyFills;
     if (typeof saved.notifyStops === "boolean") this.notifyStops = saved.notifyStops;
     if (typeof saved.pnlAlertPct === "number") this.pnlAlertPct = clampPnlAlertPct(saved.pnlAlertPct);
+    if ("positionSizeUsd" in saved) this.positionSizeUsd = clampPositionUsd(saved.positionSizeUsd ?? null);
+    if (typeof saved.maxExposurePct === "number") this.maxExposurePct = clampExposurePct(saved.maxExposurePct);
+    if (typeof saved.paperResetUsd === "number") this.paperResetUsd = clampResetUsd(saved.paperResetUsd);
   }
 
   private buysInLastHour(): number {
@@ -1784,7 +2174,10 @@ export class Desk {
       scoutGecko: view.scoutGecko,
       scoutJupiter: view.scoutJupiter,
       scoutDexpaprika: view.scoutDexpaprika,
-      scoutBitquery: view.scoutBitquery
+      scoutBitquery: view.scoutBitquery,
+      positionSizeUsd: view.positionSizeUsd,
+      maxExposurePct: view.maxExposurePct,
+      paperResetUsd: view.paperResetUsd
     };
   }
 
@@ -1831,10 +2224,41 @@ function sampleOf(token: { volume1hUsd: number; top10HolderPct: number | null; l
   };
 }
 
+export function watchChange(addedPriceUsd: number, lastPriceUsd: number): number | null {
+  if (!(addedPriceUsd > 0) || !(lastPriceUsd > 0) || !Number.isFinite(addedPriceUsd) || !Number.isFinite(lastPriceUsd)) return null;
+  return (lastPriceUsd - addedPriceUsd) / addedPriceUsd;
+}
+
+/** Reads the stored watchlist. Rows without a mint or a positive added price are dropped. */
+export function loadWatchlist(raw: unknown): WatchItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WatchItem[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Partial<WatchItem>;
+    if (typeof r.mint !== "string" || !r.mint || !(typeof r.addedPriceUsd === "number" && r.addedPriceUsd > 0)) continue;
+    const last = typeof r.lastPriceUsd === "number" && r.lastPriceUsd > 0 ? r.lastPriceUsd : null;
+    out.push({
+      mint: r.mint,
+      symbol: typeof r.symbol === "string" ? r.symbol : r.mint.slice(0, 4),
+      name: typeof r.name === "string" ? r.name : "",
+      platform: typeof r.platform === "string" ? r.platform : "Mint",
+      addedAt: typeof r.addedAt === "number" ? r.addedAt : Date.now(),
+      addedPriceUsd: r.addedPriceUsd,
+      lastPriceUsd: last,
+      lastAt: typeof r.lastAt === "number" ? r.lastAt : null,
+      changePct: last == null ? null : watchChange(r.addedPriceUsd, last),
+      dexscreenerUrl: typeof r.dexscreenerUrl === "string" ? r.dexscreenerUrl : dexscreenerUrl(r.mint)
+    });
+  }
+  return out.slice(0, WATCHLIST_MAX);
+}
+
 function exitVerb(code: string): string {
   if (code === "STOP_LOSS") return "stopped";
   if (code === "TRAIL_STOP") return "trailed";
   if (code === "MANUAL_CLOSE") return "closed";
+  if (code === "PARTIAL_SELL") return "trimmed";
   return "exited";
 }
 
@@ -1870,3 +2294,32 @@ function downsample<T>(rows: T[], max: number): T[] {
 }
 
 export { entryAllowed };
+export type { CoinLookup, CoinLookupError } from "../types.js";
+
+/** Max gap between DexScreener's curve price and Jupiter's before a lookup refuses to price. */
+export const LOOKUP_PRICE_AGREEMENT = 0.25;
+
+/**
+ * Jupiter price + liquidity for one mint. ok=false with no error means "Jupiter has nothing",
+ * ok=false with an error means the two feeds disagree, which blocks the buy.
+ */
+export async function jupiterLookupQuote(
+  mint: string,
+  dexPriceUsd: number,
+  fetchImpl: typeof fetch
+): Promise<{ ok: true; priceUsd: number; liquidityUsd: number } | { ok: false; error?: string }> {
+  let quote: { priceUsd: number; liquidityUsd: number } | undefined;
+  try {
+    quote = (await fetchJupiterQuotes([mint], fetchImpl)).get(mint);
+  } catch {
+    return { ok: false };
+  }
+  if (!quote || !(quote.priceUsd > 0) || !Number.isFinite(quote.priceUsd) || !(quote.liquidityUsd > 0)) return { ok: false };
+  if (dexPriceUsd > 0 && Math.abs(quote.priceUsd / dexPriceUsd - 1) > LOOKUP_PRICE_AGREEMENT) {
+    return {
+      ok: false,
+      error: `Prices disagree (DexScreener ${dexPriceUsd.toPrecision(4)} vs Jupiter ${quote.priceUsd.toPrecision(4)}). No reliable price, so Buy is off.`
+    };
+  }
+  return { ok: true, priceUsd: quote.priceUsd, liquidityUsd: quote.liquidityUsd };
+}

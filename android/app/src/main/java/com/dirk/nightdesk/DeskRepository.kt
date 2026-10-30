@@ -277,7 +277,91 @@ class DeskRepository private constructor(private val context: Context) {
         }.getOrDefault(false)
     }
 
-    suspend fun buyPosition(mint: String, sizeUsd: Double?, ignoreCooldown: Boolean = false): DeskNotice = withContext(Dispatchers.IO) {
+    /** v12. A buy the desk refused as a hard kill (mint authority, dev rug). The UI asks "Buy anyway". */
+    data class HardKillAsk(val mint: String, val symbol: String, val sizeUsd: Double?, val confirmSize: Boolean, val message: String)
+
+    private val _hardKillAsk = MutableStateFlow<HardKillAsk?>(null)
+    val hardKillAsk: StateFlow<HardKillAsk?> = _hardKillAsk
+    fun dismissHardKill() {
+        _hardKillAsk.value = null
+    }
+
+    /** v12 share target. Text shared into the app waits here until the Add coin tab picks it up. */
+    private val _sharedCoin = MutableStateFlow<String?>(null)
+    val sharedCoin: StateFlow<String?> = _sharedCoin
+    fun offerSharedText(text: String?) {
+        val coin = extractSharedCoin(text) ?: return
+        _sharedCoin.value = coin
+    }
+    fun consumeSharedCoin(): String? {
+        val coin = _sharedCoin.value
+        _sharedCoin.value = null
+        return coin
+    }
+
+    suspend fun lookupCoin(q: String): CoinLookup = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) return@withContext CoinLookup(ok = false, error = "No desk URL", code = "LOOKUP_FAILED")
+        val query = URLEncoder.encode(q.trim(), Charsets.UTF_8.name())
+        sendRaw("$base/api/lookup?q=$query", null).fold(
+            onSuccess = { (_, raw) -> parseLookup(raw) },
+            onFailure = { err -> CoinLookup(ok = false, error = err.message ?: "Lookup failed.", code = "LOOKUP_FAILED") }
+        )
+    }
+
+    suspend fun watchCoin(q: String): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL")
+        val notice = post("$base/api/watchlist", JSONObject().put("q", q).toString()).fold(
+            onSuccess = { raw ->
+                val sym = runCatching { JSONObject(raw).optJSONObject("item")?.optText("symbol") }.getOrNull().orEmpty()
+                DeskNotice(true, "Watching ${sym.ifBlank { "coin" }}.")
+            },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Watchlist add failed.") }
+        )
+        _notice.value = notice
+        refresh()
+        notice
+    }
+
+    suspend fun unwatchCoin(mint: String): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL")
+        val notice = post("$base/api/watchlist/remove", JSONObject().put("mint", mint).toString()).fold(
+            onSuccess = { DeskNotice(true, "Removed from the watchlist.") },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Remove failed.") }
+        )
+        _notice.value = notice
+        refresh()
+        notice
+    }
+
+    /** v12 partial sell. percent is 25, 50 or 100. 100 is the same as Close. */
+    suspend fun sellPosition(mint: String, percent: Int): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL")
+        val body = JSONObject().put("mint", mint).put("percent", percent)
+        val notice = post("$base/api/positions/sell", body.toString()).fold(
+            onSuccess = { raw ->
+                val proceeds = runCatching { JSONObject(raw).optFinite("proceedsUsd", Double.NaN) }.getOrNull()
+                val tail = if (proceeds != null && proceeds.isFinite()) " for ${formatUsd(proceeds)}" else ""
+                DeskNotice(true, if (percent >= 100) "Closed." else "Sold $percent%$tail.")
+            },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Sell failed.") }
+        )
+        _notice.value = notice
+        refresh()
+        notice
+    }
+
+    suspend fun buyPosition(
+        mint: String,
+        sizeUsd: Double?,
+        ignoreCooldown: Boolean = false,
+        confirmHardKill: Boolean = false,
+        confirmSize: Boolean = false,
+        symbol: String? = null
+    ): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) {
             val notice = DeskNotice(false, "No desk URL")
@@ -287,13 +371,24 @@ class DeskRepository private constructor(private val context: Context) {
         val body = JSONObject().put("mint", mint)
         if (sizeUsd != null && sizeUsd.isFinite()) body.put("sizeUsd", sizeUsd)
         if (ignoreCooldown) body.put("ignoreCooldown", true)
-        val notice = post("$base/api/positions/buy", body.toString()).fold(
-            onSuccess = { raw ->
+        if (confirmHardKill) body.put("confirmHardKill", true)
+        if (confirmSize) body.put("confirmSize", true)
+        val notice = sendRaw("$base/api/positions/buy", body.toString()).fold(
+            onSuccess = { (_, raw) ->
                 val json = runCatching { JSONObject(raw) }.getOrNull()
                 if (json == null) {
                     DeskNotice(false, "Buy refused.")
                 } else {
                     val ok = json.has("ok") && !json.isNull("ok") && json.optBoolean("ok", false)
+                    if (!ok && json.optText("code") == "HARD_KILL" && !confirmHardKill) {
+                        _hardKillAsk.value = HardKillAsk(
+                            mint = mint,
+                            symbol = json.optText("symbol").ifBlank { symbol ?: mint.take(4) },
+                            sizeUsd = sizeUsd,
+                            confirmSize = confirmSize,
+                            message = json.optText("error", "Hard kill.")
+                        )
+                    }
                     val filled = if (json.has("sizeUsd") && !json.isNull("sizeUsd")) json.optFinite("sizeUsd", Double.NaN).takeIf { it.isFinite() } else null
                     val clamped = if (json.has("clampedFrom") && !json.isNull("clampedFrom")) json.optFinite("clampedFrom", Double.NaN).takeIf { it.isFinite() } else null
                     DeskNotice(
@@ -498,6 +593,21 @@ class DeskRepository private constructor(private val context: Context) {
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) error("HTTP ${response.code}")
                 body
+            }
+        }
+    }
+
+    /** Returns the HTTP code and body even on a 4xx, so the caller can read a refusal code like HARD_KILL. */
+    private suspend fun sendRaw(url: String, json: String?): Result<Pair<Int, String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val builder = Request.Builder().url(withToken(url)).authed()
+            if (json != null) builder.post(json.toRequestBody(JSON))
+            http.newCall(builder.build()).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (response.code == 401) error("Desk token missing or wrong.")
+                if (response.code >= 500 && body.isBlank()) error("HTTP ${response.code}")
+                if (body.isBlank()) error("HTTP ${response.code}")
+                response.code to body
             }
         }
     }

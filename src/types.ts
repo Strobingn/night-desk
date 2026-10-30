@@ -34,7 +34,11 @@ export type ReasonCode =
   | "DEV_HOLDING"
   | "AUTO_BUY_OFF"
   | "TRADE_RATE"
-  | "DAILY_LOSS";
+  | "DAILY_LOSS"
+  | "EXPOSURE_CAP"
+  | "PARTIAL_SELL"
+  | "HARD_KILL"
+  | "LOOKUP_FAILED";
 
 export interface Rejection {
   code: ReasonCode;
@@ -181,6 +185,8 @@ export interface Position {
   dex?: string;
   tradeId: string;
   closing?: boolean;
+  /** v12: "manual" plus the platform the coin was added from, e.g. "manual · DexScreener". */
+  tag?: string;
 }
 
 export interface ClosedTrade {
@@ -242,6 +248,8 @@ export interface PositionView {
   /** Milliseconds since the last fresh mark. The hard stop uses that mark. */
   markAgeMs?: number;
   openedAt: number;
+  /** v12 tag shown on the card, e.g. "manual · pump.fun". */
+  tag?: string;
 }
 
 export interface FeedStatus {
@@ -342,6 +350,69 @@ export interface DeskPrefs {
   scoutJupiter: boolean;
   scoutDexpaprika: boolean;
   scoutBitquery: boolean;
+  /** v12. Fixed $ per position; null = size from the % cap. */
+  positionSizeUsd: number | null;
+  /** v12. Total open exposure as a share of equity (0.1–1). 1 = no extra limit. */
+  maxExposurePct: number;
+  /** v12. Amount the paper book resets to ($100–$10,000). */
+  paperResetUsd: number;
+}
+
+/** v12 GET /api/lookup result. */
+export interface CoinLookup {
+  ok: true;
+  mint: string;
+  symbol: string;
+  name: string;
+  platform: string;
+  tag: string;
+  priceUsd: number;
+  liquidityUsd: number;
+  volume1hUsd: number;
+  marketCapUsd: number | null;
+  ageSeconds: number;
+  pairAddress: string | null;
+  dex: string | null;
+  dexscreenerUrl: string;
+  /** Where the price came from. Pump curve coins price off Jupiter (cross-checked with DexScreener). */
+  priceSource: "dexscreener" | "jupiter";
+  checks: Array<{ code: string; pass: boolean; message: string }>;
+  filterPass: boolean;
+  hardKills: Array<{ code: string; message: string }>;
+  analyst: { score: number; line: number; pass: boolean };
+  /** Biggest size the pool takes under the entry slippage cap and the exit-depth check. */
+  poolMaxUsd: number;
+  positionCapUsd: number;
+  manualMaxUsd: number;
+  cashUsd: number;
+  maxEntrySlippage: number;
+  held: boolean;
+  watching: boolean;
+  canBuy: boolean;
+  buyBlockedReason: string | null;
+}
+
+export interface CoinLookupError {
+  ok: false;
+  error: string;
+  code: "LOOKUP_FAILED" | "PRICE_UNAVAILABLE";
+  platform?: string;
+  mint?: string;
+}
+
+/** v12 watchlist row. Persisted in the desk store under data/. */
+export interface WatchItem {
+  mint: string;
+  symbol: string;
+  name: string;
+  platform: string;
+  addedAt: number;
+  addedPriceUsd: number;
+  lastPriceUsd: number | null;
+  lastAt: number | null;
+  /** (last - added) / added. null when no live price yet. */
+  changePct: number | null;
+  dexscreenerUrl: string;
 }
 
 export interface MintCooldown {
@@ -378,9 +449,19 @@ export interface DeskSnapshot {
   events: FeedEvent[];
   /** Latest advisory lines. Display only. */
   advice: AdviceNote[];
+  /** v12. Coins Dirk is watching. */
+  watchlist: WatchItem[];
+  /** v12. Market value of open positions. */
+  exposureUsd: number;
+  /** v12. Largest single confirmed manual buy right now: min(equity × 100%, cash, exposure room). */
+  manualMaxUsd: number;
+  /** v12. Last crash the phone reported (POST /api/client-crash). */
+  lastClientCrash: { at: number; version: string; brief: string } | null;
 }
 
 export type DeskEvents = {
+  /** v12. Something the UI shows changed outside the log (watchlist prices). */
+  "desk.changed": { reason: string; at: number };
   "scout.candidate": CandidateToken;
   "market.tick": {
     mint: string;
