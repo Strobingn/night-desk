@@ -1,0 +1,31 @@
+services:
+  night-desk:
+    build: .
+    ports:
+      - "4721:4721"
+    environment:
+      LIVE_TRADING: "false"
+      DEMO_FEED: "1"
+      FEED_MODE: auto
+      PORT: "4721"
+      DESK_TOKEN: ${DESK_TOKEN:-}
+      DB_PATH: /data/desk.sqlite
+      LOG_JSONL: /data/desk.jsonl
+    volumes:
+      - desk-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const h={}; if(process.env.DESK_TOKEN) h['x-desk-token']=process.env.DESK_TOKEN; fetch('http://127.0.0.1:4721/api/health',{headers:h}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  desk-data:

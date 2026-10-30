@@ -1,0 +1,424 @@
+import type { ResolvedRules } from "./rules.js";
+
+export type { ResolvedRules };
+
+export type StageName = "scout" | "filter" | "analyst" | "executor" | "risk" | "logger" | "system";
+
+export type TokenSource = "pumpfun" | "raydium" | "replay";
+
+export type ReasonCode =
+  | "MINT_AUTHORITY_ACTIVE"
+  | "LP_NOT_LOCKED"
+  | "HOLDER_CONCENTRATION"
+  | "VOLUME_TOO_LOW"
+  | "DEV_RUG_HISTORY"
+  | "SCORE_BELOW_THRESHOLD"
+  | "NO_AVERAGE_DOWN"
+  | "REVENGE_COOLDOWN"
+  | "INSUFFICIENT_CASH"
+  | "LIQUIDITY_TOO_THIN"
+  | "PRICE_UNAVAILABLE"
+  | "POSITION_CAP"
+  | "LIVE_NOT_ARMED"
+  | "STOP_LOSS"
+  | "TRAIL_STOP"
+  | "MANUAL_CLOSE"
+  | "MANUAL_BUY"
+  | "MAX_OPEN_POSITIONS"
+  | "ENTRY_SLIPPAGE"
+  | "EXIT_IMPACT"
+  | "LIVE_SWAP_FAILED"
+  | "TOKEN_TOO_NEW"
+  | "TOKEN_TOO_OLD"
+  | "HOLDER_COUNT"
+  | "DEV_HOLDING"
+  | "AUTO_BUY_OFF"
+  | "TRADE_RATE"
+  | "DAILY_LOSS";
+
+export interface Rejection {
+  code: ReasonCode;
+  message: string;
+}
+
+export interface SocialProxy {
+  mentions1h: number;
+  hasWebsite: boolean;
+  hasTelegram: boolean;
+  hasTwitter: boolean;
+}
+
+/**
+ * Scout → Filter payload.
+ * Null safety fields mean "not verified". Filter fails closed on those.
+ */
+export interface CandidateToken {
+  mint: string;
+  symbol: string;
+  name: string;
+  source: TokenSource;
+  discoveredAt: number;
+  pairAddress?: string;
+  dex?: string;
+  /** Feed that actually priced this candidate. A later mark from another feed is ignored. */
+  priceFeed?: "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing";
+  priceUsd: number;
+  liquidityUsd: number;
+  volume1hUsd: number;
+  marketCapUsd?: number;
+  ageSeconds: number;
+  /** null = could not verify. Treated as not revoked. */
+  mintAuthorityRevoked: boolean | null;
+  /**
+   * null = could not verify.
+   * Fail closed, except while `onBondingCurve` is true (no pool LP exists yet).
+   * `false` is always a hard reject.
+   */
+  lpLockedOrBurned: boolean | null;
+  /** Pump mint still on the bonding curve, with no AMM pool LP to lock. */
+  onBondingCurve?: boolean;
+  lpLockPct?: number | null;
+  /** Fraction of supply, 0–1. null = could not verify. */
+  top10HolderPct: number | null;
+  holderCount: number | null;
+  /** Fraction of supply the dev wallet holds. null = not verified. */
+  devHoldingPct?: number | null;
+  devWallet?: string | null;
+  /** Populated when an upstream report already links the deployer to rugs. */
+  devRug?: { rugged: boolean; evidence?: string } | null;
+  social: SocialProxy;
+  decimals?: number | null;
+}
+
+export interface FilterCheck {
+  code: ReasonCode;
+  pass: boolean;
+  message: string;
+}
+
+/** Filter → Analyst (pass) or Filter → Logger (reject). */
+export interface FilterResult {
+  token: CandidateToken;
+  decision: "pass" | "reject";
+  checks: FilterCheck[];
+  reasons: Rejection[];
+  /** Set when a soft flag passed the coin through. It is not a kill code. */
+  flags?: Array<"LP_UNLOCKED">;
+}
+
+export interface ScoreFactor {
+  key: "liquidity" | "holders" | "volume" | "age" | "social";
+  label: string;
+  weight: number;
+  /** Unweighted 0–1 factor. */
+  raw: number;
+  contribution: number;
+  note: string;
+}
+
+/** Analyst → Executor (trade) or Analyst → Logger (reject). */
+export interface AnalystReport {
+  token: CandidateToken;
+  score: number;
+  breakdown: ScoreFactor[];
+  decision: "trade" | "reject";
+  reason?: Rejection;
+}
+
+export interface Fill {
+  id: string;
+  mint: string;
+  symbol: string;
+  side: "buy" | "sell";
+  qty: number;
+  priceUsd: number;
+  markUsd: number;
+  slippage: number;
+  notionalUsd: number;
+  feeUsd: number;
+  mode: "paper" | "live";
+  txSignature?: string;
+  at: number;
+  reason: string;
+  code?: ReasonCode;
+  score?: number;
+}
+
+/** Risk → Executor. The only sell path. */
+export interface ExitOrder {
+  mint: string;
+  symbol: string;
+  qty: number;
+  markPrice: number;
+  liquidityUsd: number;
+  reason: Rejection;
+  pnlPct: number;
+  score: number;
+}
+
+export interface Position {
+  mint: string;
+  symbol: string;
+  name: string;
+  qty: number;
+  entryPrice: number;
+  costUsd: number;
+  openedAt: number;
+  peakPrice: number;
+  trailArmed: boolean;
+  score: number;
+  source: TokenSource;
+  /** Who opened the position. Analyst trades stay unlabeled; manual buys say so. */
+  entry?: "manual" | "analyst";
+  /** True when the only filter miss was an unlocked LP and the desk allowed it. */
+  lpUnlocked?: boolean;
+  liquidityUsd: number;
+  decimals?: number | null;
+  /** Feed that priced the entry. Stops ignore every other feed. */
+  priceFeed?: "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing";
+  /** Pool that priced the entry. A different pair cannot mark or stop the position. */
+  pairAddress?: string;
+  dex?: string;
+  tradeId: string;
+  closing?: boolean;
+}
+
+export interface ClosedTrade {
+  id: string;
+  mint: string;
+  symbol: string;
+  openedAt: number;
+  closedAt: number;
+  costUsd: number;
+  proceedsUsd: number;
+  pnlUsd: number;
+  pnlPct: number;
+  exitCode: ReasonCode;
+  score: number;
+  mode: "paper" | "live";
+  entryPrice?: number;
+  exitPrice?: number;
+}
+
+export interface FeedEvent {
+  id: string;
+  ts: number;
+  stage: StageName;
+  kind: "info" | "pass" | "reject" | "fill" | "exit";
+  symbol?: string;
+  mint?: string;
+  code?: ReasonCode | string;
+  message: string;
+  detail?: string;
+}
+
+export interface EquityPoint {
+  t: number;
+  equity: number;
+  cash: number;
+}
+
+export interface PositionView {
+  mint: string;
+  symbol: string;
+  name: string;
+  qty: number;
+  entryPrice: number;
+  markPrice: number;
+  costUsd: number;
+  marketValueUsd: number;
+  pnlUsd: number;
+  pnlPct: number;
+  peakPrice: number;
+  trailArmed: boolean;
+  /** Hard stop. The only automatic exit. */
+  stopPrice: number;
+  /** Peak minus the trail gap, once the hint is armed. Not an order. */
+  trailHintPrice: number | null;
+  score: number;
+  source: TokenSource;
+  entry?: "manual" | "analyst";
+  lpUnlocked?: boolean;
+  /** Milliseconds since the last fresh mark. The hard stop uses that mark. */
+  markAgeMs?: number;
+  openedAt: number;
+}
+
+export interface FeedStatus {
+  mode: "auto" | "replay" | "live";
+  demo: boolean;
+  pumpConnected: boolean;
+  dexLastPollAt: number | null;
+  geckoLastPollAt?: number | null;
+  jupiterLastPollAt?: number | null;
+  bitqueryLastPollAt?: number | null;
+  lastError?: string;
+  sightings: number;
+  enriched: number;
+  dropped: number;
+}
+
+export interface PipelineCounts {
+  scouted: number;
+  filteredPass: number;
+  filteredKill: number;
+  analystTrade: number;
+  analystReject: number;
+  fills: number;
+  riskExits: number;
+  executorSkips: number;
+}
+
+export interface AdviceNote {
+  id: string;
+  ts: number;
+  stance: "sell" | "skip" | "hold" | "watch" | "near-miss";
+  symbol?: string;
+  mint?: string;
+  text: string;
+  code?: string;
+  score?: number;
+}
+
+/**
+ * Host checklist for real-money mode. Nothing here writes LIVE_TRADING or a secret.
+ * The desk stays paper until Austin sets LIVE_TRADING=true and WALLET_KEYPAIR_PATH and restarts.
+ */
+export interface LiveReadiness {
+  mode: "paper" | "live";
+  /** Exact env LIVE_TRADING=true. The phone cannot set this. */
+  liveTradingFlag: boolean;
+  /** Keypair file exists on the desk host. The path and secret are not included. */
+  keypairPresent: boolean;
+  /** Public address derived on the desk host. Null when the file is missing. */
+  walletPublicKey: string | null;
+  /** SOLANA_RPC_URL is non-empty. The URL itself is not sent (it may contain an API key). */
+  rpcPresent: boolean;
+  /** Operator note. Does not change mode and does not store a wallet. */
+  operatorReady: boolean;
+  lines: string[];
+}
+
+export interface ManualBuyResult {
+  ok: true;
+  mint: string;
+  symbol: string;
+  /** Dollars actually filled. Never above the position cap. */
+  sizeUsd: number;
+  mode: "paper" | "live";
+  /** Present when the request was larger than the cap and cut down to sizeUsd. */
+  clampedFrom?: number;
+}
+
+export interface ManualBuyRefusal {
+  ok: false;
+  error: string;
+  code: string;
+}
+
+/** Operator preferences saved with the volume floor. The hard stop is not one of these. */
+export interface DeskPrefs {
+  /** Null means a blank manual buy uses the position cap. */
+  defaultBuyUsd: number | null;
+  maxOpenPositions: number;
+  /** Default on. A lone unlocked LP can pass and be bought. */
+  allowUnlockedLp: boolean;
+  autoBuy: boolean;
+  minLiquidityUsd: number;
+  minTokenAgeMin: number;
+  maxTokenAgeMin: number;
+  minHolderCount: number;
+  maxDevHoldingPct: number;
+  maxTradesPerHour: number;
+  dailyMaxLossUsd: number;
+  cooldownHours: number;
+  trailTakeProfit: boolean;
+  notifyNearMiss: boolean;
+  notifyFills: boolean;
+  notifyStops: boolean;
+  pnlAlertPct: number;
+  scoutDexscreener: boolean;
+  scoutGecko: boolean;
+  scoutJupiter: boolean;
+  scoutDexpaprika: boolean;
+  scoutBitquery: boolean;
+}
+
+export interface MintCooldown {
+  mint: string;
+  until: number;
+  /** Whole minutes left, rounded up. Matches the revenge refusal text. */
+  minutesLeft: number;
+}
+
+export interface DeskSnapshot {
+  mode: "paper" | "live";
+  liveRequested: boolean;
+  armError?: string;
+  readiness: LiveReadiness;
+  startedAt: number;
+  now: number;
+  startingBalanceUsd: number;
+  cashUsd: number;
+  equityUsd: number;
+  sessionPnlUsd: number;
+  sessionPnlPct: number;
+  rules: ResolvedRules;
+  prefs: DeskPrefs;
+  /** Dollars a blank or oversized manual buy will actually use. min(equity × position %, cash), floored. */
+  positionCapUsd: number;
+  /** Hard-stop bans still running. Auto buys stay blocked. A manual buy can override. */
+  cooldowns: MintCooldown[];
+  feed: FeedStatus;
+  pipeline: PipelineCounts;
+  killReasons: Record<string, number>;
+  positions: PositionView[];
+  closed: ClosedTrade[];
+  equity: EquityPoint[];
+  events: FeedEvent[];
+  /** Latest advisory lines. Display only. */
+  advice: AdviceNote[];
+}
+
+export type DeskEvents = {
+  "scout.candidate": CandidateToken;
+  "market.tick": {
+    mint: string;
+    priceUsd: number;
+    at: number;
+    feed?: string;
+    pairAddress?: string;
+    dex?: string;
+    liquidityUsd?: number;
+  };
+  "filter.result": FilterResult;
+  "analyst.report": AnalystReport;
+  "executor.fill": Fill;
+  "executor.skip": { token: CandidateToken; reason: Rejection; score?: number };
+  "risk.exit": ExitOrder;
+  "log.event": FeedEvent;
+};
+
+export interface RawSighting {
+  mint: string;
+  symbol?: string;
+  name?: string;
+  source: "pumpfun" | "raydium";
+  devWallet?: string;
+  observedAt: number;
+  /** Carried from a listing that already printed 1h volume. DexScreener's pair read still wins when it has a number. */
+  volume1hUsd?: number;
+  priceUsd?: number;
+  liquidityUsd?: number;
+  /** Which listing printed priceUsd. Dex pair prices use dexscreener instead. */
+  priceFeed?: "jupiter" | "gecko";
+}
+
+export type RugLookup =
+  | { status: "clean"; evidence?: string }
+  | { status: "unknown"; evidence?: string }
+  | { status: "rugged"; evidence: string };
+
+export interface RugRegistry {
+  lookup(wallet?: string | null): Promise<RugLookup>;
+}
