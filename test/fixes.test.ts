@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ageScore,
   decideScore,
@@ -338,11 +338,17 @@ describe("open positions get priced on the live feed", () => {
     try {
       await desk.submitCandidate(makeToken({ symbol: "ERR", mint: "ErrBanner1111111111111111111111111111111111", source: "raydium" }));
       await desk.repricePositions();
+      // v12.1: one failed poll is not a banner; two minutes of failures is.
+      expect(desk.snapshot().feed.lastError).toBeUndefined();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 121_000);
+      await desk.repricePositions();
       expect(desk.snapshot().feed.lastError).toContain("dexscreener HTTP 503");
       ok = true;
       await desk.repricePositions();
       expect(desk.snapshot().feed.lastError).toBeUndefined();
     } finally {
+      vi.useRealTimers();
       desk.stop();
     }
   });

@@ -17,6 +17,8 @@ export interface EnrichDeps {
   /** Pages of 1,000 token accounts when the RPC is Helius. 0 keeps the top-20 read. */
   holderPagesMax?: number;
   dasGapMs?: number;
+  /** v12.1: batched DexScreener lookup. When absent, one /latest/dex/tokens call per mint. */
+  dexLookup?: (mint: string) => Promise<unknown | null>;
 }
 
 const DAS_PAGE = 1_000;
@@ -68,7 +70,9 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     ? `${deps.rugcheckUrl.replace(/\/$/, "")}/tokens/${raw.mint}/report`
     : null;
   const [dex, mintInfo, report] = await Promise.all([
-    fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`),
+    deps.dexLookup
+      ? deps.dexLookup(raw.mint).catch(() => null)
+      : fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`),
     deps.rpcUrl
       ? rpc(fetchImpl, deps.rpcUrl, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }])
       : Promise.resolve(null),

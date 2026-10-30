@@ -269,3 +269,19 @@ input[type="range"] { width: 100%; accent-color: var(--lime); height: 28px; }
   dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lookup-form { flex-direction: column; }
 }
+
+/* v12.1 Scout status */
+.scout-status { padding: 10px 12px; }
+.scout-status > header { margin-bottom: 4px; }
+.scout-status ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.scout-status li { display: grid; grid-template-columns: 10px 96px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.scout-status li i { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+.scout-status li b { font-weight: 600; white-space: nowrap; }
+.scout-status li em { font-style: normal; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scout-status li small { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 11px; }
+.scout-status li.live i { background: var(--mint); box-shadow: 0 0 6px rgba(141, 250, 206, 0.6); }
+.scout-status li.live em { color: var(--mint); }
+.scout-status li.backoff i { background: var(--amber); }
+.scout-status li.backoff em { color: var(--amber); }
+.scout-status li.down i { background: #ff6a45; }
+.scout-status li.down em { color: #ffc2b4; }

@@ -26,11 +26,11 @@ describe("unlocked LP flag and held-mint marks", () => {
     const first = await book.fetch([floatMint], fetchImpl, 1_000);
     expect(first.get(floatMint)?.priceUsd).toBe(0.42);
     expect(urls[0]).toContain("dexscreener");
-    expect(urls[1]).toContain("lite-api.jup.ag");
+    expect(urls[1]).toContain("api.jup.ag");
     const before = urls.length;
     const second = await book.fetch([floatMint], fetchImpl, 1_000);
     expect(second.get(floatMint)?.priceUsd).toBe(0.42);
-    expect(urls.slice(before).every((url) => url.includes("lite-api.jup.ag"))).toBe(true);
+    expect(urls.slice(before).every((url) => url.includes("api.jup.ag"))).toBe(true);
   });
 
   it("does not hammer either source while both are cooling off a 429", async () => {

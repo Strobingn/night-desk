@@ -17,6 +17,7 @@ export interface DexQuote {
  */
 export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fetch): Promise<Map<string, DexQuote>> {
   const out = new Map<string, DexQuote>();
+  mints = [...new Set(mints)];
   for (let i = 0; i < mints.length; i += BATCH) {
     const batch = mints.slice(i, i + BATCH);
     const res = await fetchImpl(`https://api.dexscreener.com/tokens/v1/solana/${batch.join(",")}`, {
@@ -81,14 +82,27 @@ export function parseJupiterPrices(body: unknown, mints: string[]): Map<string, 
   return out;
 }
 
+/** Jupiter price v3 takes up to 50 ids per call. */
+export const JUPITER_PRICE_BATCH = 50;
+
+/**
+ * v12.1: api.jup.ag (lite-api.jup.ag is being retired; both share one keyless bucket).
+ * Unique ids only, 50 per call.
+ */
 export async function fetchJupiterQuotes(mints: string[], fetchImpl: FetchLike = fetch): Promise<Map<string, DexQuote>> {
-  if (!mints.length) return new Map();
-  const res = await fetchImpl(`https://lite-api.jup.ag/price/v3?ids=${encodeURIComponent(mints.join(","))}`, {
-    headers: { accept: "application/json", "user-agent": "night-desk/1.0" },
-    signal: AbortSignal.timeout(6_000)
-  });
-  if (!res.ok) throw new Error(`jupiter HTTP ${res.status}`);
-  return parseJupiterPrices(await res.json(), mints);
+  const unique = [...new Set(mints)];
+  if (!unique.length) return new Map();
+  const out = new Map<string, DexQuote>();
+  for (let i = 0; i < unique.length; i += JUPITER_PRICE_BATCH) {
+    const chunk = unique.slice(i, i + JUPITER_PRICE_BATCH);
+    const res = await fetchImpl(`https://api.jup.ag/price/v3?ids=${encodeURIComponent(chunk.join(","))}`, {
+      headers: { accept: "application/json", "user-agent": "night-desk/1.0" },
+      signal: AbortSignal.timeout(6_000)
+    });
+    if (!res.ok) throw new Error(`jupiter HTTP ${res.status}`);
+    for (const [mint, quote] of parseJupiterPrices(await res.json(), chunk)) out.set(mint, quote);
+  }
+  return out;
 }
 
 export type QuoteSource = "dexscreener" | "jupiter";

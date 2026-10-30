@@ -260,10 +260,49 @@ export interface FeedStatus {
   geckoLastPollAt?: number | null;
   jupiterLastPollAt?: number | null;
   bitqueryLastPollAt?: number | null;
+  /** v12.1: only set once a source has failed for 2+ minutes straight (old clients show it as the banner). */
   lastError?: string;
   sightings: number;
   enriched: number;
   dropped: number;
+  /** v12.1 per-source Scout status. */
+  sources?: FeedSourceStatus[];
+  /** v12.1 shared request budget per rate-limit bucket. */
+  budgets?: FeedBudgetStatus[];
+}
+
+export type FeedSourceState = "live" | "backoff" | "down" | "off";
+
+export interface FeedSourceStatus {
+  id: "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery";
+  label: string;
+  enabled: boolean;
+  state: FeedSourceState;
+  detail?: string;
+  /** Backing off until this time (ms). */
+  retryAt: number | null;
+  failingSince: number | null;
+  lastOkAt: number | null;
+  reqPerMin: number;
+  budgetPerMin: number | null;
+  limitPerMin: number | null;
+  count429: number;
+  sightingsPerMin: number;
+}
+
+export interface FeedBudgetStatus {
+  id: string;
+  source: string;
+  limitPerMin: number;
+  budgetPerMin: number;
+  reqLastMin: number;
+  cacheHitsLastMin: number;
+  count429: number;
+  sent: number;
+  rateFactor: number;
+  pausedUntil: number | null;
+  queued: number;
+  note: string;
 }
 
 export interface PipelineCounts {

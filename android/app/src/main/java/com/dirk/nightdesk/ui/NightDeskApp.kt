@@ -65,7 +65,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextOverflow
 import com.dirk.nightdesk.AdviceNote
+import com.dirk.nightdesk.FeedSource
+import com.dirk.nightdesk.feedSourceRateText
+import com.dirk.nightdesk.feedSourceStateText
 import com.dirk.nightdesk.CrashLog
 import com.dirk.nightdesk.DeskRepository
 import com.dirk.nightdesk.formatUsd
@@ -135,6 +139,9 @@ fun NightDeskApp(desk: DeskRepository) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).background(Night)) {
             Header(status = status, live = live, mode = snap?.mode ?: "paper")
+            snap?.feedBanner?.let { banner ->
+                Text("Feed: $banner", color = Coral, modifier = Modifier.padding(horizontal = 20.dp), fontSize = 12.sp)
+            }
             if (!error.isNullOrBlank()) {
                 Text(error ?: "", color = Coral, modifier = Modifier.padding(horizontal = 20.dp), fontSize = 12.sp)
             }
@@ -165,7 +172,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     snap?.events.orEmpty(),
                     positionCapUsd = snap?.positionCapUsd,
                     cooldowns = snap?.cooldowns.orEmpty(),
-                    onBuy = { mint, size, ignore -> scope.launch { desk.buyPosition(mint, size, ignore) } }
+                    onBuy = { mint, size, ignore -> scope.launch { desk.buyPosition(mint, size, ignore) } },
+                    feedSources = snap?.feedSources.orEmpty()
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -738,7 +746,8 @@ private fun TapeScreen(
     events: List<TapeEvent>,
     positionCapUsd: Double?,
     cooldowns: List<MintCooldown>,
-    onBuy: (String, Double?, Boolean) -> Unit
+    onBuy: (String, Double?, Boolean) -> Unit,
+    feedSources: List<FeedSource> = emptyList()
 ) {
     var stage by remember { mutableStateOf("all") }
     var selected by remember { mutableStateOf<TapeEvent?>(null) }
@@ -842,6 +851,7 @@ private fun TapeScreen(
         }
     }
     Column(Modifier.fillMaxSize()) {
+        ScoutStatusCard(feedSources)
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
             val mintLabel = selected?.mint
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -1122,6 +1132,48 @@ private fun fmtPx(n: Double): String = when {
     n >= 1 -> "%.4f".format(Locale.US, n)
     n >= 0.01 -> "%.6f".format(Locale.US, n)
     else -> "%.8f".format(Locale.US, n)
+}
+
+/** v12.1 Scout status: each source live, backing off with a countdown, down, or off. */
+@Composable
+private fun ScoutStatusCard(sources: List<FeedSource>) {
+    if (sources.isEmpty()) return
+    val counting = sources.any { it.state == "backoff" && it.retryAt != null }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(counting) {
+        while (counting) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
+    val live = sources.count { it.state == "live" }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .background(Color(0xFF151A12), RoundedCornerShape(14.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Scout status", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text("$live/${sources.size} live · ${sources.sumOf { it.sightingsPerMin }} coins/min", color = Dim, fontSize = 11.sp)
+        }
+        sources.forEach { src ->
+            val tint = when (src.state) {
+                "live" -> Mint
+                "backoff" -> Amber
+                "down" -> Coral
+                else -> Dim
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(8.dp).height(8.dp).background(tint, RoundedCornerShape(4.dp)))
+                Spacer(Modifier.width(8.dp))
+                Text(src.label, color = Color.White, fontSize = 12.sp, modifier = Modifier.width(98.dp), maxLines = 1)
+                Text(feedSourceStateText(src, now), color = tint, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(feedSourceRateText(src), color = Dim, fontSize = 11.sp, maxLines = 1)
+            }
+        }
+    }
 }
 
 private val clockFmt: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())

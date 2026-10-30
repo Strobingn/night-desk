@@ -115,8 +115,17 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
 
 /** DexPaprika pool list. The non-quote token is the candidate. A quiet body is an empty list. */
 export function parseDexPaprika(payload: unknown, now = Date.now()): RawSighting[] {
-  const root = payload && typeof payload === "object" ? (payload as { pools?: unknown; data?: unknown }) : null;
-  const pools = Array.isArray(payload) ? payload : Array.isArray(root?.pools) ? root.pools : Array.isArray(root?.data) ? root.data : [];
+  const root = payload && typeof payload === "object" ? (payload as { pools?: unknown; data?: unknown; results?: unknown }) : null;
+  // v12.1: pools/search answers { results: [...] }; the removed /pools endpoint used { pools } or { data }.
+  const pools = Array.isArray(payload)
+    ? payload
+    : Array.isArray(root?.results)
+      ? root.results
+      : Array.isArray(root?.pools)
+        ? root.pools
+        : Array.isArray(root?.data)
+          ? root.data
+          : [];
   const out: RawSighting[] = [];
   for (const pool of pools) {
     if (!pool || typeof pool !== "object") continue;
@@ -128,12 +137,14 @@ export function parseDexPaprika(payload: unknown, now = Date.now()): RawSighting
       volume_usd?: unknown;
     };
     const tokens = Array.isArray(rec.tokens) ? rec.tokens : [];
-    const base = tokens
-      .map((token) => (token && typeof token === "object" ? (token as { id?: unknown; symbol?: unknown; name?: unknown }) : null))
-      .find((token) => {
-        const mint = text(token?.id);
-        return Boolean(mint && !QUOTE_MINTS.has(mint));
-      });
+    const mapped = tokens.map((token) => (token && typeof token === "object" ? (token as { id?: unknown; symbol?: unknown; name?: unknown }) : null));
+    const baseIndex = mapped.findIndex((token) => {
+      const mint = text(token?.id);
+      return Boolean(mint && !QUOTE_MINTS.has(mint));
+    });
+    const base = baseIndex >= 0 ? mapped[baseIndex] : undefined;
+    // pools/search prices the pool's first token; when that is SOL/USDC the price is not this coin's.
+    const priceIsBase = baseIndex <= 0;
     const mint = text(base?.id);
     if (!mint) continue;
     const dex = text(rec.dex_name) ?? text(rec.dexName);
@@ -143,7 +154,7 @@ export function parseDexPaprika(payload: unknown, now = Date.now()): RawSighting
       name: text(base?.name)?.slice(0, 48),
       source: sourceFor(mint, dex),
       observedAt: now,
-      priceUsd: num(rec.price_usd) > 0 ? num(rec.price_usd) : undefined,
+      priceUsd: priceIsBase && num(rec.price_usd) > 0 ? num(rec.price_usd) : undefined,
       volume1hUsd: num(rec.volume_usd) > 0 ? num(rec.volume_usd) : undefined
     });
   }

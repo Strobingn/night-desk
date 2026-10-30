@@ -260,8 +260,72 @@ data class DeskSnapshot(
     val manualMaxUsd: Double = 0.0,
     val exposureUsd: Double = 0.0,
     val watchlist: List<WatchRow> = emptyList(),
-    val lastClientCrash: String? = null
+    val lastClientCrash: String? = null,
+    /** v12.1 per-source Scout status. */
+    val feedSources: List<FeedSource> = emptyList(),
+    /** v12.1: set only once a source has failed for 2+ minutes straight. */
+    val feedBanner: String? = null
 )
+
+/** v12.1 one Scout source: live, backoff (with retryAt), down, or off. */
+data class FeedSource(
+    val id: String,
+    val label: String,
+    val enabled: Boolean,
+    val state: String,
+    val detail: String?,
+    val retryAt: Long?,
+    val reqPerMin: Int,
+    val budgetPerMin: Int?,
+    val sightingsPerMin: Int
+)
+
+/** Same wording as the web Scout status. */
+fun feedSourceStateText(src: FeedSource, nowMs: Long): String {
+    val detail = src.detail?.takeIf { it.isNotBlank() }
+    return when (src.state) {
+        "live" -> if (src.id == "pump") "live · websocket" else "live"
+        "off" -> if (detail != null) "off · $detail" else "off"
+        "down" -> if (detail != null) "down · $detail" else "down"
+        else -> {
+            val left = src.retryAt?.let { kotlin.math.ceil((it - nowMs) / 1000.0).toLong().coerceAtLeast(0L) }
+            val wait = if (left != null && left > 0) {
+                " · retry in " + if (left >= 60) "${left / 60}:" + "%02d".format(java.util.Locale.US, left % 60) else "${left}s"
+            } else ""
+            "backing off$wait" + (if (detail != null) " · $detail" else "")
+        }
+    }
+}
+
+fun feedSourceRateText(src: FeedSource): String = when {
+    src.id == "pump" -> "${src.sightingsPerMin}/min new"
+    src.budgetPerMin == null -> ""
+    else -> "${src.reqPerMin}/${src.budgetPerMin} req/min"
+}
+
+internal fun parseFeedSources(feed: JSONObject?): List<FeedSource> {
+    val rows = feed?.optJSONArray("sources") ?: return emptyList()
+    return buildList {
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val id = row.optText("id")
+            if (id.isBlank()) continue
+            add(
+                FeedSource(
+                    id = id,
+                    label = row.optText("label", id),
+                    enabled = row.optBoolean("enabled", true),
+                    state = row.optText("state", "live"),
+                    detail = row.optText("detail").ifBlank { null },
+                    retryAt = if (row.has("retryAt") && !row.isNull("retryAt")) row.optFinite("retryAt").toLong().takeIf { it > 0 } else null,
+                    reqPerMin = row.optFinite("reqPerMin").toInt(),
+                    budgetPerMin = if (row.has("budgetPerMin") && !row.isNull("budgetPerMin")) row.optFinite("budgetPerMin").toInt() else null,
+                    sightingsPerMin = row.optFinite("sightingsPerMin").toInt()
+                )
+            )
+        }
+    }
+}
 
 /** Same sentence the web desk shows after a manual buy. */
 fun formatBuyNotice(ok: Boolean, error: String?, symbol: String?, sizeUsd: Double?, mode: String?, clampedFrom: Double?): String {
@@ -490,7 +554,10 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
     }
     val equityUsd = data.optFinite("equityUsd")
     val cashUsd = data.optFinite("cashUsd")
+    val feed = data.optJSONObject("feed")
     return DeskSnapshot(
+        feedSources = parseFeedSources(feed),
+        feedBanner = feed?.optText("lastError")?.ifBlank { null },
         mode = data.optText("mode", "paper"),
         cashUsd = cashUsd,
         equityUsd = equityUsd,

@@ -1,20 +1,38 @@
 import WebSocket from "ws";
 import type { EventBus } from "../bus.js";
 import { enrichSighting } from "../market/enrich.js";
+import { DexTokenBatcher } from "../market/dex-batch.js";
+import { bucketFor, type NetLimiter, type SourceId } from "../market/net.js";
+import { FeedHealth, SOURCE_ORDER } from "./feed-health.js";
 import { parseDexListings, parseDexPaprika, parseGeckoPools, parseJupiterRecent } from "../market/listings.js";
 import type { DeskEvents, FeedStatus, RawSighting } from "../types.js";
 
-/** How often each live listing feed is polled. Pump stays on its websocket. */
+/**
+ * How often each live listing feed is polled. Pump stays on its websocket, unthrottled.
+ * v12.1: DexScreener lists poll twice as often (6/min each against a 60/min limit) and
+ * Jupiter recent goes 20s -> 15s. GeckoTerminal caches every answer for 60s server-side
+ * and its keyless limit is ~5/min, so it drops to 3/min (budget 4/min) and gets what is left.
+ */
 export const SCOUT_POLL_MS = {
-  dexProfiles: 20_000,
-  dexBoostsLatest: 20_000,
-  dexBoostsTop: 45_000,
-  dexTakeovers: 60_000,
-  geckoNew: 15_000,
-  geckoTrending: 30_000,
-  jupiterRecent: 20_000,
+  dexProfiles: 10_000,
+  dexBoostsLatest: 10_000,
+  dexBoostsTop: 30_000,
+  dexTakeovers: 30_000,
+  geckoNew: 30_000,
+  geckoTrending: 60_000,
+  jupiterRecent: 15_000,
+  dexPaprikaNew: 20_000,
+  dexPaprikaTop: 60_000,
   bitquery: 30_000
 } as const;
+
+/** After an HTTP 410 the source is marked down and only re-checked this often. */
+export const GONE_RECHECK_MS = 30 * 60_000;
+
+export const JUPITER_RECENT_URL = "https://api.jup.ag/tokens/v2/recent";
+/** DexPaprika removed /networks/solana/pools (HTTP 410) and points at pools/search. */
+export const DEXPAPRIKA_NEW_URL = "https://api.dexpaprika.com/networks/solana/pools/search?limit=25&order_by=created_at&sort=desc";
+export const DEXPAPRIKA_TOP_URL = "https://api.dexpaprika.com/networks/solana/pools/search?limit=25&order_by=volume_usd_24h&sort=desc";
 
 export interface ScoutSources {
   dexscreener: boolean;
@@ -47,6 +65,8 @@ export interface ScoutOptions {
   /** Helius DAS pages past the 20-account RPC cap. Ignored on a public RPC. */
   holderPagesMax?: number;
   fetchImpl?: typeof fetch;
+  /** v12.1 shared request budget. Without it (unit tests) calls go straight to fetchImpl. */
+  net?: NetLimiter;
   onStatus: (patch: Partial<FeedStatus>) => void;
 }
 
@@ -67,10 +87,18 @@ export class Scout {
   private readonly timers: NodeJS.Timeout[] = [];
   private sources: ScoutSources = { ...DEFAULT_SCOUT_SOURCES };
   readonly status: FeedStatus;
+  readonly health = new FeedHealth();
+  private readonly goneUntil = new Map<SourceId, number>();
+  private readonly listFetch: typeof fetch;
+  private readonly enrichFetch: typeof fetch | undefined;
+  private readonly batcher: DexTokenBatcher | null;
 
   constructor(private readonly opts: ScoutOptions) {
     this.concurrency = clampInt(opts.enrichConcurrency, 8, 1, 16);
     this.queueCap = clampInt(opts.queueCap, 160, 1, 2000);
+    this.listFetch = opts.net ? opts.net.fetchAt(2) : opts.fetchImpl ?? fetch;
+    this.enrichFetch = opts.net ? opts.net.fetchAt(1) : opts.fetchImpl;
+    this.batcher = opts.net ? new DexTokenBatcher(opts.net.fetchAt(1)) : null;
     this.status = {
       mode: opts.feedMode,
       demo: opts.demo,
@@ -93,12 +121,13 @@ export class Scout {
     this.every(4_000, SCOUT_POLL_MS.dexBoostsTop, () => this.pollDexList("https://api.dexscreener.com/token-boosts/top/v1"));
     this.every(6_000, SCOUT_POLL_MS.dexTakeovers, () => this.pollDexList("https://api.dexscreener.com/community-takeovers/latest/v1"));
     this.every(1_000, SCOUT_POLL_MS.geckoNew, () => this.pollGecko("https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1"));
-    this.every(8_000, SCOUT_POLL_MS.geckoTrending, () => this.pollGecko("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1"));
+    this.every(16_000, SCOUT_POLL_MS.geckoTrending, () => this.pollGecko("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1"));
     this.every(3_000, SCOUT_POLL_MS.jupiterRecent, () => this.pollJupiter());
     if (this.opts.bitqueryKey) {
       this.every(5_000, SCOUT_POLL_MS.bitquery, () => this.pollBitquery());
     }
-    this.every(7_000, 20_000, () => this.pollDexPaprika());
+    this.every(7_000, SCOUT_POLL_MS.dexPaprikaNew, () => this.pollDexPaprika(DEXPAPRIKA_NEW_URL));
+    this.every(37_000, SCOUT_POLL_MS.dexPaprikaTop, () => this.pollDexPaprika(DEXPAPRIKA_TOP_URL));
   }
 
   /** Pump stays on. The other polls read these flags on each tick, so a save takes effect without a restart. */
@@ -139,7 +168,7 @@ export class Scout {
     this.opts.bus.emit("market.tick", { mint, priceUsd, at: Date.now(), ...origin });
   }
 
-  ingest(raw: RawSighting): void {
+  ingest(raw: RawSighting, origin?: SourceId): void {
     const mint = raw.mint.trim();
     if (!mint) return;
     raw.mint = mint;
@@ -166,6 +195,7 @@ export class Scout {
       }
     }
     this.status.sightings += 1;
+    if (origin) this.health.sighting(origin);
     if (this.queue.length >= this.queueCap) {
       const dropped = this.queue.shift();
       if (dropped) this.seen.delete(dropped.mint);
@@ -194,8 +224,9 @@ export class Scout {
       const token = await enrichSighting(raw, {
         rpcUrl: this.opts.rpcUrl,
         rugcheckUrl: this.opts.rugcheckUrl,
-        fetchImpl: this.opts.fetchImpl,
-        holderPagesMax: this.opts.holderPagesMax
+        fetchImpl: this.enrichFetch,
+        holderPagesMax: this.opts.holderPagesMax,
+        dexLookup: this.batcher ? (mint) => this.batcher!.get(mint) : undefined
       });
       const slot = this.seen.get(raw.mint);
       if (slot) {
@@ -206,9 +237,10 @@ export class Scout {
       this.opts.onStatus({ ...this.status });
       this.publish(token);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.status.lastError = message;
-      this.opts.onStatus({ ...this.status });
+      // One coin failing to enrich is not a feed outage; it never reaches the banner.
+      const slot = this.seen.get(raw.mint);
+      if (slot) slot.state = "done";
+      void err;
     }
   }
 
@@ -218,12 +250,13 @@ export class Scout {
     try {
       ws = new WebSocket(this.opts.pumpWsUrl);
     } catch (err) {
-      this.noteError(err);
+      this.health.fail("pump", err instanceof Error ? err.message : String(err));
       this.schedulePumpReconnect();
       return;
     }
     this.pump = ws;
     ws.on("open", () => {
+      this.health.ok("pump");
       this.status.pumpConnected = true;
       this.opts.onStatus({ ...this.status });
       ws.send(JSON.stringify({ method: "subscribeNewToken" }));
@@ -246,18 +279,19 @@ export class Scout {
           source: "pumpfun",
           devWallet: msg.traderPublicKey,
           observedAt: Date.now()
-        });
+        }, "pump");
       } catch {
         /* malformed frame */
       }
     });
     ws.on("close", () => {
+      this.health.fail("pump", "stream closed, reconnecting");
       this.status.pumpConnected = false;
       this.opts.onStatus({ ...this.status });
       this.schedulePumpReconnect();
     });
     ws.on("error", (err) => {
-      this.noteError(err);
+      this.health.fail("pump", err instanceof Error ? err.message : String(err));
       this.status.pumpConnected = false;
       this.opts.onStatus({ ...this.status });
     });
@@ -269,73 +303,103 @@ export class Scout {
     this.pumpTimer = setTimeout(() => this.connectPump(), 5_000);
   }
 
-  private async pollDexList(url: string): Promise<void> {
-    if (this.stopped || !this.sources.dexscreener) return;
-    try {
-      const res = await this.http(url);
-      if (!res.ok) throw new Error(`dexscreener HTTP ${res.status}`);
-      const rows = parseDexListings(await res.json());
+  private pollDexList(url: string): Promise<void> {
+    if (!this.sources.dexscreener) return Promise.resolve();
+    return this.poll("dexscreener", url, parseDexListings, () => {
       this.status.dexLastPollAt = Date.now();
-      this.opts.onStatus({ ...this.status });
-      for (const row of rows) this.ingest(row);
-    } catch (err) {
-      this.noteError(err);
-    }
+    });
   }
 
-  private async pollGecko(url: string): Promise<void> {
-    if (this.stopped || !this.sources.gecko) return;
-    try {
-      const res = await this.http(url);
-      if (!res.ok) throw new Error(`geckoterminal HTTP ${res.status}`);
-      const rows = parseGeckoPools(await res.json());
+  private pollGecko(url: string): Promise<void> {
+    if (!this.sources.gecko) return Promise.resolve();
+    return this.poll("gecko", url, parseGeckoPools, () => {
       this.status.geckoLastPollAt = Date.now();
+    });
+  }
+
+  private pollJupiter(): Promise<void> {
+    if (!this.sources.jupiter) return Promise.resolve();
+    return this.poll("jupiter", JUPITER_RECENT_URL, parseJupiterRecent, () => {
+      this.status.jupiterLastPollAt = Date.now();
+    });
+  }
+
+  private pollDexPaprika(url: string): Promise<void> {
+    if (!this.sources.dexpaprika) return Promise.resolve();
+    return this.poll("dexpaprika", url, parseDexPaprika, () => undefined);
+  }
+
+  /**
+   * One list poll through the shared budget. A bucket that is backing off is skipped
+   * (no queue pile-up). HTTP 410 marks the source down and re-checks every 30 minutes.
+   */
+  private async poll(id: SourceId, url: string, parse: (body: unknown) => RawSighting[], onOk: () => void, init?: RequestInit): Promise<void> {
+    if (this.stopped) return;
+    const now = Date.now();
+    if ((this.goneUntil.get(id) ?? 0) > now) return;
+    const spec = bucketFor(url);
+    if (spec && this.opts.net?.pausedUntil(spec)) return;
+    try {
+      const res = await this.http(url, init);
+      if (this.markUnavailable(id, res.status)) return;
+      if (!res.ok) {
+        this.health.fail(id, `HTTP ${res.status}`);
+        return;
+      }
+      const rows = parse(await res.json());
+      this.goneUntil.delete(id);
+      this.health.ok(id);
+      onOk();
       this.opts.onStatus({ ...this.status });
-      for (const row of rows) this.ingest(row);
+      for (const row of rows) this.ingest(row, id);
     } catch (err) {
-      this.noteError(err);
+      const message = err instanceof Error ? err.message : String(err);
+      this.health.fail(id, /abort|timeout/i.test(message) ? "timed out" : message.slice(0, 80));
     }
   }
 
-  private async pollJupiter(): Promise<void> {
-    if (this.stopped || !this.sources.jupiter) return;
-    try {
-      const res = await this.http("https://lite-api.jup.ag/tokens/v2/recent");
-      if (!res.ok) throw new Error(`jupiter HTTP ${res.status}`);
-      const rows = parseJupiterRecent(await res.json());
-      this.status.jupiterLastPollAt = Date.now();
-      this.opts.onStatus({ ...this.status });
-      for (const row of rows) this.ingest(row);
-    } catch (err) {
-      this.noteError(err);
-    }
+  /**
+   * HTTP 410 (endpoint removed) and 401/402/403 (key or plan rejected) will not fix
+   * themselves in two minutes: show the source as down, re-check every 30 minutes, no banner.
+   */
+  private markUnavailable(id: SourceId, status: number): boolean {
+    const reason =
+      status === 410 ? "endpoint removed (HTTP 410)" : status === 401 || status === 402 || status === 403 ? `key or plan rejected (HTTP ${status})` : null;
+    if (!reason) return false;
+    this.goneUntil.set(id, Date.now() + GONE_RECHECK_MS);
+    this.health.unavailable(id, reason);
+    return true;
   }
 
   private http(url: string, init?: RequestInit): Promise<Response> {
-    const impl = this.opts.fetchImpl ?? fetch;
-    return impl(url, {
+    return this.listFetch(url, {
       ...init,
       headers: { accept: "application/json", "user-agent": "night-desk/1.0", ...(init?.headers ?? {}) },
-      signal: AbortSignal.timeout(6000)
+      signal: AbortSignal.timeout(8000)
     });
+  }
+
+  /**
+   * Live per-source status for the snapshot. `lastError` is the banner text and is only
+   * set when a source that is on has failed for 2+ minutes straight.
+   */
+  report(now = Date.now()): Pick<FeedStatus, "sources" | "budgets" | "lastError"> {
+    const budgets = this.opts.net?.stats() ?? [];
+    const replay = this.opts.feedMode === "replay";
+    const sources = SOURCE_ORDER.map((id) => {
+      const enabled =
+        !replay &&
+        (id === "pump" ? true : id === "bitquery" ? this.sources.bitquery && Boolean(this.opts.bitqueryKey) : this.sources[id]);
+      const idleReason = replay ? "replay mode" : id === "bitquery" && !this.opts.bitqueryKey ? "no API key" : "turned off";
+      return this.health.status(id, { enabled, idleReason, buckets: budgets, connected: id === "pump" ? this.status.pumpConnected : undefined, now });
+    });
+    return { sources, budgets, lastError: this.health.banner(sources, now) };
   }
 
   /**
    * Optional Bitquery poll. Requires BITQUERY_API_KEY. Failures stay on the feed status
    * and never block PumpPortal or DexScreener.
    */
-  private async pollDexPaprika(): Promise<void> {
-    if (this.stopped || !this.sources.dexpaprika) return;
-    try {
-      const res = await this.http("https://api.dexpaprika.com/networks/solana/pools?limit=25&orderBy=volume_usd&sort=desc");
-      if (!res.ok) throw new Error(`dexpaprika HTTP ${res.status}`);
-      const rows = parseDexPaprika(await res.json());
-      for (const row of rows) this.ingest(row);
-    } catch (err) {
-      this.noteError(err);
-    }
-  }
-
   private async pollBitquery(): Promise<void> {
     if (this.stopped || !this.opts.bitqueryKey || !this.sources.bitquery) return;
     const query = `
@@ -348,6 +412,9 @@ export class Scout {
           }
         }
       }`;
+    const spec = bucketFor("https://streaming.bitquery.io/graphql");
+    if (spec && this.opts.net?.pausedUntil(spec)) return;
+    if ((this.goneUntil.get("bitquery") ?? 0) > Date.now()) return;
     try {
       const res = await this.http("https://streaming.bitquery.io/graphql", {
         method: "POST",
@@ -357,10 +424,15 @@ export class Scout {
         },
         body: JSON.stringify({ query })
       });
-      if (!res.ok) throw new Error(`bitquery HTTP ${res.status}`);
+      if (this.markUnavailable("bitquery", res.status)) return;
+      if (!res.ok) {
+        this.health.fail("bitquery", `HTTP ${res.status}`);
+        return;
+      }
       const body = (await res.json()) as {
         data?: { Solana?: { DEXTrades?: Array<{ Trade?: { Buy?: { Currency?: { MintAddress?: string; Symbol?: string; Name?: string } } } }> } };
       };
+      this.health.ok("bitquery");
       this.status.bitqueryLastPollAt = Date.now();
       this.opts.onStatus({ ...this.status });
       const trades = body.data?.Solana?.DEXTrades ?? [];
@@ -373,17 +445,11 @@ export class Scout {
           name: cur.Name,
           source: "raydium",
           observedAt: Date.now()
-        });
+        }, "bitquery");
       }
     } catch (err) {
-      this.noteError(err);
+      this.health.fail("bitquery", err instanceof Error ? err.message.slice(0, 80) : String(err));
     }
-  }
-
-  private noteError(err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
-    this.status.lastError = message;
-    this.opts.onStatus({ ...this.status });
   }
 }
 

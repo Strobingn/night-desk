@@ -4,6 +4,7 @@ import { api } from "../api";
 import { clock } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
+import { ScoutStatus } from "./ScoutStatus";
 
 const LOG_STAGES = ["all", "scout", "filter", "analyst", "executor", "risk", "system", "logger"] as const;
 
@@ -196,6 +197,7 @@ export function TapeScreen({
         ))}
       </div>
       {logError ? <div className="banner">{logError}</div> : null}
+      <ScoutStatus feed={snap.feed} />
       <form
         className="buybar"
         onSubmit={(event) => {

@@ -1,3 +1,5 @@
+import { NetLimiter } from "../market/net.js";
+import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
@@ -194,6 +196,11 @@ export class Desk {
   private watchTimer: NodeJS.Timeout | null = null;
   private lastClientCrash: { at: number; version: string; brief: string } | null = null;
   private readonly lookupFetch: typeof fetch;
+  /** v12.1: one shared request budget for Scout, enrichment, held marks, Add coin and the watchlist. */
+  readonly net = new NetLimiter();
+  private readonly watchFetch: typeof fetch;
+  private pricerFailingSince: number | null = null;
+  private pricerError: string | null = null;
   private readonly lpUnlockedMints = new Set<string>();
   private readonly analystScores = new Map<string, number>();
   /** Near-miss cards still waiting on a one-tap buy. One card per mint until it is taken. */
@@ -230,7 +237,8 @@ export class Desk {
 
   constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch } = {}) {
     this.config = config;
-    this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? fetch;
+    this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
+    this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
     this.advisor = new AdvisorBook(config.advisorPath);
     const saved = this.readSettings();
@@ -288,6 +296,7 @@ export class Desk {
       enrichConcurrency: config.enrichConcurrency,
       queueCap: config.enrichQueueCap,
       holderPagesMax: config.holderPagesMax,
+      net: this.net,
       onStatus: (patch) => {
         this.feed = { ...this.feed, ...patch };
       }
@@ -304,7 +313,7 @@ export class Desk {
           dex: quote?.dex,
           liquidityUsd: quote?.liquidityUsd
         }),
-      fetchImpl: deps.priceFetch,
+      fetchImpl: deps.priceFetch ?? this.net.fetchAt(0),
       onStale: (mint, silentMs) => {
         const pos = this.book.positions.get(mint);
         this.log({
@@ -328,10 +337,13 @@ export class Desk {
         });
       },
       onError: (message) => {
-        this.feed = { ...this.feed, lastError: `position prices: ${message}` };
+        // v12.1: a single 429 on held marks is not a banner; 2+ minutes without one good poll is.
+        this.pricerFailingSince ??= Date.now();
+        this.pricerError = message;
       },
       onOk: () => {
-        if (this.feed.lastError?.startsWith("position prices:")) this.feed = { ...this.feed, lastError: undefined };
+        this.pricerFailingSince = null;
+        this.pricerError = null;
       }
     });
     this.wire();
@@ -826,7 +838,7 @@ export class Desk {
     if (!this.watchlist.length) return;
     let quotes: Map<string, { priceUsd: number }>;
     try {
-      quotes = await fetchDexQuotes(this.watchlist.map((item) => item.mint), this.lookupFetch);
+      quotes = await fetchDexQuotes(this.watchlist.map((item) => item.mint), this.watchFetch);
     } catch {
       return;
     }
@@ -991,6 +1003,16 @@ export class Desk {
     await this.drain();
   }
 
+  /** Feed status with live per-source state. The banner (`lastError`) is debounced to 2 minutes. */
+  private feedView(now = Date.now()): FeedStatus {
+    const report = this.scout.report(now);
+    let banner = report.lastError;
+    if (!banner && this.pricerFailingSince != null && now - this.pricerFailingSince >= BANNER_AFTER_MS) {
+      banner = `position prices failing for ${Math.round((now - this.pricerFailingSince) / 60_000)} min${this.pricerError ? ` (${this.pricerError})` : ""}`;
+    }
+    return { ...this.feed, ...report, lastError: banner };
+  }
+
   snapshot(): DeskSnapshot {
     const equityUsd = this.book.equity();
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
@@ -1017,7 +1039,7 @@ export class Desk {
           until,
           minutesLeft: Math.ceil((until - Date.now()) / 60_000)
         })),
-      feed: this.feed,
+      feed: this.feedView(),
       pipeline: { ...this.pipeline },
       killReasons: { ...this.killReasons },
       positions,
