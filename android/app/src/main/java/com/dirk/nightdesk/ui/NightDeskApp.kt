@@ -1,6 +1,20 @@
 package com.dirk.nightdesk.ui
 
 import android.content.Intent
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import com.dirk.nightdesk.CoinCard
+import com.dirk.nightdesk.Verdict
+import com.dirk.nightdesk.coinCards
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -91,6 +105,71 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+/** v13 bottom nav: label to icon. Link stays as the sixth tab. */
+private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Add coin" to "add", "Recap" to "recap", "Settings" to "settings", "Link" to "link")
+
+private fun stageColor(stage: String): Color = when (stage) {
+    "filter" -> P.down
+    "executor" -> P.up
+    "risk" -> P.amber
+    "analyst" -> P.accent
+    "scout" -> P.ink
+    else -> P.muted
+}
+
+@Composable
+private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit) {
+    val vc = verdictColor(coin.verdict)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(P.card)
+            .border(1.dp, if (selected) P.accent else P.line, RoundedCornerShape(18.dp))
+            .clickable(onClick = onSelect)
+            .height(androidx.compose.foundation.layout.IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.width(4.dp).fillMaxHeight().padding(vertical = 12.dp).clip(RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)).background(vc))
+        Spacer(Modifier.width(10.dp))
+        CoinAvatar(coin.symbol, coin.mint, ring = vc, size = 42.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f).padding(vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(coin.symbol, color = P.ink, fontSize = 15.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Spacer(Modifier.width(8.dp))
+                VerdictChip(coin.verdict)
+            }
+            val bits = buildList {
+                add(coin.source ?: "scout")
+                add(clock(if (coin.lastTs > 0) coin.lastTs else System.currentTimeMillis()))
+                coin.vol1h?.let { add("1h " + compact(it)) }
+                coin.mark?.let { add(px(it)) }
+            }
+            Text(bits.joinToString(" · "), color = P.dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!coin.reason.isNullOrBlank()) {
+                Text(
+                    (coin.codes.firstOrNull()?.let { "$it · " } ?: "") + coin.reason,
+                    color = P.muted,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(12.dp)) {
+            coin.score?.let { sc ->
+                val pass = coin.verdict == Verdict.TRADE || coin.verdict == Verdict.BOUGHT || coin.verdict == Verdict.OPEN
+                Chip("%.2f".format(Locale.US, sc), if (pass) P.up else P.ink, if (pass) P.up.copy(alpha = 0.2f) else P.card3, size = 14)
+                Spacer(Modifier.height(6.dp))
+            }
+            if (coin.verdict != Verdict.OPEN) {
+                BigButton("Buy", P.up, P.onUp, Modifier.width(72.dp), height = 38.dp, onClick = onBuy)
+            }
+        }
+    }
+}
+
 private val stages = listOf("all", "scout", "filter", "analyst", "executor", "risk", "system")
 
 @Composable
@@ -120,28 +199,48 @@ fun NightDeskApp(desk: DeskRepository) {
         desk.boot()
     }
 
+    val view = androidx.compose.ui.platform.LocalView.current
+    val dark = P.isDark
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? android.app.Activity)?.window ?: return@SideEffect
+            androidx.core.view.WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
+    val positionCount = snap?.positions?.size ?: 0
     Scaffold(
-        containerColor = Night,
+        containerColor = P.bg,
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF10140E)) {
-                listOf("Home", "Tape", "Add coin", "Recap", "Settings", "Link").forEachIndexed { index, label ->
-                    NavigationBarItem(
-                        selected = tab == index,
-                        onClick = { tab = index },
-                        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
-                        icon = {},
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Lime,
-                            selectedTextColor = Lime,
-                            unselectedTextColor = Dim,
-                            indicatorColor = Color(0xFF1C2416)
+            Column {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(P.line))
+                NavigationBar(containerColor = P.nav, tonalElevation = 0.dp) {
+                    NAV_TABS.forEachIndexed { index, (label, icon) ->
+                        NavigationBarItem(
+                            selected = tab == index,
+                            onClick = { tab = index },
+                            label = { Text(label, fontSize = 11.sp, maxLines = 1, fontWeight = if (tab == index) FontWeight.SemiBold else FontWeight.Medium) },
+                            icon = {
+                                BadgedBox(badge = {
+                                    if (index == 0 && positionCount > 0) Badge(containerColor = P.accent, contentColor = P.onAccent) { Text("$positionCount") }
+                                }) { Icon(deskIcon(icon), contentDescription = label, modifier = Modifier.size(22.dp)) }
+                            },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = P.accent,
+                                selectedTextColor = P.accent,
+                                unselectedIconColor = P.dim,
+                                unselectedTextColor = P.dim,
+                                indicatorColor = P.accent.copy(alpha = 0.18f)
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).background(Night)) {
+        Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
             Header(status = status, live = live, mode = snap?.mode ?: "paper")
             snap?.feedBanner?.let { banner ->
                 StatusPill(text = "Feed: $banner", tint = Amber)
@@ -155,17 +254,21 @@ fun NightDeskApp(desk: DeskRepository) {
                 )
             }
             notice?.let { note ->
+                val tint = if (note.ok) P.up else P.down
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    Modifier
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .deskCard(radius = 16.dp, color = tint.copy(alpha = 0.12f))
+                        .padding(start = 14.dp, end = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         note.text,
-                        color = if (note.ok) Mint else Coral,
+                        color = P.ink,
                         modifier = Modifier.weight(1f),
                         fontSize = 13.sp
                     )
-                    TextButton(onClick = { desk.dismissNotice() }) { Text("Dismiss", color = Dim) }
+                    TextButton(onClick = { desk.dismissNotice() }) { Text("Dismiss", color = tint, fontWeight = FontWeight.SemiBold) }
                 }
             }
             when (tab) {
@@ -182,7 +285,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     positionCapUsd = snap?.positionCapUsd,
                     cooldowns = snap?.cooldowns.orEmpty(),
                     onBuy = { mint, size, ignore -> scope.launch { desk.buyPosition(mint, size, ignore) } },
-                    feedSources = snap?.feedSources.orEmpty()
+                    feedSources = snap?.feedSources.orEmpty(),
+                    positionMints = snap?.positions.orEmpty().map { it.mint }.toSet()
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -217,16 +321,54 @@ fun NightDeskApp(desk: DeskRepository) {
 
 @Composable
 private fun Header(status: String, live: Boolean, mode: String) {
+    val context = LocalContext.current
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
-            Text("NIGHT DESK", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
-            Text(if (live) "Feed live · $status" else status, color = if (live) Mint else Dim, fontSize = 12.sp)
+        Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(P.accent), contentAlignment = Alignment.Center) {
+            DeskIcon("moon", tint = P.onAccent, size = 20.dp)
         }
-        Text(mode.uppercase(), color = Lime, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text("Night", color = P.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(" Desk", color = P.muted, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(if (live) P.up else P.down))
+                Spacer(Modifier.width(6.dp))
+                Text(if (live) "Feed live · $status" else status, color = P.dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        // v13 quick theme toggle: Dark → Light → System. Saved on this phone only.
+        val pref = ThemeState.pref
+        Box(
+            Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(P.card)
+                .border(1.dp, P.lineStrong, RoundedCornerShape(14.dp))
+                .clickable { ThemeState.set(context, ThemeState.next(pref)) },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                deskIcon(when (pref) { ThemePref.DARK -> "moon"; ThemePref.LIGHT -> "sun"; ThemePref.SYSTEM -> "auto" }),
+                contentDescription = "Theme: ${pref.label}. Tap for ${ThemeState.next(pref).label}",
+                tint = P.ink,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        val isLive = mode == "live"
+        Text(
+            mode.uppercase(),
+            color = if (isLive) P.onDown else P.onAccent,
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = 12.sp,
+            letterSpacing = 1.sp,
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (isLive) P.down else P.accent).padding(horizontal = 12.dp, vertical = 8.dp)
+        )
     }
 }
 
@@ -250,17 +392,13 @@ private fun BookScreen(
                 }
             }
         }
+        item { HeroCard(snap, openPnl) }
         item {
-            Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
-                Text("OPEN POSITIONS", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
-                Text(
-                    signed(openPnl),
-                    color = if (openPnl >= 0) Mint else Coral,
-                    fontSize = 32.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-                Text("Total open PnL", color = Dim, fontSize = 13.sp)
-            }
+            SectionTitle(
+                "Open positions",
+                "${signed(openPnl)} · ${snap?.positions?.size ?: 0} open · exposure ${money(snap?.exposureUsd ?: 0.0)}",
+                if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
+            )
         }
         if (snap == null || snap.positions.isEmpty()) {
             item {
@@ -273,35 +411,21 @@ private fun BookScreen(
             }
         } else {
             itemsIndexed(snap.positions, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
-                OpenPositionCard(pos, onClose, onSell)
+                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit)
             }
-        }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Metric("Equity", money(snap?.equityUsd), Modifier.weight(1f))
-                Metric("Cash", money(snap?.cashUsd), Modifier.weight(1f))
-            }
-        }
-        item {
-            Text(
-                signed(snap?.sessionPnlUsd ?: 0.0) + " session",
-                color = if ((snap?.sessionPnlUsd ?: 0.0) >= 0) Mint else Coral,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.padding(horizontal = 4.dp)
-            )
         }
         item { LiveReadyCard(snap?.readiness, onReady) }
         item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
         if (snap?.mode != "live") {
             item { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
         }
-        item { Text("Recent trades", style = androidx.compose.material3.MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp)) }
+        item { SectionTitle("Recent trades", "${snap?.closed?.size ?: 0}") }
         val recent = snap?.closed.orEmpty().takeLast(20).asReversed()
         if (recent.isEmpty()) {
             item { Text("No realized trades yet. Hard stops and manual closes land here.", color = Dim, modifier = Modifier.padding(bottom = 24.dp)) }
         } else {
             itemsIndexed(recent, key = { index, trade -> "${trade.id}#$index" }) { _, trade ->
-                Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(12.dp)).padding(12.dp)) {
+                Column(Modifier.deskCard(radius = 16.dp).padding(14.dp)) {
                     Text(trade.symbol, color = Ink, fontWeight = FontWeight.SemiBold)
                     Text(
                         "entry ${px(trade.entryPrice)} → exit ${px(trade.exitPrice)} · ${trade.exitCode} · ${clock(trade.closedAt)}",
@@ -311,6 +435,44 @@ private fun BookScreen(
                     Text(money(trade.pnlUsd), color = if (trade.pnlUsd >= 0) Mint else Coral, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun HeroCard(snap: DeskSnapshot?, openPnl: Double) {
+    val equity = snap?.equityUsd ?: 0.0
+    val start = snap?.startingBalanceUsd ?: 100.0
+    val midnight = java.time.LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val base = com.dirk.nightdesk.dayBase(snap?.equityPoints.orEmpty(), start, midnight)
+    val day = equity - base
+    val session = snap?.sessionPnlUsd ?: 0.0
+    fun tint(n: Double) = if (n > 0) P.up else if (n < 0) P.down else P.ink
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(Brush.linearGradient(listOf(P.heroFrom, P.heroTo)))
+            .border(1.dp, P.accent.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+            .padding(18.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Marked equity", color = P.dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            val live = snap?.mode == "live"
+            Chip(if (live) "LIVE" else "PAPER", if (live) P.onDown else P.onAccent, if (live) P.down else P.accent, size = 11)
+        }
+        Text(money(equity), color = P.ink, fontSize = 40.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1).sp, modifier = Modifier.padding(vertical = 4.dp))
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Chip("Today ${signed(day)}" + (if (base > 0) " · ${pct(day / base)}" else ""), tint(day), tint(day).copy(alpha = 0.16f), size = 12)
+            Chip("Session ${signed(session)} · ${pct(snap?.sessionPnlPct ?: 0.0)}", tint(session), tint(session).copy(alpha = 0.16f), size = 12)
+        }
+        Sparkline(snap?.equityPoints.orEmpty().map { it.equity }, start, Modifier.padding(top = 10.dp, bottom = 6.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(P.lineStrong))
+        Row(Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            HeroStat("Cash", money(snap?.cashUsd), "book ${money(start)}")
+            HeroStat("Open", "${snap?.positions?.size ?: 0}", signed(openPnl), tint(openPnl))
+            HeroStat("Cap / buy", money(snap?.positionCapUsd), "exp. ${money(snap?.exposureUsd ?: 0.0)}")
         }
     }
 }
@@ -354,7 +516,7 @@ private fun RecapCard(desk: DeskRepository) {
                 }
             },
             enabled = !busy,
-            colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Color(0xFF14180F))
+            colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = P.onAccent)
         ) { Text(if (busy) "Loading" else if (text == null) "Recap" else "Refresh recap") }
         if (!error.isNullOrBlank()) {
             Spacer(Modifier.height(8.dp))
@@ -375,7 +537,7 @@ private fun RecapCard(desk: DeskRepository) {
 
 @Composable
 private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Color(0xFF171E12), RoundedCornerShape(18.dp)).padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().background(P.card, RoundedCornerShape(18.dp)).padding(16.dp)) {
         Text("LIVE READY", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.4.sp)
         Text(if (readiness?.mode == "live") "LIVE" else "STILL PAPER", color = Ink, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(8.dp))
@@ -392,7 +554,7 @@ private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit)
                 checked = readiness?.operatorReady == true,
                 onCheckedChange = onReady,
                 enabled = readiness != null,
-                colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = Night)
+                colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = OnAccent)
             )
         }
         Text(
@@ -406,7 +568,7 @@ private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit)
 @Composable
 private fun AdvisorCard(notes: List<AdviceNote>, cooldowns: List<MintCooldown>, onBuy: (String, Boolean) -> Unit) {
     var confirmMint by remember { mutableStateOf<String?>(null) }
-    Column(Modifier.fillMaxWidth().background(Color(0xFF171E12), RoundedCornerShape(18.dp)).padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().background(P.card, RoundedCornerShape(18.dp)).padding(16.dp)) {
         Text("ADVISOR", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.4.sp)
         Text("Follows the feed. A near miss is your call.", color = Dim, fontSize = 12.sp)
         Spacer(Modifier.height(8.dp))
@@ -561,7 +723,7 @@ private fun UnlockedLpCard(allowed: Boolean, onSave: (Map<String, Any?>) -> Unit
             Switch(
                 checked = allowed,
                 onCheckedChange = { onSave(mapOf("allowUnlockedLp" to it)) },
-                colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = Night)
+                colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = OnAccent)
             )
         }
         Text("Mint authority and dev rugs stay hard kills. The −6% stop still applies.", color = Dim, fontSize = 11.sp)
@@ -623,7 +785,7 @@ private fun SettingCard(
                 colors = fieldColors()
             )
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { onApply(text) }, colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)) {
+            Button(onClick = { onApply(text) }, colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = OnAccent)) {
                 Text("Apply")
             }
         }
@@ -648,7 +810,7 @@ private fun VolumeCard(current: Double, onSave: (Map<String, Any?>) -> Unit) {
                 colors = fieldColors()
             )
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { text.toDoubleOrNull()?.let { onSave(mapOf("minVolume1hUsd" to it)) } }, colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)) {
+            Button(onClick = { text.toDoubleOrNull()?.let { onSave(mapOf("minVolume1hUsd" to it)) } }, colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = OnAccent)) {
                 Text("Apply")
             }
         }
@@ -658,45 +820,70 @@ private fun VolumeCard(current: Double, onSave: (Map<String, Any?>) -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit, onSell: (String, Int) -> Unit = { mint, _ -> onClose(mint) }) {
-    val room = stopRoom(pos)
+private fun OpenPositionCard(
+    pos: PositionRow,
+    onClose: (String) -> Unit,
+    onSell: (String, Int) -> Unit = { mint, _ -> onClose(mint) },
+    armPct: Double = 0.12,
+    trailOn: Boolean = false
+) {
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
     var sellAsk by remember { mutableStateOf<Int?>(null) }
-    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(pos.symbol, style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+    Column(Modifier.deskCard().padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(pos.symbol, color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
+                    else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
+                    Spacer(Modifier.width(6.dp))
+                    Text("score ${num(pos.score, "%.2f")} · mark ${markAge(pos.markAgeMs)}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
+            }
             Column(horizontalAlignment = Alignment.End) {
-                Text(signed(pos.pnlUsd), color = if (up) Mint else Coral, fontSize = 28.sp, fontFamily = FontFamily.Monospace)
-                Text(pct(pos.pnlPct), color = if (up) Mint else Coral, fontSize = 18.sp, fontFamily = FontFamily.Monospace)
+                PnlChip(pos.pnlUsd, pos.pnlPct)
+                Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
-        val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
-        if (tag != null) {
-            Text(tag.uppercase(), color = Amber, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.sp)
+        StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
+        Column(
+            Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(P.surface).border(1.dp, P.line, RoundedCornerShape(14.dp)).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row {
+                PosStat("Entry", px(pos.entryPrice))
+                PosStat("Mark", px(pos.markPrice), if (up) P.up else P.down)
+                PosStat("Stop", fmtPx(pos.stopPrice), P.down)
+            }
+            Row {
+                PosStat("Size", money(pos.costUsd))
+                PosStat("Held", heldFor(pos.openedAt))
+                PosStat("To stop", "${num(pos.stopDistancePct, "%.1f")}%")
+            }
         }
-        Text("Entry ${px(pos.entryPrice)}   ·   Mark ${px(pos.markPrice)}", color = Ink, fontSize = 15.sp, modifier = Modifier.padding(top = 6.dp))
-        Text("Held ${heldFor(pos.openedAt)}   ·   Size ${money(pos.costUsd)}", color = Dim, fontSize = 14.sp)
-        Text("Distance to the hard stop", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp))
-        LinearProgressIndicator(
-            progress = { room },
-            color = if (room < 0.35f) Coral else Mint,
-            trackColor = Color(0xFF2A3324),
-            modifier = Modifier.fillMaxWidth().height(10.dp).padding(top = 4.dp)
-        )
-        Text("${num(pos.stopDistancePct, "%.1f")}% under the mark before ${fmtPx(pos.stopPrice)}", color = Ink, fontSize = 13.sp)
-        // v12.3: bigger, clearer sell buttons. Each one still asks first.
-        Text("SELL", color = Dim, fontSize = 11.sp, letterSpacing = 1.sp, modifier = Modifier.padding(top = 12.dp))
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SellButton("Sell 25%", Amber, Modifier.weight(1f)) { sellAsk = 25 }
-            SellButton("Sell 50%", Amber, Modifier.weight(1f)) { sellAsk = 50 }
-            SellButton("Sell 100%", Coral, Modifier.weight(1f)) { sellAsk = 100 }
+        // Sell 25 / 50 / 100. Each one still asks first; the confirm never touches the connection.
+        Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            BigButton("Sell 25%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 25 }
+            BigButton("Sell 50%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 50 }
+            BigButton("Sell 100%", P.down, P.onDown, Modifier.weight(1f)) { sellAsk = 100 }
         }
-        FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        FlowRow(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             chartLinks(pos.mint).forEach { (label, url) ->
-                TextButton(onClick = {
-                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                }) { Text(label, color = Sky) }
+                Text(
+                    label,
+                    color = P.dim,
+                    fontSize = 12.5.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .border(1.dp, P.lineStrong, RoundedCornerShape(50))
+                        .clickable { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                )
             }
         }
     }
@@ -715,11 +902,19 @@ private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit, onSell
                         sellAsk = null
                         if (pending >= 100) onClose(pos.mint) else onSell(pos.mint, pending)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Coral, contentColor = Night)
-                ) { Text("Sell", fontSize = 16.sp) }
+                    colors = ButtonDefaults.buttonColors(containerColor = P.down, contentColor = P.onDown)
+                ) { Text("Sell", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
             },
             dismissButton = { TextButton(onClick = { sellAsk = null }) { Text("Cancel", color = Dim) } }
         )
+    }
+}
+
+@Composable
+private fun RowScope.PosStat(label: String, value: String, tint: Color = P.ink) {
+    Column(Modifier.weight(1f)) {
+        Text(label, color = P.muted, fontSize = 11.sp)
+        Text(value, color = tint, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -763,9 +958,12 @@ private fun TapeScreen(
     positionCapUsd: Double?,
     cooldowns: List<MintCooldown>,
     onBuy: (String, Double?, Boolean) -> Unit,
-    feedSources: List<FeedSource> = emptyList()
+    feedSources: List<FeedSource> = emptyList(),
+    positionMints: Set<String> = emptySet()
 ) {
     var stage by remember { mutableStateOf("all") }
+    var tapeView by rememberSaveable { mutableStateOf("coins") }
+    var coinFilter by rememberSaveable { mutableStateOf("all") }
     var selected by remember { mutableStateOf<TapeEvent?>(null) }
     var askBuy by remember { mutableStateOf(false) }
     var sizeText by remember { mutableStateOf("") }
@@ -867,6 +1065,14 @@ private fun TapeScreen(
         }
     }
     Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (tapeView == "coins") "Tape" else "Activity log", color = P.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Segmented(
+                listOf("coins" to "Coins", "log" to "Raw log"),
+                tapeView,
+                icons = mapOf("coins" to "coins", "log" to "list")
+            ) { tapeView = it }
+        }
         ScoutStatusCard(feedSources)
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
             val mintLabel = selected?.mint
@@ -887,8 +1093,8 @@ private fun TapeScreen(
                 Button(
                     onClick = { toggleTape() },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (tapePaused) Lime else Color(0xFF1C2416),
-                        contentColor = if (tapePaused) Night else Lime
+                        containerColor = if (tapePaused) P.accent else P.card3,
+                        contentColor = if (tapePaused) P.onAccent else P.ink
                     )
                 ) { Text(if (tapePaused) "Live" else "Pause") }
             }
@@ -900,16 +1106,50 @@ private fun TapeScreen(
                 },
                 enabled = mintLabel != null,
                 modifier = Modifier.padding(top = 8.dp).height(48.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)
-            ) { Text("Buy", fontSize = 16.sp) }
+                colors = ButtonDefaults.buttonColors(containerColor = P.up, contentColor = P.onUp)
+            ) { Text("Buy", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold) }
         }
+        if (tapeView == "coins") {
+            val coins = remember(idKey, positionMints) { coinCards(events, positionMints) }
+                .filter { coinFilter == "all" || it.verdict.name.lowercase() == coinFilter || (coinFilter == "trade" && it.verdict == Verdict.BOUGHT) }
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf("all" to "All", "open" to "Open", "trade" to "Passed", "near" to "Near miss", "killed" to "Killed").forEach { (id, label) ->
+                    PillChip(label, coinFilter == id) { coinFilter = id }
+                }
+            }
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (coins.isEmpty()) {
+                    item { Text("No coins for this filter yet. The Scout adds a card as each new pair lands.", color = P.muted, fontSize = 14.sp) }
+                }
+                itemsIndexed(coins, key = { index, c -> "${c.mint}#$index" }) { _, coin ->
+                    CoinCardRow(
+                        coin,
+                        selected = selected?.mint == coin.mint,
+                        onSelect = { selected = coin.event },
+                        onBuy = {
+                            selected = coin.event
+                            sizeError = null
+                            sizeText = capText
+                            askBuy = true
+                        }
+                    )
+                }
+            }
+        } else {
         // v12.3: one scrollable row of stage chips.
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             stages.forEach { name ->
-                FilterChip(selected = stage == name, onClick = { stage = name }, label = { Text(name, fontSize = 13.sp) })
+                PillChip(name.replaceFirstChar { it.uppercase() }, stage == name) { stage = name }
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -923,12 +1163,11 @@ private fun TapeScreen(
                     val active = selected?.id == event.id
                     Column(
                         Modifier
-                            .fillMaxWidth()
-                            .background(if (active) Color(0xFF1C2416) else Panel, RoundedCornerShape(12.dp))
+                            .deskCard(radius = 14.dp, color = if (active) P.accent.copy(alpha = 0.12f) else P.card)
                             .padding(12.dp)
                     ) {
-                        Text("${clock(event.ts)}  ${event.stage.uppercase()}", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                        Text(event.message, color = Ink, fontSize = 13.sp)
+                        Text("${clock(event.ts)}  ${event.stage.uppercase()}", color = stageColor(event.stage), fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(event.message, color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
                         if (event.mint != null) {
                             TextButton(onClick = { selected = event }) {
                                 Text(if (active) "Selected" else "Select", color = Lime)
@@ -941,9 +1180,10 @@ private fun TapeScreen(
                 Button(
                     onClick = { toggleTape() },
                     modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)
+                    colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = OnAccent)
                 ) { Text(pausedLabel(fresh)) }
             }
+        }
         }
     }
     val buyMint = selected?.mint
@@ -1035,12 +1275,12 @@ private fun LinkScreen(desk: DeskRepository) {
             Switch(
                 checked = useManual,
                 onCheckedChange = { useManual = it },
-                colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = Night)
+                colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = OnAccent)
             )
         }
         Button(
             onClick = { if (loaded) scope.launch { desk.saveLink(url, token, useManual) } },
-            colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)
+            colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = OnAccent)
         ) { Text(if (useManual) "Save and hold this URL" else "Save token and follow the beacon") }
     }
 }
@@ -1056,7 +1296,7 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
 @Composable
 private fun fieldColors() = OutlinedTextFieldDefaults.colors(
     focusedBorderColor = Lime,
-    unfocusedBorderColor = Color(0xFF2A3324),
+    unfocusedBorderColor = P.lineStrong,
     focusedTextColor = Ink,
     unfocusedTextColor = Ink,
     cursorColor = Lime
@@ -1095,7 +1335,7 @@ private fun LastCrashCard() {
     var text by remember { mutableStateOf(CrashLog.read(context)) }
     val crash = text
     if (crash.isNullOrBlank()) return
-    Column(Modifier.fillMaxWidth().background(Color(0xFF2A1614), RoundedCornerShape(18.dp)).padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().background(P.down.copy(alpha = 0.12f), RoundedCornerShape(18.dp)).padding(16.dp)) {
         Text("LAST CRASH", color = Coral, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.4.sp)
         Text("Saved on this phone. Copy it, then send it with the next report.", color = Dim, fontSize = 12.sp)
         Spacer(Modifier.height(8.dp))
@@ -1156,7 +1396,7 @@ private fun ConnectionPill(message: String, canUseLastGood: Boolean, onUseLastGo
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 4.dp)
-            .background(Color(0x1FFFC857), RoundedCornerShape(14.dp))
+            .background(P.amber.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
             .padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1174,7 +1414,7 @@ private fun StatusPill(text: String, tint: Color) {
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 4.dp)
-            .background(Color(0x14FFFFFF), RoundedCornerShape(14.dp))
+            .background(P.card3, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1225,7 +1465,7 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp)
-            .background(Color(0xFF151A12), RoundedCornerShape(14.dp))
+            .background(P.card, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Row(
@@ -1257,3 +1497,49 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
 private val clockFmt: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
 
 private fun clock(ts: Long): String = if (ts <= 0) "—" else clockFmt.format(Instant.ofEpochMilli(ts))
+
+/** v13 render harness for screenshot tests: the real screens with a fixed snapshot and no network. */
+@Composable
+internal fun DeskPreview(tab: Int, snap: DeskSnapshot) {
+    NightTheme {
+        Scaffold(
+            containerColor = P.bg,
+            bottomBar = {
+                Column {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(P.line))
+                    NavigationBar(containerColor = P.nav, tonalElevation = 0.dp) {
+                        NAV_TABS.forEachIndexed { index, (label, icon) ->
+                            NavigationBarItem(
+                                selected = tab == index,
+                                onClick = {},
+                                label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                                icon = { Icon(deskIcon(icon), contentDescription = label, modifier = Modifier.size(22.dp)) },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = P.accent, selectedTextColor = P.accent,
+                                    unselectedIconColor = P.dim, unselectedTextColor = P.dim,
+                                    indicatorColor = P.accent.copy(alpha = 0.18f)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        ) { padding ->
+            Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
+                Header(status = "Connected", live = true, mode = snap.mode)
+                when (tab) {
+                    0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> })
+                    1 -> TapeScreen(
+                        events = snap.events,
+                        positionCapUsd = snap.positionCapUsd,
+                        cooldowns = snap.cooldowns,
+                        onBuy = { _, _, _ -> },
+                        feedSources = snap.feedSources,
+                        positionMints = snap.positions.map { it.mint }.toSet()
+                    )
+                    else -> SettingsScreen(snap) {}
+                }
+            }
+        }
+    }
+}

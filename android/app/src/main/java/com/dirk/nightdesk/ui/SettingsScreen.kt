@@ -15,6 +15,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -128,8 +132,16 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("SETTINGS", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
-        Text(if (dirty) "Unsaved changes" else "Matches the desk", color = if (dirty) Amber else Dim, fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Settings", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Chip(
+                if (dirty) "Unsaved changes" else "Matches the desk",
+                if (dirty) P.amber else P.up,
+                (if (dirty) P.amber else P.up).copy(alpha = 0.16f),
+                size = 12
+            )
+        }
+        AppearanceGroup()
         Group("Entry / Filter") {
             ExactSlider("1h volume $", draft.volume, 1_000f..500_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(volume = it) }
             ExactSlider("Trade line", draft.score, 0.10f..0.95f, 0.01f, { "%.2f".format(it) }) { draft = draft.copy(score = it) }
@@ -194,7 +206,7 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
                     saved = draft
                 },
                 enabled = dirty && snap != null,
-                colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)
+                colors = ButtonDefaults.buttonColors(containerColor = P.accent, contentColor = P.onAccent)
             ) { Text("Save") }
             TextButton(onClick = { draft = saved }, enabled = dirty) { Text("Reset", color = Dim) }
         }
@@ -241,11 +253,40 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "paperResetUsd" to draft.resetUsd.toDouble()
 )
 
+/** v13 group icons and one-line descriptions, same as the web. */
+private val GROUP_META = mapOf(
+    "Entry / Filter" to ("filter" to "What a new coin must pass before the desk will buy it."),
+    "Risk / Exits" to ("shield" to "Hard stop, cooldown, daily loss and the trailing take-profit."),
+    "Sizing" to ("coins" to "How much each buy spends and how much can be open at once."),
+    "Scout sources" to ("radar" to "Which feeds the Scout listens to for new pairs."),
+    "Alerts" to ("bell" to "When the phone should ping you.")
+)
+
 @Composable
 private fun Group(title: String, body: @Composable () -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title.uppercase(), color = Lime, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.2.sp)
+    val meta = GROUP_META[title]
+    Column(Modifier.deskCard().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        GroupHeader(meta?.first ?: "settings", title, meta?.second ?: "")
         body()
+    }
+}
+
+/** v13 Appearance. A phone-only preference: saved on this device, never sent to the desk. */
+@Composable
+private fun AppearanceGroup() {
+    val context = LocalContext.current
+    Column(Modifier.deskCard().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        GroupHeader("palette", "Appearance", "Theme for this phone only. Not a desk setting.")
+        SegmentedFill(
+            ThemePref.entries.map { it.name to it.label },
+            ThemeState.pref.name,
+            mapOf("DARK" to "moon", "LIGHT" to "sun", "SYSTEM" to "auto")
+        ) { ThemeState.set(context, ThemePref.valueOf(it)) }
+        Text(
+            if (ThemeState.pref == ThemePref.SYSTEM) "Following the phone: ${if (P.isDark) "dark" else "light"} right now." else "Dark is the default. System follows the phone.",
+            color = P.muted,
+            fontSize = 12.sp
+        )
     }
 }
 
@@ -264,7 +305,7 @@ private fun ExactSlider(
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Text(format(value), color = Lime, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+            Text(format(value), color = P.accent, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         Slider(
             value = value.coerceIn(range.start, range.endInclusive),
@@ -273,7 +314,14 @@ private fun ExactSlider(
                 onChange(snapped.coerceIn(range.start, range.endInclusive))
             },
             valueRange = range,
-            steps = steps
+            steps = steps,
+            colors = SliderDefaults.colors(
+                thumbColor = P.accent,
+                activeTrackColor = P.accent,
+                inactiveTrackColor = P.card3,
+                activeTickColor = Color.Transparent,
+                inactiveTickColor = Color.Transparent
+            )
         )
         OutlinedTextField(
             value = text,
@@ -298,7 +346,13 @@ private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
             checked = checked,
             onCheckedChange = onChange,
             enabled = label != "Pump",
-            colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = Night)
+            colors = SwitchDefaults.colors(
+                checkedTrackColor = P.accent,
+                checkedThumbColor = P.onAccent,
+                uncheckedTrackColor = P.card3,
+                uncheckedThumbColor = P.muted,
+                uncheckedBorderColor = P.lineStrong
+            )
         )
     }
 }

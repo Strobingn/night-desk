@@ -110,7 +110,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                 Button(
                     onClick = { lookup(input) },
                     enabled = !looking,
-                    colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)
+                    colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = OnAccent)
                 ) { Text(if (looking) "Looking" else "Look up") }
                 TextButton(onClick = {
                     val clip = clipboard.getText()?.text.orEmpty().trim()
@@ -188,7 +188,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     )
                     if (overCap) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = confirmSize, onCheckedChange = { confirmSize = it }, colors = CheckboxDefaults.colors(checkedColor = Lime, checkmarkColor = Night))
+                            Checkbox(checked = confirmSize, onCheckedChange = { confirmSize = it }, colors = CheckboxDefaults.colors(checkedColor = Lime, checkmarkColor = OnAccent))
                             Text("Confirm ${formatUsd(size)}, above the per-position cap. Without this the desk fills at the cap.", color = Amber, fontSize = 12.sp)
                         }
                     }
@@ -198,7 +198,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     Button(
                         onClick = { askBuy = true },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = Night)
+                        colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = OnAccent)
                     ) { Text(if (found.hardKills.isEmpty()) "Paper buy ${formatUsd(size)}" else "Buy ${found.symbol} anyway…") }
                 }
                 TextButton(enabled = !found.watching, onClick = {

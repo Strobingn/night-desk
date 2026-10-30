@@ -22,6 +22,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.dirk.nightdesk.ui.ThemeState.load(this)
         enableEdgeToEdge()
         DeskConnectionService.start(this)
         askForNotifications()

@@ -29,7 +29,9 @@ data class PositionRow(
     val marketValueUsd: Double = 0.0,
     val openedAt: Long = 0L,
     /** v12. "manual · pump.fun" etc. Null for auto buys. */
-    val tag: String? = null
+    val tag: String? = null,
+    /** v13 stop→trail bar. 0 when the desk did not send it. */
+    val peakPrice: Double = 0.0
 ) {
     val stopDistancePct: Double
         get() {
@@ -47,7 +49,9 @@ data class TapeEvent(
     val message: String,
     val code: String?,
     val mint: String?,
-    val symbol: String?
+    val symbol: String?,
+    /** v13: analyst score / kill codes / scout source, used by the coin cards. */
+    val detail: String? = null
 )
 
 data class LiveReadiness(
@@ -264,8 +268,15 @@ data class DeskSnapshot(
     /** v12.1 per-source Scout status. */
     val feedSources: List<FeedSource> = emptyList(),
     /** v12.1: set only once a source has failed for 2+ minutes straight. */
-    val feedBanner: String? = null
+    val feedBanner: String? = null,
+    /** v13 hero card. */
+    val startingBalanceUsd: Double = 100.0,
+    val sessionPnlPct: Double = 0.0,
+    val equityPoints: List<EquityPoint> = emptyList()
 )
+
+/** v13 one point of the equity series (for the hero sparkline). */
+data class EquityPoint(val t: Long, val equity: Double)
 
 /** v12.1 one Scout source: live, backoff (with retryAt), down, or off. */
 data class FeedSource(
@@ -497,7 +508,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
                         costUsd = row.optFinite("costUsd"),
                         marketValueUsd = row.optFinite("marketValueUsd"),
                         openedAt = row.optFinite("openedAt").toLong(),
-                        tag = row.optText("tag").ifBlank { null }
+                        tag = row.optText("tag").ifBlank { null },
+                        peakPrice = row.optFinite("peakPrice")
                     )
                 )
             }
@@ -546,7 +558,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
                         message = row.optText("message"),
                         code = row.optText("code").ifBlank { null },
                         mint = row.optText("mint").ifBlank { null },
-                        symbol = row.optText("symbol").ifBlank { null }
+                        symbol = row.optText("symbol").ifBlank { null },
+                        detail = row.optText("detail").ifBlank { null }
                     )
                 )
             }
@@ -555,7 +568,31 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
     val equityUsd = data.optFinite("equityUsd")
     val cashUsd = data.optFinite("cashUsd")
     val feed = data.optJSONObject("feed")
+    val equityJson = data.optJSONArray("equity")
+    val equitySeries = buildList {
+        if (equityJson != null) {
+            // Keep at most ~240 points so the sparkline stays cheap on the phone.
+            val stride = (equityJson.length() / 240).coerceAtLeast(1)
+            var i = 0
+            while (i < equityJson.length()) {
+                val row = equityJson.optJSONObject(i)
+                if (row != null) {
+                    val eq = row.optFinite("equity", Double.NaN)
+                    if (eq.isFinite()) add(EquityPoint(row.optFinite("t").toLong(), eq))
+                }
+                i += stride
+            }
+            val last = equityJson.optJSONObject(equityJson.length() - 1)
+            if (last != null && (equityJson.length() - 1) % stride != 0) {
+                val eq = last.optFinite("equity", Double.NaN)
+                if (eq.isFinite()) add(EquityPoint(last.optFinite("t").toLong(), eq))
+            }
+        }
+    }
     return DeskSnapshot(
+        startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
+        sessionPnlPct = data.optFinite("sessionPnlPct"),
+        equityPoints = equitySeries,
         feedSources = parseFeedSources(feed),
         feedBanner = feed?.optText("lastError")?.ifBlank { null },
         mode = data.optText("mode", "paper"),
