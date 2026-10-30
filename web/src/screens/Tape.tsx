@@ -375,19 +375,20 @@ function CoinCard({ coin, selected, busy, onSelect, onBuy }: { coin: CoinRow; se
       </div>
       <div className="cc-stats">
         <div className="cc-stat vol">
-          <span className="k">1h vol</span>
+          <span className="k">1h volume</span>
           <b>{coin.vol1h != null ? compactUsd(coin.vol1h) : "—"}</b>
         </div>
+        <div className={`cc-stat chg ${chTone}`} title="1h price change">
+          <span className="k">1h change</span>
+          <b>{ch == null || !Number.isFinite(ch) ? "—" : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}</b>
+        </div>
         <div className="cc-stat">
-          <span className="k">5m vol</span>
+          <span className="k">5m volume</span>
           <b>{coin.vol5m != null ? compactUsd(coin.vol5m) : "—"}</b>
         </div>
         <div className="cc-stat">
           <span className="k">Price</span>
           <b>{coin.mark ? px(coin.mark) : "—"}</b>
-        </div>
-        <div className={`cc-chg ${chTone}`} title="1h price change">
-          {ch == null || !Number.isFinite(ch) ? "— %" : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}
         </div>
       </div>
       {coin.reason ? <span className="cc-reason">{coin.codes.length ? <code>{coin.codes[0]}</code> : null} {coin.reason}</span> : null}

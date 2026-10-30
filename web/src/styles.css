@@ -504,11 +504,17 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .vol-badge.hot { background: var(--amber); color: #1a1000; border-color: var(--amber); }
 :root[data-theme="light"] .vol-badge.hot { background: #b86e00; border-color: #b86e00; color: #fff; }
 .coin-card .score-badge { font-size: 18px; min-width: 58px; padding: 7px 10px; border-radius: 14px; }
-.coin-card .cc-stats { display: grid; grid-template-columns: 1.25fr 1fr 1.2fr auto; gap: 10px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
+.coin-card .cc-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; align-items: start; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
 .coin-card .cc-stat { display: grid; gap: 2px; min-width: 0; }
 .coin-card .cc-stat .k { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim); }
 .coin-card .cc-stat b { font-size: 16px; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.coin-card .cc-stat.vol b { font-size: 19px; }
+.coin-card .cc-stat.vol b, .coin-card .cc-stat.chg b { font-size: 22px; font-weight: 900; }
+.coin-card .cc-stat.chg.up b { color: var(--up); }
+.coin-card .cc-stat.chg.down b { color: var(--down); }
+.coin-card .cc-stat.chg.flat b { color: var(--ink); }
+.coin-card .cc-stat.chg { justify-self: stretch; border-radius: 10px; padding: 0 0 0 10px; border-left: 4px solid var(--card-3); }
+.coin-card .cc-stat.chg.up { border-left-color: var(--up); }
+.coin-card .cc-stat.chg.down { border-left-color: var(--down); }
 .coin-card .cc-chg { font-size: 17px; font-weight: 900; padding: 7px 10px; border-radius: 12px; font-variant-numeric: tabular-nums; text-align: center; min-width: 74px; }
 .coin-card .cc-chg.up { background: color-mix(in srgb, var(--up) 18%, transparent); color: var(--up); }
 .coin-card .cc-chg.down { background: color-mix(in srgb, var(--down) 18%, transparent); color: var(--down); }
