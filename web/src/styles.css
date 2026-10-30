@@ -285,3 +285,20 @@ input[type="range"] { width: 100%; accent-color: var(--lime); height: 28px; }
 .scout-status li.backoff em { color: var(--amber); }
 .scout-status li.down i { background: #ff6a45; }
 .scout-status li.down em { color: #ffc2b4; }
+
+/* v12.3 UI polish */
+.banner { background: rgba(255, 200, 87, 0.08); color: #f3e6c4; border-color: rgba(255, 200, 87, 0.3); font-size: 12px; padding: 6px 12px; border-radius: 999px; justify-content: flex-start; }
+.banner::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+.banner { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; }
+.scout-status > header { margin-bottom: 0; }
+.scout-toggle { all: unset; cursor: pointer; display: flex; align-items: center; gap: 10px; width: 100%; padding: 4px 0; }
+.scout-toggle h3 { flex: 1; font-size: 14px; }
+.scout-toggle span { color: var(--dim); font-size: 12px; }
+.scout-toggle b { color: var(--dim); font-size: 14px; }
+.scout-status ul { margin-top: 4px; }
+.sells { gap: 8px; }
+.sells > button { min-height: 46px; font-size: 15px; font-weight: 600; border-radius: 12px; }
+.sells > button.ghost { color: var(--amber); border-color: rgba(255, 200, 87, 0.55); }
+.filters { flex-wrap: nowrap; }
+.filters button { flex: none; white-space: nowrap; }
+.card { line-height: 1.45; }

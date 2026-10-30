@@ -118,6 +118,9 @@ class DeskRepository private constructor(private val context: Context) {
     }
     private val _activeUrl = MutableStateFlow("")
     val activeUrl: StateFlow<String> = _activeUrl
+    /** v12.3: the last URL that answered, for the "Use last good" action on the connection pill. */
+    private val _lastGoodUrl = MutableStateFlow<String?>(null)
+    val lastGoodUrl: StateFlow<String?> = _lastGoodUrl
     private val _linkSource = MutableStateFlow("beacon")
     val linkSource: StateFlow<String> = _linkSource
 
@@ -196,6 +199,15 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
+    /** v12.3 one-tap recovery: save the last URL that answered as the Link URL and reconnect. */
+    suspend fun useLastGood(): Boolean = withContext(Dispatchers.IO) {
+        val good = (_lastGoodUrl.value ?: context.deskStore.data.first()[KEY_LAST_GOOD])?.trim()?.trimEnd('/')
+        if (good.isNullOrBlank()) return@withContext false
+        val current = currentLink()
+        saveLink(good, current.token, current.useManual)
+        true
+    }
+
     suspend fun saveLink(baseUrl: String, token: String, useManual: Boolean) = withContext(Dispatchers.IO) {
         val cleaned = baseUrl.trim().trimEnd('/')
         context.deskStore.edit { prefs ->
@@ -241,6 +253,7 @@ class DeskRepository private constructor(private val context: Context) {
             val saved = currentLink()
             val prefs = context.deskStore.data.first()
             val lastGood = prefs[KEY_LAST_GOOD]
+            if (_lastGoodUrl.value == null) _lastGoodUrl.value = lastGood
             val discovered = prefs[KEY_DISCOVERED]
             _status.value = if (afterFailure) "Reconnecting" else "Checking the beacon"
             _error.value = null
@@ -717,6 +730,7 @@ class DeskRepository private constructor(private val context: Context) {
         val cleaned = url.trim().trimEnd('/')
         if (cleaned.isBlank() || persistedGood == cleaned) return
         persistedGood = cleaned
+        _lastGoodUrl.value = cleaned
         scope.launch {
             context.deskStore.edit { prefs -> prefs[KEY_LAST_GOOD] = cleaned }
         }

@@ -3,6 +3,8 @@ package com.dirk.nightdesk.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -97,6 +99,8 @@ fun NightDeskApp(desk: DeskRepository) {
     val status by desk.status.collectAsState()
     val live by desk.live.collectAsState()
     val error by desk.error.collectAsState()
+    val lastGood by desk.lastGoodUrl.collectAsState()
+    val activeUrl by desk.activeUrl.collectAsState()
     val notice by desk.notice.collectAsState()
     val hardKill by desk.hardKillAsk.collectAsState()
     val shared by desk.sharedCoin.collectAsState()
@@ -140,10 +144,15 @@ fun NightDeskApp(desk: DeskRepository) {
         Column(Modifier.fillMaxSize().padding(padding).background(Night)) {
             Header(status = status, live = live, mode = snap?.mode ?: "paper")
             snap?.feedBanner?.let { banner ->
-                Text("Feed: $banner", color = Coral, modifier = Modifier.padding(horizontal = 20.dp), fontSize = 12.sp)
+                StatusPill(text = "Feed: $banner", tint = Amber)
             }
-            if (!error.isNullOrBlank()) {
-                Text(error ?: "", color = Coral, modifier = Modifier.padding(horizontal = 20.dp), fontSize = 12.sp)
+            if (!error.isNullOrBlank() || (!live && status.startsWith("Reconnecting"))) {
+                ConnectionPill(
+                    message = shortConnectionError(error, status),
+                    canUseLastGood = !lastGood.isNullOrBlank() && lastGood != activeUrl,
+                    onUseLastGood = { scope.launch { desk.useLastGood() } },
+                    onEditLink = { tab = 5 }
+                )
             }
             notice?.let { note ->
                 Row(
@@ -676,10 +685,14 @@ private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit, onSell
             modifier = Modifier.fillMaxWidth().height(10.dp).padding(top = 4.dp)
         )
         Text("${num(pos.stopDistancePct, "%.1f")}% under the mark before ${fmtPx(pos.stopPrice)}", color = Ink, fontSize = 13.sp)
-        FlowRow(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = { sellAsk = 25 }) { Text("Sell 25%", color = Amber) }
-            TextButton(onClick = { sellAsk = 50 }) { Text("Sell 50%", color = Amber) }
-            TextButton(onClick = { sellAsk = 100 }) { Text("Sell", color = Coral) }
+        // v12.3: bigger, clearer sell buttons. Each one still asks first.
+        Text("SELL", color = Dim, fontSize = 11.sp, letterSpacing = 1.sp, modifier = Modifier.padding(top = 12.dp))
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SellButton("Sell 25%", Amber, Modifier.weight(1f)) { sellAsk = 25 }
+            SellButton("Sell 50%", Amber, Modifier.weight(1f)) { sellAsk = 50 }
+            SellButton("Sell 100%", Coral, Modifier.weight(1f)) { sellAsk = 100 }
+        }
+        FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             chartLinks(pos.mint).forEach { (label, url) ->
                 TextButton(onClick = {
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -697,10 +710,13 @@ private fun OpenPositionCard(pos: PositionRow, onClose: (String) -> Unit, onSell
             title = { Text(if (pending >= 100) "Sell all of ${pos.symbol}?" else "Sell $pending% of ${pos.symbol}?") },
             text = { Text("Paper fill at the mark against the same pool model as a stop. The hard stop keeps guarding what is left.") },
             confirmButton = {
-                TextButton(onClick = {
-                    sellAsk = null
-                    if (pending >= 100) onClose(pos.mint) else onSell(pos.mint, pending)
-                }) { Text("Sell", color = Coral) }
+                Button(
+                    onClick = {
+                        sellAsk = null
+                        if (pending >= 100) onClose(pos.mint) else onSell(pos.mint, pending)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Coral, contentColor = Night)
+                ) { Text("Sell", fontSize = 16.sp) }
             },
             dismissButton = { TextButton(onClick = { sellAsk = null }) { Text("Cancel", color = Dim) } }
         )
@@ -883,18 +899,17 @@ private fun TapeScreen(
                     askBuy = true
                 },
                 enabled = mintLabel != null,
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier.padding(top = 8.dp).height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Night)
-            ) { Text("Buy") }
+            ) { Text("Buy", fontSize = 16.sp) }
         }
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            stages.take(4).forEach { name ->
-                FilterChip(selected = stage == name, onClick = { stage = name }, label = { Text(name) })
-            }
-        }
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            stages.drop(4).forEach { name ->
-                FilterChip(selected = stage == name, onClick = { stage = name }, label = { Text(name) })
+        // v12.3: one scrollable row of stage chips.
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            stages.forEach { name ->
+                FilterChip(selected = stage == name, onClick = { stage = name }, label = { Text(name, fontSize = 13.sp) })
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -1134,6 +1149,62 @@ private fun fmtPx(n: Double): String = when {
     else -> "%.8f".format(Locale.US, n)
 }
 
+/** v12.3 compact connection pill: short text plus one-tap fixes instead of a big red error. */
+@Composable
+private fun ConnectionPill(message: String, canUseLastGood: Boolean, onUseLastGood: () -> Unit, onEditLink: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .background(Color(0x1FFFC857), RoundedCornerShape(14.dp))
+            .padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.width(8.dp).height(8.dp).background(Amber, RoundedCornerShape(4.dp)))
+        Spacer(Modifier.width(8.dp))
+        Text(message, color = Ink, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        if (canUseLastGood) TextButton(onClick = onUseLastGood) { Text("Use last good", color = Lime, fontSize = 13.sp) }
+        TextButton(onClick = onEditLink) { Text("Edit link", color = Sky, fontSize = 13.sp) }
+    }
+}
+
+@Composable
+private fun StatusPill(text: String, tint: Color) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .background(Color(0x14FFFFFF), RoundedCornerShape(14.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.width(8.dp).height(8.dp).background(tint, RoundedCornerShape(4.dp)))
+        Spacer(Modifier.width(8.dp))
+        Text(text, color = Ink, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun SellButton(label: String, tint: Color, modifier: Modifier, onClick: () -> Unit) {
+    androidx.compose.material3.OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(46.dp),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, tint),
+        contentPadding = PaddingValues(horizontal = 4.dp)
+    ) { Text(label, color = tint, fontSize = 15.sp, maxLines = 1) }
+}
+
+/** v12.3 "Unable to resolve host x.trycloudflare.com" becomes "Can't reach x". */
+internal fun shortConnectionError(error: String?, status: String): String {
+    val raw = error?.trim().orEmpty()
+    if (raw.isEmpty()) return if (status.isBlank()) "Reconnecting to the desk…" else "$status…"
+    val host = Regex("""host "?([a-z0-9.-]+)""", RegexOption.IGNORE_CASE).find(raw)?.groupValues?.get(1)
+    if (host != null) return "Can't reach ${host.substringBefore(".trycloudflare.com")}"
+    if (raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true)) return "Desk is slow to answer · retrying"
+    return raw.take(90)
+}
+
 /** v12.1 Scout status: each source live, backing off with a countdown, down, or off. */
 @Composable
 private fun ScoutStatusCard(sources: List<FeedSource>) {
@@ -1147,6 +1218,9 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
         }
     }
     val live = sources.count { it.state == "live" }
+    var open by rememberSaveable { mutableStateOf(false) }
+    // Collapsed still lists any source that is not live, so a problem never hides.
+    val shown = if (open) sources else sources.filter { it.state == "backoff" || it.state == "down" }
     Column(
         Modifier
             .fillMaxWidth()
@@ -1154,11 +1228,15 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
             .background(Color(0xFF151A12), RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Scout status", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text("$live/${sources.size} live · ${sources.sumOf { it.sightingsPerMin }} coins/min", color = Dim, fontSize = 11.sp)
+        Row(
+            Modifier.fillMaxWidth().clickable { open = !open }.padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Scout status", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text("$live/${sources.size} live · ${sources.sumOf { it.sightingsPerMin }} coins/min", color = Dim, fontSize = 12.sp)
+            Text(if (open) "  ▾" else "  ▸", color = Dim, fontSize = 14.sp)
         }
-        sources.forEach { src ->
+        shown.forEach { src ->
             val tint = when (src.state) {
                 "live" -> Mint
                 "backoff" -> Amber
