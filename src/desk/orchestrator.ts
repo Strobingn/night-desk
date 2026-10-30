@@ -3,7 +3,7 @@ import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
 import { DEFAULT_SCOUT_SOURCES, type ScoutSources } from "../agents/scout.js";
 import { evaluateFilter } from "../agents/filter.js";
@@ -57,6 +57,7 @@ type SettingsPatch = {
 interface DeskSettings {
   minVolume1hUsd?: number;
   analystMinScore?: number;
+  volumeBoost?: number;
   maxTop10Pct?: number;
   maxPositionPct?: number;
   defaultBuyUsd?: number | null;
@@ -94,6 +95,7 @@ interface DeskSettings {
 interface DeskSettingsView {
   minVolume1hUsd: number;
   analystMinScore: number;
+  volumeBoost: number;
   maxTop10Pct: number;
   maxPositionPct: number;
   stopLossPct: number;
@@ -248,6 +250,9 @@ export class Desk {
     if (typeof saved.analystMinScore === "number") {
       this.config.rules.analystMinScore = clampScore(saved.analystMinScore);
     }
+    // v13.1: a saved boost wins; otherwise the default. Nothing is written until Dirk saves.
+    this.config.rules.volumeBoost =
+      typeof saved.volumeBoost === "number" ? clampVolumeBoost(saved.volumeBoost) : clampVolumeBoost(this.config.rules.volumeBoost ?? VOLUME_BOOST_BAND.default);
     if (typeof saved.maxTop10Pct === "number") {
       this.config.rules.maxTop10Pct = clampTop10(saved.maxTop10Pct);
     }
@@ -523,6 +528,11 @@ export class Desk {
       }
       next.analystMinScore = Math.round(raw * 100) / 100;
     }
+    if ("volumeBoost" in patch) {
+      const raw = Number(patch.volumeBoost);
+      if (!Number.isFinite(raw) || raw < 0 || raw > 100) return { ok: false, error: "Volume boost must be a percent from 0 to 100." };
+      next.volumeBoost = clampVolumeBoost(raw);
+    }
     if ("maxTop10Pct" in patch) {
       const raw = Number(patch.maxTop10Pct);
       if (!Number.isFinite(raw)) return { ok: false, error: "Top 10 cap must be a percent from 5 to 35." };
@@ -567,7 +577,7 @@ export class Desk {
     this.log({
       stage: "system",
       kind: "info",
-      message: `Settings saved. Volume ${money(view.minVolume1hUsd)}, trade line ${view.analystMinScore.toFixed(2)}, top 10 ${(view.maxTop10Pct * 100).toFixed(0)}%, position ${(view.maxPositionPct * 100).toFixed(0)}%, entry slip ${(view.maxEntrySlippage * 100).toFixed(2)}%, buy ${view.defaultBuyUsd == null ? "cap" : money(view.defaultBuyUsd)}, open ${view.maxOpenPositions}, unlocked LP ${view.allowUnlockedLp ? "allowed" : "blocked"}. Hard stop stays −${(HARD_RULES.stopLossPct * 100).toFixed(0)}%.`
+      message: `Settings saved. Volume ${money(view.minVolume1hUsd)}, trade line ${view.analystMinScore.toFixed(2)}, volume boost ${(view.volumeBoost * 100).toFixed(0)}%, top 10 ${(view.maxTop10Pct * 100).toFixed(0)}%, position ${(view.maxPositionPct * 100).toFixed(0)}%, entry slip ${(view.maxEntrySlippage * 100).toFixed(2)}%, buy ${view.defaultBuyUsd == null ? "cap" : money(view.defaultBuyUsd)}, open ${view.maxOpenPositions}, unlocked LP ${view.allowUnlockedLp ? "allowed" : "blocked"}. Hard stop stays −${(HARD_RULES.stopLossPct * 100).toFixed(0)}%.`
     });
     return { ok: true, settings: view };
   }
@@ -1073,7 +1083,7 @@ export class Desk {
         kind: "info",
         mint: token.mint,
         symbol: token.symbol,
-        message: `Scout found ${token.symbol} on ${token.source}. Mark ${price(token.priceUsd)}, 1h volume ${money(token.volume1hUsd)}.`,
+        message: `Scout found ${token.symbol} on ${token.source}. Mark ${price(token.priceUsd)}, 1h volume ${money(token.volume1hUsd)}${scoutExtras(token)}.`,
         detail: token.source
       });
       const job = this.runFilter(token, prior);
@@ -1930,6 +1940,7 @@ export class Desk {
   private applySaved(saved: DeskSettings): void {
     if (typeof saved.minVolume1hUsd === "number") this.config.rules.minVolume1hUsd = clampVolumeUsd(saved.minVolume1hUsd);
     if (typeof saved.analystMinScore === "number") this.config.rules.analystMinScore = clampScore(saved.analystMinScore);
+    if (typeof saved.volumeBoost === "number") this.config.rules.volumeBoost = clampVolumeBoost(saved.volumeBoost);
     if (typeof saved.maxTop10Pct === "number") this.config.rules.maxTop10Pct = clampTop10(saved.maxTop10Pct);
     if (typeof saved.maxPositionPct === "number") this.config.rules.maxPositionPct = clampPositionPct(saved.maxPositionPct, this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     if (typeof saved.maxEntrySlippage === "number") this.config.rules.maxEntrySlippage = clampEntrySlippage(saved.maxEntrySlippage);
@@ -1981,6 +1992,7 @@ export class Desk {
     return {
       minVolume1hUsd: this.config.rules.minVolume1hUsd,
       analystMinScore: this.config.rules.analystMinScore,
+      volumeBoost: this.config.rules.volumeBoost ?? 0,
       maxTop10Pct: this.config.rules.maxTop10Pct,
       maxPositionPct: this.config.rules.maxPositionPct,
       stopLossPct: this.config.rules.stopLossPct,
@@ -2282,6 +2294,16 @@ function exitVerb(code: string): string {
   if (code === "MANUAL_CLOSE") return "closed";
   if (code === "PARTIAL_SELL") return "trimmed";
   return "exited";
+}
+
+/** v13.1 tape extras: 5m volume and 1h price change, only when the feed gave real numbers. */
+export function scoutExtras(token: { volume5mUsd?: number; priceChange1hPct?: number }): string {
+  let out = "";
+  const v5 = token.volume5mUsd;
+  if (typeof v5 === "number" && Number.isFinite(v5) && v5 > 0) out += `, 5m volume ${money(v5)}`;
+  const ch = token.priceChange1hPct;
+  if (typeof ch === "number" && Number.isFinite(ch)) out += `, 1h change ${ch > 0 ? "+" : ch < 0 ? "-" : ""}${Math.abs(ch).toFixed(1)}%`;
+  return out;
 }
 
 function money(n: number): string {

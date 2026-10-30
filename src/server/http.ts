@@ -304,6 +304,7 @@ const BLOCKED_SETTINGS = new Set([
 export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "minVolume1hUsd",
   "analystMinScore",
+  "volumeBoost",
   "maxTop10Pct",
   "maxPositionPct",
   "defaultBuyUsd",

@@ -84,6 +84,8 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     token.priceUsd = parsed.priceUsd;
     token.liquidityUsd = parsed.liquidityUsd;
     token.volume1hUsd = parsed.volume1hUsd;
+    token.volume5mUsd = parsed.volume5mUsd;
+    token.priceChange1hPct = parsed.priceChange1hPct;
     token.marketCapUsd = parsed.marketCapUsd;
     token.ageSeconds = parsed.ageSeconds;
     token.pairAddress = parsed.pairAddress;
@@ -98,6 +100,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   } else if ((raw.priceUsd ?? 0) > 0 || (raw.volume1hUsd ?? 0) > 0 || (raw.liquidityUsd ?? 0) > 0 || parsed) {
     if (parsed) {
       token.volume1hUsd = parsed.volume1hUsd;
+      token.volume5mUsd = parsed.volume5mUsd;
       token.marketCapUsd = parsed.marketCapUsd;
       token.ageSeconds = parsed.ageSeconds;
       token.dex = parsed.dex;

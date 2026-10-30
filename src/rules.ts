@@ -52,6 +52,30 @@ export const VOLUME_BAND = { min: 1_000, max: 500_000 } as const;
 /** Analyst trade line. Default stays 0.50. The desk accepts 0.10 through 0.95. */
 export const SCORE_BAND = { min: 0.1, max: 0.95 } as const;
 
+/**
+ * v13.1 analyst volume boost. A bonus added on top of the five-factor score so high-volume
+ * coins rank higher. 0 turns it off. It never lowers a score, never lifts one past 1, and
+ * gives nothing when volume or liquidity is missing (fail closed). It does not touch any gate.
+ */
+export const VOLUME_BOOST_BAND = {
+  min: 0,
+  max: 1,
+  /** Default 50%: up to +0.10 for $1M+ an hour, +0.05 at $100k, nothing at $10k or less. */
+  default: 0.5,
+  /** Bonus at 100% boost for a coin at or above fullUsd. */
+  maxBonus: 0.2,
+  floorUsd: 10_000,
+  fullUsd: 1_000_000
+} as const;
+
+/** Fraction (0.5) or percent (50). Non-finite falls back; out of band is clamped. */
+export function clampVolumeBoost(raw: number, fallback: number = VOLUME_BOOST_BAND.default): number {
+  if (!Number.isFinite(raw)) return fallback;
+  const fraction = raw > 1 ? raw / 100 : raw;
+  const clamped = Math.min(VOLUME_BOOST_BAND.max, Math.max(VOLUME_BOOST_BAND.min, fraction));
+  return Math.round(clamped * 100) / 100;
+}
+
 /** How many names may be open at once. The desk can move this. It does not change the stop. */
 export const OPEN_POSITION_BAND = { min: 1, max: 24, fallback: 12 } as const;
 
@@ -244,6 +268,8 @@ export interface ResolvedRules {
   revengeCooldownMs: number;
   /** Max a buy may pay above the mark. Default 3%. Cannot be loosened or removed. */
   maxEntrySlippage: number;
+  /** v13.1 analyst volume boost, 0–1. Absent = no boost. The desk fills it with the default on boot. */
+  volumeBoost?: number;
 }
 
 function readPositive(raw: string | undefined): number | undefined {

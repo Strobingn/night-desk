@@ -69,6 +69,9 @@ export interface CandidateToken {
   priceUsd: number;
   liquidityUsd: number;
   volume1hUsd: number;
+  /** v13.1 tape: DexScreener 5m volume and 1h price change (percent, e.g. 12.5). Display only. */
+  volume5mUsd?: number;
+  priceChange1hPct?: number;
   marketCapUsd?: number;
   ageSeconds: number;
   /** null = could not verify. Treated as not revoked. */
@@ -111,7 +114,7 @@ export interface FilterResult {
 }
 
 export interface ScoreFactor {
-  key: "liquidity" | "holders" | "volume" | "age" | "social";
+  key: "liquidity" | "holders" | "volume" | "age" | "social" | "boost";
   label: string;
   weight: number;
   /** Unweighted 0–1 factor. */

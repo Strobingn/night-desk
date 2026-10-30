@@ -5,7 +5,7 @@ import { clock } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
 import { ScoutStatus } from "./ScoutStatus";
-import { coinCards, VERDICT_LABEL, type CoinRow, type Verdict } from "../coins";
+import { coinCards, HOT_RANK, parseTapeSort, sortCoins, TAPE_SORT_KEY, TAPE_SORTS, TOP_VOLUME, VERDICT_LABEL, type CoinRow, type TapeSort, type Verdict } from "../coins";
 import { compactUsd, px } from "../format";
 import { CoinAvatar, Icon } from "../ui";
 
@@ -29,6 +29,22 @@ export function TapeScreen({
 }) {
   const [view, setView] = useState<"coins" | "log">("coins");
   const [coinFilter, setCoinFilter] = useState<(typeof COIN_FILTERS)[number]>("all");
+  // v13.1: per-device sort, Volume by default. Saved in this browser only, never sent to the desk.
+  const [sort, setSortState] = useState<TapeSort>(() => {
+    try {
+      return parseTapeSort(localStorage.getItem(TAPE_SORT_KEY));
+    } catch {
+      return "volume";
+    }
+  });
+  function setSort(next: TapeSort) {
+    setSortState(next);
+    try {
+      localStorage.setItem(TAPE_SORT_KEY, next);
+    } catch {
+      /* private mode: keep it for this session only */
+    }
+  }
   const [stageFilter, setStageFilter] = useState<(typeof LOG_STAGES)[number]>("all");
   const [selected, setSelected] = useState<{ mint: string; symbol: string } | null>(null);
   const [buySize, setBuySize] = useState("");
@@ -190,7 +206,7 @@ export function TapeScreen({
   }
 
   const openMints = new Set(snap.positions.map((pos) => pos.mint));
-  const coins = view === "coins" ? coinCards(history, openMints).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")) : [];
+  const coins = view === "coins" ? sortCoins(coinCards(history, openMints).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")), sort) : [];
 
   return (
     <div className="tape-screen">
@@ -210,6 +226,16 @@ export function TapeScreen({
         </button>
         ) : null}
       </div>
+      {view === "coins" ? (
+        <div className="sortbar" role="radiogroup" aria-label="Tape sort">
+          <span className="sort-label">Sort</span>
+          {TAPE_SORTS.map((o) => (
+            <button key={o.id} type="button" role="radio" aria-checked={sort === o.id} className={sort === o.id ? "on" : ""} onClick={() => setSort(o.id)}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {view === "coins" ? (
         <div className="filters" role="tablist" aria-label="Coin verdict">
           {COIN_FILTERS.map((f) => (
@@ -325,27 +351,50 @@ export function TapeScreen({
 
 function CoinCard({ coin, selected, busy, onSelect, onBuy }: { coin: CoinRow; selected: boolean; busy: boolean; onSelect: () => void; onBuy: () => void }) {
   const tone: Record<Verdict, "up" | "down" | "flat"> = { open: "up", bought: "up", trade: "up", near: "flat", killed: "down", seen: "flat" };
+  const rank = coin.volRank;
+  const top = rank != null && rank <= TOP_VOLUME;
+  const hot = rank != null && rank <= HOT_RANK;
+  const ch = coin.change1h;
+  const chTone = ch == null || !Number.isFinite(ch) ? "flat" : ch > 0 ? "up" : ch < 0 ? "down" : "flat";
   return (
-    <article className={`coin-card v-${coin.verdict}${selected ? " selected" : ""}`} onClick={onSelect} data-mint={coin.mint}>
-      <CoinAvatar symbol={coin.symbol} mint={coin.mint} tone={tone[coin.verdict]} size={42} />
-      <div className="cc-main">
-        <div className="cc-title">
+    <article className={`coin-card v-${coin.verdict}${selected ? " selected" : ""}${top ? " top-vol" : ""}${hot ? " hot" : ""}`} onClick={onSelect} data-mint={coin.mint}>
+      <div className="cc-top">
+        <CoinAvatar symbol={coin.symbol} mint={coin.mint} tone={tone[coin.verdict]} size={44} />
+        <div className="cc-name">
           <b>{coin.symbol}</b>
-          <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
+          <div className="cc-chips">
+            <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
+            {hot ? <span className="vol-badge hot" title={`#${rank} by 1h volume`}>HOT #{rank}</span> : top ? <span className="vol-badge" title={`#${rank} by 1h volume`}>VOL #{rank}</span> : null}
+          </div>
         </div>
-        <span className="sub">
-          {coin.source ?? "scout"} · {clock(coin.lastTs || Date.now())}
-          {coin.vol1h != null ? ` · 1h ${compactUsd(coin.vol1h)}` : ""}
-          {coin.mark ? ` · ${px(coin.mark)}` : ""}
-        </span>
-        {coin.reason ? <span className="cc-reason">{coin.codes.length ? <code>{coin.codes[0]}</code> : null} {coin.reason}</span> : null}
-      </div>
-      <div className="cc-side">
         {coin.score != null ? (
           <span className={`score-badge${coin.verdict === "trade" || coin.verdict === "bought" || coin.verdict === "open" ? " pass" : ""}`} title="Analyst score">
             {coin.score.toFixed(2)}
           </span>
         ) : null}
+      </div>
+      <div className="cc-stats">
+        <div className="cc-stat vol">
+          <span className="k">1h vol</span>
+          <b>{coin.vol1h != null ? compactUsd(coin.vol1h) : "—"}</b>
+        </div>
+        <div className="cc-stat">
+          <span className="k">5m vol</span>
+          <b>{coin.vol5m != null ? compactUsd(coin.vol5m) : "—"}</b>
+        </div>
+        <div className="cc-stat">
+          <span className="k">Price</span>
+          <b>{coin.mark ? px(coin.mark) : "—"}</b>
+        </div>
+        <div className={`cc-chg ${chTone}`} title="1h price change">
+          {ch == null || !Number.isFinite(ch) ? "— %" : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}
+        </div>
+      </div>
+      {coin.reason ? <span className="cc-reason">{coin.codes.length ? <code>{coin.codes[0]}</code> : null} {coin.reason}</span> : null}
+      <div className="cc-foot">
+        <span className="cc-meta">
+          {coin.source ?? "scout"} · {clock(coin.lastTs || Date.now())}
+        </span>
         {coin.verdict !== "open" ? (
           <button
             className="primary sm"
@@ -358,7 +407,9 @@ function CoinCard({ coin, selected, busy, onSelect, onBuy }: { coin: CoinRow; se
           >
             {busy ? "Buying" : "Buy"}
           </button>
-        ) : null}
+        ) : (
+          <span className="verdict-chip v-open">Holding</span>
+        )}
       </div>
     </article>
   );

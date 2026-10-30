@@ -487,3 +487,43 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 :root[data-theme="light"] .settings-bar { background: color-mix(in srgb, var(--bg) 94%, transparent); }
 :root[data-theme="light"] .modal-back { background: rgba(0, 0, 0, 0.35); }
 :root[data-theme="light"] .card, :root[data-theme="light"] .pos-card, :root[data-theme="light"] .coin-card, :root[data-theme="light"] .metric { box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06); }
+
+/* ---- v13.1 readable Tape: bigger type, high contrast, taller rows, volume first ---- */
+.sortbar { display: flex; align-items: center; gap: 8px; padding: 2px 0 4px; }
+.sortbar .sort-label { color: var(--dim); font-size: 14px; font-weight: 700; margin-right: 2px; }
+.sortbar button { flex: 1; min-height: 40px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--card-2); color: var(--ink); font-size: 15px; font-weight: 700; }
+.sortbar button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.coin-list { gap: 14px; }
+.coin-card { display: grid; gap: 12px; align-items: stretch; padding: 16px 16px 14px 18px; border-radius: 20px; }
+.coin-card .cc-top { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.coin-card .cc-name { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.coin-card .cc-name b { font-size: 21px; font-weight: 800; color: var(--ink); line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -0.2px; }
+.coin-card .cc-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.coin-card .verdict-chip { font-size: 13px; padding: 3px 9px; }
+.vol-badge { font-size: 12.5px; font-weight: 800; letter-spacing: 0.3px; padding: 3px 9px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+.vol-badge.hot { background: var(--amber); color: #1a1000; border-color: var(--amber); }
+:root[data-theme="light"] .vol-badge.hot { background: #b86e00; border-color: #b86e00; color: #fff; }
+.coin-card .score-badge { font-size: 18px; min-width: 58px; padding: 7px 10px; border-radius: 14px; }
+.coin-card .cc-stats { display: grid; grid-template-columns: 1.25fr 1fr 1.2fr auto; gap: 10px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
+.coin-card .cc-stat { display: grid; gap: 2px; min-width: 0; }
+.coin-card .cc-stat .k { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim); }
+.coin-card .cc-stat b { font-size: 16px; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coin-card .cc-stat.vol b { font-size: 19px; }
+.coin-card .cc-chg { font-size: 17px; font-weight: 900; padding: 7px 10px; border-radius: 12px; font-variant-numeric: tabular-nums; text-align: center; min-width: 74px; }
+.coin-card .cc-chg.up { background: color-mix(in srgb, var(--up) 18%, transparent); color: var(--up); }
+.coin-card .cc-chg.down { background: color-mix(in srgb, var(--down) 18%, transparent); color: var(--down); }
+.coin-card .cc-chg.flat { background: var(--card-3); color: var(--dim); }
+.coin-card .cc-reason { font-size: 14px; line-height: 1.35; color: var(--dim); }
+.coin-card .cc-reason code { font-size: 12px; color: var(--ink); }
+.coin-card .cc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.coin-card .cc-meta { font-size: 14px; color: var(--dim); font-weight: 600; }
+.coin-card .cc-foot .primary.sm { min-height: 44px; min-width: 96px; font-size: 16px; border-radius: 14px; }
+.coin-card.top-vol { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.coin-card.hot { border-color: color-mix(in srgb, var(--amber) 60%, var(--line)); }
+.coin-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* raw log readability */
+.rows .row { padding: 11px 4px; gap: 10px; }
+.rows .row .msg { font-size: 15px; line-height: 1.4; color: var(--ink); }
+.rows .row .when { font-size: 13px; color: var(--dim); }
+.rows .row .detail { color: var(--dim); }
+.rows .row .tag { font-size: 12px; }

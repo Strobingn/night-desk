@@ -241,6 +241,8 @@ export function parseDexPair(payload: unknown, mint: string): {
   priceUsd: number;
   liquidityUsd: number;
   volume1hUsd: number;
+  volume5mUsd?: number;
+  priceChange1hPct?: number;
   marketCapUsd?: number;
   ageSeconds: number;
   pairAddress?: string;
@@ -269,7 +271,12 @@ export function parseDexPair(payload: unknown, mint: string): {
   const dexId = String(best.dexId ?? "");
   const base = best.baseToken as { symbol?: string; name?: string };
   const volume1hUsd = matching.reduce((max, pair) => Math.max(max, pairHourVolume(pair)), 0);
+  const volume5mUsd = matching.reduce((max, pair) => Math.max(max, finite((pair.volume as { m5?: unknown } | undefined)?.m5)), 0);
+  const changeRaw = (best.priceChange as { h1?: unknown } | undefined)?.h1;
+  const change = typeof changeRaw === "number" || (typeof changeRaw === "string" && changeRaw.trim() !== "") ? Number(changeRaw) : NaN;
   return {
+    volume5mUsd: volume5mUsd > 0 ? volume5mUsd : undefined,
+    priceChange1hPct: Number.isFinite(change) ? change : undefined,
     priceUsd: Number(best.priceUsd ?? 0) || 0,
     liquidityUsd: Number((best.liquidity as { usd?: number } | undefined)?.usd ?? 0) || 0,
     volume1hUsd,

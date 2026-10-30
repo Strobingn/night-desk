@@ -56,6 +56,7 @@ export const SETTINGS_FIELDS: SettingField[] = [
   // Filter / Analyst gates
   { key: "minVolume1hUsd", label: "1h volume $", group: "Filter / Analyst gates", kind: "slider", min: 1_000, max: 500_000, step: 1_000, unit: "$", toWire: same, fromState: same },
   { key: "analystMinScore", label: "Trade line", group: "Filter / Analyst gates", kind: "slider", min: 0.1, max: 0.95, step: 0.01, unit: "score", toWire: same, fromState: same },
+  { key: "volumeBoost", label: "Volume boost", group: "Filter / Analyst gates", kind: "slider", min: 0, max: 100, step: 5, unit: "%", toWire: (d: number) => Math.round(d) / 100, fromState: (raw: number) => Math.round(raw * 100), hint: "Adds to the Analyst score for high 1h volume: none at $10k, half at $100k, full at $1M+. 50% = up to +0.10. 0 = off. Never lowers a score or passes 1; no volume data = no boost." },
   { key: "maxTop10Pct", label: "Top 10 cap %", group: "Filter / Analyst gates", kind: "slider", min: 5, max: 35, step: 1, unit: "%", ...pct },
   { key: "minLiquidityUsd", label: "Min liquidity $", group: "Filter / Analyst gates", kind: "slider", min: 0, max: 200_000, step: 1_000, unit: "$", toWire: same, fromState: same, hint: "0 = off." },
   { key: "minTokenAgeMin", label: "Min age", group: "Filter / Analyst gates", kind: "slider", min: 0, max: 1_440, step: 5, unit: "min", toWire: same, fromState: same },

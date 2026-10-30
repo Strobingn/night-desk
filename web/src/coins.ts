@@ -9,10 +9,18 @@ export interface CoinRow {
   source?: string;
   mark?: number;
   vol1h?: number;
+  /** v13.1: 5m volume and 1h price change (percent) when the Scout line carried them. */
+  vol5m?: number;
+  change1h?: number;
+  /** v13.1: 1-based rank by 1h volume among the coins on the tape. */
+  volRank?: number;
   score?: number;
   verdict: Verdict;
   reason?: string;
   codes: string[];
+  /** Internal while folding. */
+  changeSeen?: number;
+  firstMark?: number;
 }
 
 const RANK: Record<Verdict, number> = { seen: 0, killed: 1, near: 2, trade: 3, bought: 4, open: 5 };
@@ -38,8 +46,25 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
     if (e.stage === "scout") {
       const m = /Mark ([0-9.eE-]+), 1h volume \$([0-9,.]+)/.exec(e.message);
       if (m) {
-        row.mark = Number(m[1]) || undefined;
-        row.vol1h = Number(m[2].replace(/,/g, "").replace(/\.$/, ""));
+        const mark = Number(m[1]) || undefined;
+        // No 1h change from the feed: fall back to the move since the first sighting on this tape.
+        if (mark) {
+          if (row.firstMark == null) row.firstMark = mark;
+          else row.changeSeen = (mark / row.firstMark - 1) * 100;
+        }
+        row.mark = mark;
+        const v = Number(m[2].replace(/,/g, "").replace(/\.$/, ""));
+        row.vol1h = Number.isFinite(v) ? v : undefined;
+      }
+      const v5 = /5m volume \$([0-9,.]+)/.exec(e.message);
+      if (v5) {
+        const n = Number(v5[1].replace(/,/g, "").replace(/\.$/, ""));
+        if (Number.isFinite(n)) row.vol5m = n;
+      }
+      const ch = /1h change ([+-]?)([0-9.]+)%/.exec(e.message);
+      if (ch) {
+        const n = Number(ch[2]) * (ch[1] === "-" ? -1 : 1);
+        if (Number.isFinite(n)) row.change1h = n;
       }
       if (e.detail) row.source = e.detail;
     } else if (e.stage === "filter" && e.kind === "reject") {
@@ -59,10 +84,51 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
     }
   }
   for (const row of map.values()) if (openMints.has(row.mint)) row.verdict = "open";
-  return [...map.values()]
+  const rows = [...map.values()]
     .filter((row) => row.lastTs > 0 || row.verdict === "open")
     .sort((a, b) => b.lastTs - a.lastTs)
     .slice(0, limit);
+  for (const row of rows) {
+    if (row.change1h == null && row.changeSeen != null && Number.isFinite(row.changeSeen)) row.change1h = row.changeSeen;
+    delete row.changeSeen;
+    delete row.firstMark;
+  }
+  rankByVolume(rows);
+  return rows;
+}
+
+/** 1-based rank by 1h volume (5m breaks ties). Coins with no volume get no rank. */
+export function rankByVolume(rows: CoinRow[]): void {
+  const ranked = rows
+    .filter((r) => r.vol1h != null && Number.isFinite(r.vol1h) && r.vol1h > 0)
+    .sort((a, b) => (b.vol1h ?? 0) - (a.vol1h ?? 0) || (b.vol5m ?? 0) - (a.vol5m ?? 0));
+  rows.forEach((r) => delete r.volRank);
+  ranked.forEach((r, i) => (r.volRank = i + 1));
+}
+
+export type TapeSort = "volume" | "newest" | "score";
+export const TAPE_SORTS: { id: TapeSort; label: string }[] = [
+  { id: "volume", label: "Volume" },
+  { id: "newest", label: "Newest" },
+  { id: "score", label: "Score" }
+];
+export const TAPE_SORT_KEY = "nightdesk.tapeSort";
+/** Top this many by 1h volume get the volume badge; the top HOT_RANK also get HOT. */
+export const TOP_VOLUME = 10;
+export const HOT_RANK = 3;
+
+export function parseTapeSort(raw: string | null | undefined): TapeSort {
+  return raw === "newest" || raw === "score" || raw === "volume" ? raw : "volume";
+}
+
+/** Volume (default): 1h volume high→low, unknown last. Score: high→low, unknown last. Newest: latest line first. */
+export function sortCoins(rows: CoinRow[], mode: TapeSort): CoinRow[] {
+  const vol = (r: CoinRow) => (r.vol1h != null && Number.isFinite(r.vol1h) ? r.vol1h : -1);
+  const sc = (r: CoinRow) => (r.score != null && Number.isFinite(r.score) ? r.score : -1);
+  const copy = [...rows];
+  if (mode === "newest") return copy.sort((a, b) => b.lastTs - a.lastTs);
+  if (mode === "score") return copy.sort((a, b) => sc(b) - sc(a) || vol(b) - vol(a) || b.lastTs - a.lastTs);
+  return copy.sort((a, b) => vol(b) - vol(a) || (b.vol5m ?? 0) - (a.vol5m ?? 0) || b.lastTs - a.lastTs);
 }
 
 export const VERDICT_LABEL: Record<Verdict, string> = {
