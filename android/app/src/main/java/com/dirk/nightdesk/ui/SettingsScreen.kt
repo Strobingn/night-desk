@@ -74,7 +74,9 @@ private data class Draft(
     val sizeUsd: Float,
     val useSizeUsd: Boolean,
     val exposure: Float,
-    val resetUsd: Float
+    val resetUsd: Float,
+    /** v13.2 Position price refresh, seconds 1–10. */
+    val refresh: Float
 )
 
 private fun draftOf(snap: DeskSnapshot?): Draft {
@@ -115,7 +117,8 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         sizeUsd = (snap?.positionSizeUsd ?: snap?.positionCapUsd ?: 8.0).toFloat().coerceIn(1f, 10_000f),
         useSizeUsd = snap?.positionSizeUsd != null,
         exposure = ((snap?.maxExposurePct ?: 1.0) * 100.0).toFloat().coerceIn(10f, 100f),
-        resetUsd = (snap?.paperResetUsd ?: 100.0).toFloat().coerceIn(100f, 10_000f)
+        resetUsd = (snap?.paperResetUsd ?: 100.0).toFloat().coerceIn(100f, 10_000f),
+        refresh = ((snap?.positionRefreshMs ?: 1_500L) / 1_000.0).toFloat().coerceIn(1f, 10f)
     )
 }
 
@@ -182,6 +185,8 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
             ExactSlider("Manual buy $", draft.buy, 1f..10_000f, 1f, { "%.0f".format(it) }) { draft = draft.copy(buy = it, useCap = false) }
             ToggleRow("Use the position cap instead", draft.useCap) { draft = draft.copy(useCap = it) }
             ExactSlider("Max open", draft.open, 1f..24f, 1f, { "%.0f".format(it) }) { draft = draft.copy(open = it) }
+            ExactSlider("Position price refresh s", draft.refresh, 1f..10f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(refresh = it) }
+            Text("How often open positions are re-priced. Pool reserves every cycle; DexScreener every 3 s and Jupiter every 5 s at most, so the Scout is not rate-limited.", color = Dim, fontSize = 12.sp)
             ExactSlider("Max trades / hour", draft.rate, 0f..60f, 1f, { "%.0f".format(it) }) { draft = draft.copy(rate = it) }
             ToggleRow("Auto-buy", draft.autoBuy) { draft = draft.copy(autoBuy = it) }
             Text("0 trades per hour means no hourly cap. Auto-buy off still leaves manual Buy and Buy anyway.", color = Dim, fontSize = 12.sp)
@@ -256,7 +261,8 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "pnlAlertPct" to draft.alert.toDouble(),
     "positionSizeUsd" to if (draft.useSizeUsd) draft.sizeUsd.toDouble() else null,
     "maxExposurePct" to draft.exposure.toDouble(),
-    "paperResetUsd" to draft.resetUsd.toDouble()
+    "paperResetUsd" to draft.resetUsd.toDouble(),
+    "positionRefreshMs" to Math.round(draft.refresh.toDouble() * 1_000.0)
 )
 
 /** v13 group icons and one-line descriptions, same as the web. */

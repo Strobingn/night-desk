@@ -103,6 +103,14 @@ import com.dirk.nightdesk.TapeFollowState
 import com.dirk.nightdesk.countNewSince
 import com.dirk.nightdesk.pausedLabel
 import com.dirk.nightdesk.stepTapeFollow
+import com.dirk.nightdesk.chartLinks
+import com.dirk.nightdesk.liveAgeMs
+import com.dirk.nightdesk.markFreshness
+import com.dirk.nightdesk.MarkFreshness
+import com.dirk.nightdesk.updatedLabel
+import com.dirk.nightdesk.feedLabel
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -913,7 +921,7 @@ private fun OpenPositionCard(
                     if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
                     else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
                     Spacer(Modifier.width(6.dp))
-                    Text("score ${num(pos.score, "%.2f")} · mark ${markAge(pos.markAgeMs)}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("score ${num(pos.score, "%.2f")}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
             }
@@ -922,6 +930,7 @@ private fun OpenPositionCard(
                 Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
+        MarkUpdated(pos)
         StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
         Column(
             Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(P.surface).border(1.dp, P.line, RoundedCornerShape(14.dp)).padding(12.dp),
@@ -999,10 +1008,11 @@ private fun PositionCard(pos: PositionRow, onClose: (String) -> Unit) {
             Text(signed(pos.pnlUsd), color = if (pos.pnlUsd >= 0) Mint else Coral, fontFamily = FontFamily.Monospace)
         }
         Text(
-            "${if (pos.entry == "manual") "Manual buy" else pos.source}  ·  score ${num(pos.score, "%.2f")}  ·  mark ${markAge(pos.markAgeMs)}",
+            "${if (pos.entry == "manual") "Manual buy" else pos.source}  ·  score ${num(pos.score, "%.2f")}",
             color = Dim,
             fontSize = 12.sp
         )
+        MarkUpdated(pos)
         if (pos.lpUnlocked) Text("LP unlocked", color = Amber, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Text("Hard stop ${fmtPx(pos.stopPrice)}  ·  ${num(pos.stopDistancePct, "%.1f")}% under the mark", color = Ink, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
         val context = LocalContext.current
@@ -1017,12 +1027,6 @@ private fun PositionCard(pos: PositionRow, onClose: (String) -> Unit) {
     }
 }
 
-/** Look-only feeds. Opening one does not send a desk order. */
-private fun chartLinks(mint: String): List<Pair<String, String>> = listOf(
-    "DexScreener" to "https://dexscreener.com/solana/$mint",
-    "Birdeye" to "https://birdeye.so/token/$mint?chain=solana",
-    "Jupiter" to "https://jup.ag/tokens/$mint"
-)
 
 @Composable
 private fun TapeScreen(
@@ -1480,10 +1484,36 @@ private fun pct(n: Double): String {
     return sign + "%.2f".format(Locale.US, kotlin.math.abs(n) * 100) + "%"
 }
 
-private fun markAge(ms: Long): String = when {
-    ms < 1_000 -> "just now"
-    ms < 60_000 -> "${ms / 1000}s"
-    else -> "${ms / 60_000}m"
+/** v13.2 live "updated Xs ago" line. Ticks every second. Amber past 10 s, red past 30 s. */
+@Composable
+internal fun MarkUpdated(pos: PositionRow) {
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(pos.mint) {
+        while (true) {
+            kotlinx.coroutines.delay(1_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val age = liveAgeMs(pos, now)
+    val fresh = markFreshness(age)
+    val color = when (fresh) {
+        MarkFreshness.FRESH -> P.up
+        MarkFreshness.AMBER -> P.amber
+        MarkFreshness.RED -> P.down
+    }
+    val feed = feedLabel(pos.markFeed)
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp).semantics { contentDescription = "Mark ${updatedLabel(age)}" }) {
+        Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(color))
+        Spacer(Modifier.width(5.dp))
+        Text(
+            updatedLabel(age) + (if (feed.isNotEmpty()) " · $feed" else "") + (if (fresh == MarkFreshness.RED) " · stale" else ""),
+            color = if (fresh == MarkFreshness.FRESH) P.muted else color,
+            fontSize = 13.sp,
+            fontWeight = if (fresh == MarkFreshness.FRESH) FontWeight.Normal else FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }
 
 private fun fmtPx(n: Double): String = when {

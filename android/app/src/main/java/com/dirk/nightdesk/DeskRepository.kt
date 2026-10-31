@@ -637,6 +637,13 @@ class DeskRepository private constructor(private val context: Context) {
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     runCatching {
+                        // v13.2: small position-mark deltas between full snapshots.
+                        if (text.length < 64_000 && text.startsWith("{\"type\":\"marks\"")) {
+                            val msg = parseMarksMessage(text) ?: return@runCatching
+                            val current = _snapshot.value ?: return@runCatching
+                            _snapshot.value = current.withMarks(msg)
+                            return@runCatching
+                        }
                         parseDeskPayload(text)?.let {
                             apply(it)
                             persistSnapshot(text)

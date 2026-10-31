@@ -31,7 +31,11 @@ data class PositionRow(
     /** v12. "manual · pump.fun" etc. Null for auto buys. */
     val tag: String? = null,
     /** v13 stop→trail bar. 0 when the desk did not send it. */
-    val peakPrice: Double = 0.0
+    val peakPrice: Double = 0.0,
+    /** v13.2 local wall time the shown mark was taken (receive time − markAgeMs). */
+    val markLocalAt: Long = 0L,
+    /** v13.2 "chain" (pool reserves), "dexscreener", "jupiter", … */
+    val markFeed: String = ""
 ) {
     val stopDistancePct: Double
         get() {
@@ -263,6 +267,8 @@ data class DeskSnapshot(
     val positionSizeUsd: Double? = null,
     val maxExposurePct: Double = 1.0,
     val paperResetUsd: Double = 100.0,
+    /** v13.2 Position price refresh, ms. */
+    val positionRefreshMs: Long = 1_500L,
     val manualMaxUsd: Double = 0.0,
     val exposureUsd: Double = 0.0,
     val watchlist: List<WatchRow> = emptyList(),
@@ -456,6 +462,7 @@ fun parseDeskPayload(raw: String): DeskSnapshot? {
 }
 
 private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
+    val receivedAt = System.currentTimeMillis()
     val root = JSONObject(raw)
     val data = when {
         root.has("equityUsd") -> root
@@ -507,6 +514,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
                         entry = row.optText("entry", "analyst"),
                         lpUnlocked = row.optBoolean("lpUnlocked"),
                         markAgeMs = row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
+                        markLocalAt = receivedAt - row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
+                        markFeed = row.optText("markFeed"),
                         costUsd = row.optFinite("costUsd"),
                         marketValueUsd = row.optFinite("marketValueUsd"),
                         openedAt = row.optFinite("openedAt").toLong(),
@@ -669,6 +678,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         positionSizeUsd = prefs?.let { row -> if (!row.has("positionSizeUsd") || row.isNull("positionSizeUsd")) null else row.optFinite("positionSizeUsd", Double.NaN).takeIf { it.isFinite() && it > 0 } },
         maxExposurePct = (prefs?.optFinite("maxExposurePct", 1.0) ?: 1.0).let { if (it > 1) it / 100 else it }.coerceIn(0.1, 1.0),
         paperResetUsd = (prefs?.optFinite("paperResetUsd", 100.0) ?: 100.0).coerceIn(100.0, 10_000.0),
+        positionRefreshMs = (prefs?.optFinite("positionRefreshMs", 1_500.0) ?: 1_500.0).toLong().coerceIn(1_000L, 10_000L),
         manualMaxUsd = data.optFinite("manualMaxUsd"),
         exposureUsd = data.optFinite("exposureUsd"),
         watchlist = parseWatchRows(data.optJSONArray("watchlist")),
