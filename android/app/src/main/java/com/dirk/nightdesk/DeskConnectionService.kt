@@ -139,7 +139,7 @@ class DeskConnectionService : Service() {
         if (snap.notifyFills || snap.notifyStops) {
             for (event in snap.events.takeLast(40)) {
                 val fill = snap.notifyFills && event.kind == "fill"
-                val stop = snap.notifyStops && (event.code == "STOP_LOSS" || event.code == "TRAIL_STOP")
+                val stop = snap.notifyStops && OneTap.isStopExit(event.code)
                 if (!fill && !stop) continue
                 if (!seenAlerts.add(event.id)) continue
                 runCatching {

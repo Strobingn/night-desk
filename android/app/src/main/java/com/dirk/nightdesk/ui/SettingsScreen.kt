@@ -45,6 +45,9 @@ private data class Draft(
     val top10: Float,
     val position: Float,
     val slip: Float,
+    /** v13.3 exit slippage %, and whether it is set (off = entry cap + 3%). */
+    val exitSlip: Float,
+    val useExitSlip: Boolean,
     val buy: Float,
     val useCap: Boolean,
     val open: Float,
@@ -66,6 +69,8 @@ private data class Draft(
     val gecko: Boolean,
     val jupiter: Boolean,
     val paprika: Boolean,
+    val pumpApi: Boolean,
+    val launchLab: Boolean,
     val bitquery: Boolean,
     val near: Boolean,
     val fills: Boolean,
@@ -88,6 +93,8 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         top10 = ((snap?.maxTop10Pct ?: 0.35) * 100.0).toFloat(),
         position = ((snap?.maxPositionPct ?: 0.08) * 100.0).toFloat(),
         slip = ((snap?.maxEntrySlippage ?: 0.03) * 100.0).toFloat(),
+        exitSlip = (((snap?.maxExitSlippage ?: ((snap?.maxEntrySlippage ?: 0.03) + 0.03)) * 100.0).toFloat()).coerceIn(0.5f, 50f),
+        useExitSlip = snap?.maxExitSlippage != null,
         buy = (buy ?: snap?.positionCapUsd ?: 8.0).toFloat().coerceAtLeast(1f),
         useCap = buy == null,
         open = (snap?.maxOpenPositions ?: 12).toFloat(),
@@ -109,6 +116,8 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         gecko = snap?.scoutGecko != false,
         jupiter = snap?.scoutJupiter != false,
         paprika = snap?.scoutDexpaprika == true,
+        pumpApi = snap?.scoutPumpApi != false,
+        launchLab = snap?.scoutLaunchLab != false,
         bitquery = snap?.scoutBitquery != false,
         near = snap?.notifyNearMiss != false,
         fills = snap?.notifyFills != false,
@@ -181,7 +190,13 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
             }
             ExactSlider("Max total exposure %", draft.exposure, 10f..100f, 5f, { "%.0f".format(it) }) { draft = draft.copy(exposure = it) }
             Text("Open positions as a share of equity. 100% = only cash limits it.", color = Dim, fontSize = 12.sp)
-            ExactSlider("Entry slippage %", draft.slip, 0.5f..3f, 0.1f, { "%.1f".format(it) }) { draft = draft.copy(slip = it) }
+            ExactSlider("Entry slippage %", draft.slip, 0.5f..50f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(slip = it) }
+            Text("Max price impact a buy may pay, 0.5–50% (3% default). A buy past it is refused, never filled worse; the fill is recorded at its real price. The −6% stop is unchanged.", color = Dim, fontSize = 12.sp)
+            ToggleRow("Custom exit slippage", draft.useExitSlip) { draft = draft.copy(useExitSlip = it) }
+            if (draft.useExitSlip) {
+                ExactSlider("Exit slippage %", draft.exitSlip, 0.5f..50f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(exitSlip = it) }
+            }
+            Text("Max cost of selling the whole position, checked before every buy. Off = entry cap + 3%. Sells always go through at the real fill.", color = Dim, fontSize = 12.sp)
             ExactSlider("Manual buy $", draft.buy, 1f..10_000f, 1f, { "%.0f".format(it) }) { draft = draft.copy(buy = it, useCap = false) }
             ToggleRow("Use the position cap instead", draft.useCap) { draft = draft.copy(useCap = it) }
             ExactSlider("Max open", draft.open, 1f..24f, 1f, { "%.0f".format(it) }) { draft = draft.copy(open = it) }
@@ -196,6 +211,8 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         Group("Scout sources") {
             ToggleRow("Pump", true) {}
             Text("Pump stays on. It is the primary feed.", color = Dim, fontSize = 12.sp)
+            ToggleRow("Pump.fun API", draft.pumpApi) { draft = draft.copy(pumpApi = it) }
+            ToggleRow("Bonk.fun / LaunchLab", draft.launchLab) { draft = draft.copy(launchLab = it) }
             ToggleRow("DexScreener", draft.dex) { draft = draft.copy(dex = it) }
             ToggleRow("Gecko", draft.gecko) { draft = draft.copy(gecko = it) }
             ToggleRow("Jupiter", draft.jupiter) { draft = draft.copy(jupiter = it) }
@@ -234,6 +251,7 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "maxTop10Pct" to draft.top10.toDouble(),
     "maxPositionPct" to draft.position.toDouble(),
     "maxEntrySlippage" to draft.slip.toDouble(),
+    "maxExitSlippage" to if (draft.useExitSlip) draft.exitSlip.toDouble() else null,
     "defaultBuyUsd" to if (draft.useCap) null else draft.buy.toDouble(),
     "maxOpenPositions" to draft.open.toInt(),
     "allowUnlockedLp" to draft.unlocked,
@@ -254,6 +272,8 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "scoutGecko" to draft.gecko,
     "scoutJupiter" to draft.jupiter,
     "scoutDexpaprika" to draft.paprika,
+    "scoutPumpApi" to draft.pumpApi,
+    "scoutLaunchLab" to draft.launchLab,
     "scoutBitquery" to draft.bitquery,
     "notifyNearMiss" to draft.near,
     "notifyFills" to draft.fills,

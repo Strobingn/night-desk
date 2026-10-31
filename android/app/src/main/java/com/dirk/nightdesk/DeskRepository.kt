@@ -495,6 +495,112 @@ class DeskRepository private constructor(private val context: Context) {
         notice
     }
 
+    // v13.3 one tap. One in-flight order per mint and side; the idemKey makes a retried request
+    // return the first result on the desk instead of placing a second order.
+    private val tapInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val _tapping = MutableStateFlow<Set<String>>(emptySet())
+    val tapping: StateFlow<Set<String>> = _tapping
+    private val _tapUsd = MutableStateFlow<Double?>(
+        context.getSharedPreferences("night_desk_local", Context.MODE_PRIVATE).getFloat(OneTap.PREF_TAP_USD, 0f).toDouble().takeIf { it > 0 }
+    )
+    val tapUsd: StateFlow<Double?> = _tapUsd
+
+    fun setTapUsd(value: Double) {
+        if (!value.isFinite() || value <= 0) return
+        val v = kotlin.math.round(value * 100.0) / 100.0
+        _tapUsd.value = v
+        context.getSharedPreferences("night_desk_local", Context.MODE_PRIVATE).edit().putFloat(OneTap.PREF_TAP_USD, v.toFloat()).apply()
+    }
+
+    private fun claimTap(key: String): Boolean {
+        if (!tapInFlight.add(key)) return false
+        _tapping.value = tapInFlight.toSet()
+        return true
+    }
+
+    private fun releaseTap(key: String) {
+        tapInFlight.remove(key)
+        _tapping.value = tapInFlight.toSet()
+    }
+
+    /** v13.3 one-tap paper buy. No dialog; every desk risk check still runs. Null = already in flight. */
+    suspend fun oneTapBuy(mint: String, symbol: String, sizeUsd: Double): DeskNotice? = withContext(Dispatchers.IO) {
+        val key = "buy:$mint"
+        if (!claimTap(key)) return@withContext null
+        try {
+            val base = link.baseUrl
+            if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+            val body = JSONObject().put("mint", mint).put("sizeUsd", sizeUsd).put("idemKey", OneTap.newIdemKey()).put("oneTap", true)
+            val started = System.nanoTime()
+            val notice = sendRaw("$base/api/positions/buy", body.toString()).fold(
+                onSuccess = { (code, raw) ->
+                    val json = runCatching { JSONObject(raw) }.getOrNull()
+                    val ok = code in 200..299 && json?.optBoolean("ok", false) == true
+                    DeskNotice(ok, OneTap.buyText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
+                },
+                onFailure = { err -> DeskNotice(false, "$symbol: ${err.message ?: "buy failed"}") }
+            )
+            _notice.value = notice
+            refresh()
+            notice
+        } finally {
+            releaseTap(key)
+        }
+    }
+
+    /** v13.3 one-tap sell: closes 100% now. No dialog. Null = already in flight. */
+    suspend fun oneTapSell(mint: String, symbol: String): DeskNotice? = withContext(Dispatchers.IO) {
+        val key = "sell:$mint"
+        if (!claimTap(key)) return@withContext null
+        try {
+            val base = link.baseUrl
+            if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+            val body = JSONObject().put("mint", mint).put("percent", 100).put("idemKey", OneTap.newIdemKey())
+            val started = System.nanoTime()
+            val notice = sendRaw("$base/api/positions/sell", body.toString()).fold(
+                onSuccess = { (code, raw) ->
+                    val json = runCatching { JSONObject(raw) }.getOrNull()
+                    val ok = code in 200..299 && json?.optBoolean("ok", false) == true
+                    DeskNotice(ok, OneTap.sellText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
+                },
+                onFailure = { err -> DeskNotice(false, "$symbol: ${err.message ?: "sell failed"}") }
+            )
+            _notice.value = notice
+            refresh()
+            notice
+        } finally {
+            releaseTap(key)
+        }
+    }
+
+    /** v13.3 Sell all open positions. */
+    suspend fun sellAll(): DeskNotice? = withContext(Dispatchers.IO) {
+        val key = "sell-all"
+        if (!claimTap(key)) return@withContext null
+        try {
+            val base = link.baseUrl
+            if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+            val started = System.nanoTime()
+            val body = JSONObject().put("confirm", true).put("idemKey", OneTap.newIdemKey())
+            val notice = post("$base/api/positions/sell-all", body.toString()).fold(
+                onSuccess = { raw ->
+                    val json = runCatching { JSONObject(raw) }.getOrNull()
+                    val sold = json?.optJSONArray("sold")?.length() ?: 0
+                    val failed = json?.optJSONArray("failed")?.length() ?: 0
+                    val pnl = json?.optFinite("pnlUsd", 0.0) ?: 0.0
+                    val ms = (System.nanoTime() - started) / 1_000_000
+                    DeskNotice(failed == 0, "Sold all: $sold closed" + (if (failed > 0) ", $failed failed" else "") + " · ${if (pnl >= 0) "+" else "−"}${formatUsd(kotlin.math.abs(pnl))} · $ms ms")
+                },
+                onFailure = { err -> DeskNotice(false, err.message ?: "Sell all failed.") }
+            )
+            _notice.value = notice
+            refresh()
+            notice
+        } finally {
+            releaseTap(key)
+        }
+    }
+
     suspend fun saveSettings(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) {

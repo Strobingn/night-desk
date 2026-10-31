@@ -258,6 +258,9 @@ data class DeskSnapshot(
     val scoutGecko: Boolean = true,
     val scoutJupiter: Boolean = true,
     val scoutDexpaprika: Boolean = false,
+    /** v13.3 keyless Pump.fun API and Raydium LaunchLab (Bonk.fun) listings. */
+    val scoutPumpApi: Boolean = true,
+    val scoutLaunchLab: Boolean = true,
     val scoutBitquery: Boolean = true,
     val notifyNearMiss: Boolean = true,
     val notifyFills: Boolean = true,
@@ -269,6 +272,8 @@ data class DeskSnapshot(
     val paperResetUsd: Double = 100.0,
     /** v13.2 Position price refresh, ms. */
     val positionRefreshMs: Long = 1_500L,
+    /** v13.3 exit slippage tolerance (fraction). Null = entry cap + 3%. */
+    val maxExitSlippage: Double? = null,
     val manualMaxUsd: Double = 0.0,
     val exposureUsd: Double = 0.0,
     val watchlist: List<WatchRow> = emptyList(),
@@ -306,6 +311,8 @@ fun feedSourceStateText(src: FeedSource, nowMs: Long): String {
         "live" -> if (src.id == "pump") "live · websocket" else "live"
         "off" -> if (detail != null) "off · $detail" else "off"
         "down" -> if (detail != null) "down · $detail" else "down"
+        // v13.3 watchdog: connected but silent past 60s. Never shown as live.
+        "stale" -> if (detail != null) "stale · $detail" else "stale · reconnecting"
         else -> {
             val left = src.retryAt?.let { kotlin.math.ceil((it - nowMs) / 1000.0).toLong().coerceAtLeast(0L) }
             val wait = if (left != null && left > 0) {
@@ -616,7 +623,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         maxTop10Pct = rules?.optFinite("maxTop10Pct", 0.35) ?: 0.35,
         maxPositionPct = rules?.optFinite("maxPositionPct", 0.08) ?: 0.08,
         stopLossPct = rules?.optFinite("stopLossPct", 0.06) ?: 0.06,
-        maxEntrySlippage = (rules?.optFinite("maxEntrySlippage", 0.03) ?: 0.03).let { if (it > 1) it / 100 else it }.coerceIn(0.005, 0.03),
+        maxEntrySlippage = (rules?.optFinite("maxEntrySlippage", 0.03) ?: 0.03).let { if (it > 1) it / 100 else it }.coerceIn(0.005, 0.5),
         defaultBuyUsd = prefs?.let { row -> if (!row.has("defaultBuyUsd") || row.isNull("defaultBuyUsd")) null else row.optFinite("defaultBuyUsd", Double.NaN).takeIf { it.isFinite() && it > 0 } },
         maxOpenPositions = prefs?.optInt("maxOpenPositions", 12) ?: 12,
         allowUnlockedLp = prefs?.optBoolean("allowUnlockedLp", true) ?: true,
@@ -670,6 +677,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         scoutGecko = prefs?.optBoolean("scoutGecko", true) ?: true,
         scoutJupiter = prefs?.optBoolean("scoutJupiter", true) ?: true,
         scoutDexpaprika = prefs?.optBoolean("scoutDexpaprika", false) ?: false,
+        scoutPumpApi = prefs?.optBoolean("scoutPumpApi", true) ?: true,
+        scoutLaunchLab = prefs?.optBoolean("scoutLaunchLab", true) ?: true,
         scoutBitquery = prefs?.optBoolean("scoutBitquery", true) ?: true,
         notifyNearMiss = prefs?.optBoolean("notifyNearMiss", true) ?: true,
         notifyFills = prefs?.optBoolean("notifyFills", true) ?: true,
@@ -679,6 +688,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         maxExposurePct = (prefs?.optFinite("maxExposurePct", 1.0) ?: 1.0).let { if (it > 1) it / 100 else it }.coerceIn(0.1, 1.0),
         paperResetUsd = (prefs?.optFinite("paperResetUsd", 100.0) ?: 100.0).coerceIn(100.0, 10_000.0),
         positionRefreshMs = (prefs?.optFinite("positionRefreshMs", 1_500.0) ?: 1_500.0).toLong().coerceIn(1_000L, 10_000L),
+        maxExitSlippage = prefs?.let { row -> if (!row.has("maxExitSlippage") || row.isNull("maxExitSlippage")) null else row.optFinite("maxExitSlippage", Double.NaN).takeIf { it.isFinite() && it > 0 }?.let { if (it > 1) it / 100 else it }?.coerceIn(0.005, 0.5) },
         manualMaxUsd = data.optFinite("manualMaxUsd"),
         exposureUsd = data.optFinite("exposureUsd"),
         watchlist = parseWatchRows(data.optJSONArray("watchlist")),

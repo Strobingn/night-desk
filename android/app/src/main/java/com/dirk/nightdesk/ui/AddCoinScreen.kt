@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -53,8 +54,10 @@ private val CHIPS = listOf(10.0, 25.0, 50.0, 100.0, 250.0)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<String, Int>?) {
+fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<String, Int>?, oneTap: OneTapUi? = null) {
     val scope = rememberCoroutineScope()
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val tapping by desk.tapping.collectAsState()
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var input by remember { mutableStateOf(prefill?.first.orEmpty()) }
@@ -200,6 +203,22 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = OnAccent)
                     ) { Text(if (found.hardKills.isEmpty()) "Paper buy ${formatUsd(size)}" else "Buy ${found.symbol} anyway…") }
+                    if (found.hardKills.isEmpty()) {
+                        // v13.3 one tap at this size: no dialog, every desk check still runs.
+                        val inFlight = tapping.contains("buy:${found.mint}")
+                        BigButton(
+                            if (inFlight) "Buying…" else "⚡ One-tap buy ${formatUsd(size)}",
+                            P.card3,
+                            P.ink,
+                            Modifier.fillMaxWidth(),
+                            border = P.up,
+                            height = 46.dp,
+                            enabled = !inFlight
+                        ) {
+                            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            scope.launch { desk.oneTapBuy(found.mint, found.symbol, size) }
+                        }
+                    }
                 }
                 TextButton(enabled = !found.watching, onClick = {
                     scope.launch {
@@ -209,6 +228,8 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                 }) { Text(if (found.watching) "Watching" else "Add to watchlist", color = Sky) }
             }
         }
+
+        if (oneTap != null) OneTapBar(oneTap, showSellAll = false)
 
         Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("WATCHLIST", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
@@ -235,6 +256,12 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                         }
                     }
                     Row {
+                        val held = snap?.positions.orEmpty().any { it.mint == row.mint }
+                        if (oneTap != null && !held) {
+                            TextButton(enabled = !oneTap.buying(row.mint), onClick = { oneTap.onBuy(row.mint, row.symbol) }) {
+                                Text(if (oneTap.buying(row.mint)) "Buying…" else oneTap.buyLabel, color = Lime, fontWeight = FontWeight.Bold)
+                            }
+                        }
                         TextButton(onClick = {
                             input = row.mint
                             lookup(row.mint)

@@ -131,7 +131,7 @@ private fun stageColor(stage: String): Color = when (stage) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit) {
+private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null) {
     val vc = verdictColor(coin.verdict)
     val rank = coin.volRank
     val top = rank != null && rank <= TOP_VOLUME
@@ -234,9 +234,22 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                 overflow = TextOverflow.Ellipsis
             )
             if (coin.verdict != Verdict.OPEN) {
-                BigButton("Buy", P.up, P.onUp, Modifier.width(104.dp), height = 46.dp, onClick = onBuy)
+                if (oneTap != null) {
+                    // v13.3: one tap buys now at the one-tap size; "Buy…" keeps the confirm dialog.
+                    val inFlight = oneTap.buying(coin.mint)
+                    BigButton(if (inFlight) "Buying…" else oneTap.buyLabel, P.up, P.onUp, Modifier.width(118.dp), height = 46.dp, enabled = !inFlight) { oneTap.onBuy(coin.mint, coin.symbol) }
+                    Spacer(Modifier.width(6.dp))
+                    BigButton("Buy…", P.card3, P.ink, Modifier.width(70.dp), border = P.lineStrong, height = 46.dp, onClick = onBuy)
+                } else {
+                    BigButton("Buy", P.up, P.onUp, Modifier.width(104.dp), height = 46.dp, onClick = onBuy)
+                }
             } else {
                 Chip("Holding", P.blue, P.blue.copy(alpha = 0.18f), size = 13)
+                if (oneTap != null) {
+                    Spacer(Modifier.width(6.dp))
+                    val inFlight = oneTap.selling(coin.mint)
+                    BigButton(if (inFlight) "Selling…" else "⚡ Sell", P.down, P.onDown, Modifier.width(92.dp), height = 46.dp, enabled = !inFlight) { oneTap.onSell(coin.mint, coin.symbol) }
+                }
             }
         }
     }
@@ -266,6 +279,36 @@ fun NightDeskApp(desk: DeskRepository) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var addPrefill by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val scope = rememberCoroutineScope()
+    // v13.3 one tap: haptic tick on every one-tap Buy / Sell, one order per tap.
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val tapping by desk.tapping.collectAsState()
+    val tapSaved by desk.tapUsd.collectAsState()
+    val oneTap = snap?.let { s ->
+        OneTapUi(
+            tapUsd = com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd),
+            capUsd = s.positionCapUsd,
+            maxUsd = kotlin.math.max(s.positionCapUsd, s.cashUsd),
+            slipPct = kotlin.math.round(s.maxEntrySlippage * 10_000.0) / 100.0,
+            stopPct = s.stopLossPct,
+            tapping = tapping,
+            openCount = s.positions.size,
+            onBuy = { mint, symbol ->
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                val size = com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd)
+                scope.launch { desk.oneTapBuy(mint, symbol, size) }
+            },
+            onSell = { mint, symbol ->
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                scope.launch { desk.oneTapSell(mint, symbol) }
+            },
+            onSellAll = {
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                scope.launch { desk.sellAll() }
+            },
+            onTapUsd = { desk.setTapUsd(it) },
+            onSlip = { pct -> scope.launch { desk.saveSettings(mapOf("maxEntrySlippage" to pct)) } }
+        )
+    }
 
     LaunchedEffect(shared) {
         val coin = desk.consumeSharedCoin()
@@ -358,7 +401,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     onSell = { mint, percent -> scope.launch { desk.sellPosition(mint, percent) } },
                     onReset = { scope.launch { desk.resetPaperBook() } },
                     onReady = { ready -> scope.launch { desk.setOperatorReady(ready) } },
-                    onBuy = { mint, ignore -> scope.launch { desk.buyPosition(mint, null, ignore) } }
+                    onBuy = { mint, ignore -> scope.launch { desk.buyPosition(mint, null, ignore) } },
+                    oneTap = oneTap
                 )
                 1 -> TapeScreen(
                     snap?.events.orEmpty(),
@@ -366,9 +410,10 @@ fun NightDeskApp(desk: DeskRepository) {
                     cooldowns = snap?.cooldowns.orEmpty(),
                     onBuy = { mint, size, ignore -> scope.launch { desk.buyPosition(mint, size, ignore) } },
                     feedSources = snap?.feedSources.orEmpty(),
-                    positionMints = snap?.positions.orEmpty().map { it.mint }.toSet()
+                    positionMints = snap?.positions.orEmpty().map { it.mint }.toSet(),
+                    oneTap = oneTap
                 )
-                2 -> AddCoinScreen(desk, snap, addPrefill)
+                2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
                 4 -> SettingsScreen(snap) { patch -> scope.launch { desk.saveSettings(patch) } }
                 else -> LinkScreen(desk)
@@ -459,7 +504,8 @@ private fun BookScreen(
     onSell: (String, Int) -> Unit,
     onReset: () -> Unit,
     onReady: (Boolean) -> Unit,
-    onBuy: (String, Boolean) -> Unit
+    onBuy: (String, Boolean) -> Unit,
+    oneTap: OneTapUi? = null
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -480,6 +526,7 @@ private fun BookScreen(
                 if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
             )
         }
+        if (oneTap != null) item { OneTapBar(oneTap) }
         if (snap == null || snap.positions.isEmpty()) {
             item {
                 Text(
@@ -491,7 +538,7 @@ private fun BookScreen(
             }
         } else {
             itemsIndexed(snap.positions, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
-                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit)
+                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap)
             }
         }
         item { LiveReadyCard(snap?.readiness, onReady) }
@@ -508,8 +555,8 @@ private fun BookScreen(
                 Column(Modifier.deskCard(radius = 16.dp).padding(14.dp)) {
                     Text(trade.symbol, color = Ink, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "entry ${px(trade.entryPrice)} → exit ${px(trade.exitPrice)} · ${trade.exitCode} · ${clock(trade.closedAt)}",
-                        color = Dim,
+                        "entry ${px(trade.entryPrice)} → exit ${px(trade.exitPrice)} · ${com.dirk.nightdesk.OneTap.exitLabel(trade.exitCode)} · ${clock(trade.closedAt)}",
+                        color = if (trade.exitCode == "GAP_RUG") Coral else Dim,
                         fontSize = 12.sp
                     )
                     Text(money(trade.pnlUsd), color = if (trade.pnlUsd >= 0) Mint else Coral, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
@@ -905,7 +952,8 @@ private fun OpenPositionCard(
     onClose: (String) -> Unit,
     onSell: (String, Int) -> Unit = { mint, _ -> onClose(mint) },
     armPct: Double = 0.12,
-    trailOn: Boolean = false
+    trailOn: Boolean = false,
+    oneTap: OneTapUi? = null
 ) {
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
@@ -946,6 +994,17 @@ private fun OpenPositionCard(
                 PosStat("Held", heldFor(pos.openedAt))
                 PosStat("To stop", "${num(pos.stopDistancePct, "%.1f")}%")
             }
+        }
+        // v13.3 one tap: closes 100% now, no dialog. The 25 / 50 / 100 buttons below still ask first.
+        if (oneTap != null) {
+            val inFlight = oneTap.selling(pos.mint)
+            BigButton(
+                if (inFlight) "Selling…" else "⚡ Sell now",
+                P.down,
+                P.onDown,
+                Modifier.fillMaxWidth().padding(top = 12.dp),
+                enabled = !inFlight
+            ) { oneTap.onSell(pos.mint, pos.symbol) }
         }
         // Sell 25 / 50 / 100. Each one still asks first; the confirm never touches the connection.
         Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1035,7 +1094,8 @@ private fun TapeScreen(
     cooldowns: List<MintCooldown>,
     onBuy: (String, Double?, Boolean) -> Unit,
     feedSources: List<FeedSource> = emptyList(),
-    positionMints: Set<String> = emptySet()
+    positionMints: Set<String> = emptySet(),
+    oneTap: OneTapUi? = null
 ) {
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
@@ -1190,6 +1250,7 @@ private fun TapeScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = P.up, contentColor = P.onUp)
             ) { Text("Buy", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold) }
         }
+        if (tapeView == "coins" && oneTap != null) OneTapBar(oneTap, Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         if (tapeView == "coins") {
             val coins = sortCoins(
                 remember(idKey, positionMints) { coinCards(events, positionMints) }
@@ -1246,7 +1307,8 @@ private fun TapeScreen(
                             sizeError = null
                             sizeText = capText
                             askBuy = true
-                        }
+                        },
+                        oneTap = oneTap
                     )
                 }
             }
@@ -1594,7 +1656,7 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
     val live = sources.count { it.state == "live" }
     var open by rememberSaveable { mutableStateOf(false) }
     // Collapsed still lists any source that is not live, so a problem never hides.
-    val shown = if (open) sources else sources.filter { it.state == "backoff" || it.state == "down" }
+    val shown = if (open) sources else sources.filter { it.state == "backoff" || it.state == "down" || it.state == "stale" }
     Column(
         Modifier
             .fillMaxWidth()
@@ -1613,7 +1675,7 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
         shown.forEach { src ->
             val tint = when (src.state) {
                 "live" -> Mint
-                "backoff" -> Amber
+                "backoff", "stale" -> Amber
                 "down" -> Coral
                 else -> Dim
             }
@@ -1634,7 +1696,7 @@ private fun clock(ts: Long): String = if (ts <= 0) "—" else clockFmt.format(In
 
 /** v13 render harness for screenshot tests: the real screens with a fixed snapshot and no network. */
 @Composable
-internal fun DeskPreview(tab: Int, snap: DeskSnapshot) {
+internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null) {
     NightTheme {
         Scaffold(
             containerColor = P.bg,
@@ -1662,14 +1724,15 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot) {
             Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
                 Header(status = "Connected", live = true, mode = snap.mode)
                 when (tab) {
-                    0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> })
+                    0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> }, oneTap)
                     1 -> TapeScreen(
                         events = snap.events,
                         positionCapUsd = snap.positionCapUsd,
                         cooldowns = snap.cooldowns,
                         onBuy = { _, _, _ -> },
                         feedSources = snap.feedSources,
-                        positionMints = snap.positions.map { it.mint }.toSet()
+                        positionMints = snap.positions.map { it.mint }.toSet(),
+                        oneTap = oneTap
                     )
                     else -> SettingsScreen(snap) {}
                 }
