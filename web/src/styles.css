@@ -561,3 +561,6 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .coin-card .tap-sell { min-height: 44px; }
 .gap-label { color: var(--down); font-weight: 800; }
 .scout-status li.stale i { background: var(--amber); } .scout-status li.stale em { color: var(--amber); font-weight: 700; }
+
+/* v13.3 one-tap toast: fixed above the tab bar, visible wherever the tap happened. */
+.notice.toast { position: fixed; left: 12px; right: 12px; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 60; margin: 0; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); max-width: 560px; margin-inline: auto; }

@@ -289,7 +289,7 @@ export function TapeScreen({
         ) : (
           <p className="empty">
             {view === "coins"
-              ? `Tap Buy to buy at the cap${capText ? ` ($${capText})` : ""}, or tap a card to pick a size first. No add while a mint is open.`
+              ? `Tap ⚡ Buy to paper-buy now at your one-tap size, or Buy… to pick a size first (cap${capText ? ` $${capText}` : ""}). No add while a mint is open.`
               : `Select a mint on the tape to buy. The size starts at the current cap${capText ? ` ($${capText})` : ""}. A larger request is filled at the cap. No add while that mint is open.`}
           </p>
         )}

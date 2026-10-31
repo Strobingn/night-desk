@@ -19,7 +19,7 @@ import org.robolectric.annotation.GraphicsMode
 /** v13.3: one-tap Buy / Sell, size and slippage controls on Book and Tape. Skips without a fixture. */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [34], qualifiers = "w384dp-h1100dp-xxhdpi")
+@Config(sdk = [34], qualifiers = "w384dp-h1500dp-xxhdpi")
 class V133ShotsTest {
     @Test fun renderOneTap() {
         val fixture = File(System.getenv("ND_STATE_133") ?: "/tmp/state133.json")

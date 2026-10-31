@@ -26,6 +26,8 @@ export type TabId = (typeof TABS)[number]["id"];
 export interface Notice {
   ok: boolean;
   text: string;
+  /** v13.3 one-tap result: floats above the tab bar so it shows wherever the tap was. */
+  toast?: boolean;
 }
 
 /** One buy request waiting on the operator. Cooldown and hard kills both use "Buy anyway". */
@@ -74,6 +76,11 @@ export function App() {
   const [history, setHistory] = useState<FeedEvent[]>([]);
   const [tab, setTabState] = useState<TabId>(() => (new URLSearchParams(location.search).get("add") ? "add" : tabFromHash()));
   const [notice, setNotice] = useState<Notice | null>(null);
+  useEffect(() => {
+    if (!notice?.toast) return;
+    const timer = window.setTimeout(() => setNotice((n) => (n === notice ? null : n)), 7000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [buyAsk, setBuyAsk] = useState<BuyAsk | null>(null);
   const [addQuery, setAddQuery] = useState<{ q: string; n: number }>(() => ({ q: new URLSearchParams(location.search).get("add") ?? "", n: 0 }));
   const [busy, setBusy] = useState<string | null>(null);
@@ -250,7 +257,7 @@ export function App() {
       track(key, false);
       const body = { ...res.body, ok: res.ok };
       const hint = !res.ok && (body.code === "HARD_KILL" || body.code === "REVENGE_COOLDOWN") ? " Use Buy… on the card to override." : "";
-      setNotice({ ok: res.ok, text: buyToast(symbol, body, Math.round(performance.now() - started)) + hint });
+      setNotice({ ok: res.ok, toast: true, text: buyToast(symbol, body, Math.round(performance.now() - started)) + hint });
     },
     [tapUsd, track]
   );
@@ -263,7 +270,7 @@ export function App() {
       const started = performance.now();
       const res = await api<SellReply>("/api/positions/sell", { body: { mint, percent: 100, idemKey: newIdemKey() } });
       track(key, false);
-      setNotice({ ok: res.ok, text: sellToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
+      setNotice({ ok: res.ok, toast: true, text: sellToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
     },
     [track]
   );
@@ -282,6 +289,7 @@ export function App() {
     const failed = res.body.failed ?? [];
     setNotice({
       ok: res.ok && failed.length === 0,
+      toast: true,
       text: res.ok
         ? `Sold all: ${sold} closed${failed.length ? `, ${failed.length} failed (${failed.map((f) => f.symbol).join(", ")})` : ""} · ${signedUsd(res.body.pnlUsd ?? 0)} · ${ms} ms`
         : res.body.error ?? "Sell all failed."
@@ -394,7 +402,7 @@ export function App() {
       </nav>
 
       {notice ? (
-        <div className={notice.ok ? "notice ok" : "notice"} role="status">
+        <div className={`${notice.ok ? "notice ok" : "notice"}${notice.toast ? " toast" : ""}`} role="status">
           <span>{notice.text}</span>
           <button className="ghost" type="button" onClick={() => setNotice(null)}>
             Dismiss
