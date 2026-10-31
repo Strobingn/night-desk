@@ -290,7 +290,7 @@ describe("v13.2 the fast loop cannot create a false stop", () => {
       vi.setSystemTime(1_800_000_016_500);
       await desk.repricePositions();
       expect(desk.book.positions.has(MINT)).toBe(false);
-      expect(desk.snapshot().events.some((e) => e.code === "STOP_LOSS")).toBe(true);
+      expect(desk.snapshot().events.some((e) => (e.code === "STOP_LOSS" || e.code === "GAP_RUG"))).toBe(true);
     } finally {
       desk.stop();
     }
@@ -312,7 +312,7 @@ describe("v13.2 the fast loop cannot create a false stop", () => {
       p = String(entry * 0.935);
       await desk.repricePositions();
       expect(desk.book.positions.has(MINT)).toBe(false);
-      expect(desk.snapshot().events.some((e) => e.code === "STOP_LOSS")).toBe(true);
+      expect(desk.snapshot().events.some((e) => (e.code === "STOP_LOSS" || e.code === "GAP_RUG"))).toBe(true);
     } finally {
       desk.stop();
     }
@@ -351,7 +351,7 @@ describe("v13.2 the fast loop cannot create a false stop", () => {
       const events = desk.snapshot().events;
       expect(events.some((e) => e.code === "PRICE_REANCHOR")).toBe(true);
       expect(desk.book.positions.has(MINT)).toBe(false);
-      expect(events.some((e) => e.code === "STOP_LOSS")).toBe(true);
+      expect(events.some((e) => (e.code === "STOP_LOSS" || e.code === "GAP_RUG"))).toBe(true);
       // The rejects before the re-anchor were logged once, not once per tick.
       expect(events.filter((e) => e.code === "PRICE_SOURCE")).toHaveLength(1);
     } finally {
@@ -413,7 +413,7 @@ describe("v13.2 the fast loop cannot create a false stop", () => {
       vi.setSystemTime(t0 + 30_000);
       await desk.repricePositions();
       expect(desk.book.positions.has(MINT)).toBe(false);
-      expect(desk.snapshot().events.some((e) => e.code === "STOP_LOSS")).toBe(true);
+      expect(desk.snapshot().events.some((e) => (e.code === "STOP_LOSS" || e.code === "GAP_RUG"))).toBe(true);
     } finally {
       desk.stop();
     }

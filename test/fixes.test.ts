@@ -366,7 +366,8 @@ describe("open positions get priced on the live feed", () => {
       // fill = 0.001 * (1 + 0.0015 + 800/90000) = 0.0010104; stop = 0.0010104 * 0.94 = 0.00094978
       expect(desk.book.positions.has(mint)).toBe(true);
       await desk.repricePositions();
-      expect(desk.snapshot().closed.at(-1)).toMatchObject({ symbol: "POLLED", exitCode: "STOP_LOSS" });
+      expect(desk.snapshot().closed.at(-1)).toMatchObject({ symbol: "POLLED" });
+      expect(["STOP_LOSS", "GAP_RUG"]).toContain(desk.snapshot().closed.at(-1)?.exitCode);
       expect(desk.book.positions.has(mint)).toBe(false);
     } finally {
       desk.stop();

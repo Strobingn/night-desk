@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -70,6 +70,9 @@ export class DeskStore {
     );
     if (!cols.has("entry_price")) this.db.exec(`ALTER TABLE trades ADD COLUMN entry_price REAL`);
     if (!cols.has("exit_price")) this.db.exec(`ALTER TABLE trades ADD COLUMN exit_price REAL`);
+    // v13.3 honest stop labels: the stop line and the mark that triggered the exit.
+    if (!cols.has("stop_price")) this.db.exec(`ALTER TABLE trades ADD COLUMN stop_price REAL`);
+    if (!cols.has("trigger_price")) this.db.exec(`ALTER TABLE trades ADD COLUMN trigger_price REAL`);
   }
 
   appendEvent(event: FeedEvent, payload: unknown): void {
@@ -210,7 +213,7 @@ export class DeskStore {
     this.db
       .prepare(
         `UPDATE trades
-         SET closed_at = ?, proceeds_usd = ?, pnl_usd = ?, pnl_pct = ?, exit_code = ?, entry_price = ?, exit_price = ?
+         SET closed_at = ?, proceeds_usd = ?, pnl_usd = ?, pnl_pct = ?, exit_code = ?, entry_price = ?, exit_price = ?, stop_price = ?, trigger_price = ?
          WHERE id = ?`
       )
       .run(
@@ -221,6 +224,8 @@ export class DeskStore {
         trade.exitCode,
         trade.entryPrice ?? null,
         trade.exitPrice ?? null,
+        trade.stopPrice ?? null,
+        trade.triggerPrice ?? null,
         trade.id
       );
   }
@@ -228,7 +233,7 @@ export class DeskStore {
   recentClosed(limit = 12): ClosedTrade[] {
     const rows = this.db
       .prepare(
-        `SELECT id, mint, symbol, opened_at, closed_at, cost_usd, proceeds_usd, pnl_usd, pnl_pct, exit_code, score, mode, entry_price, exit_price
+        `SELECT id, mint, symbol, opened_at, closed_at, cost_usd, proceeds_usd, pnl_usd, pnl_pct, exit_code, score, mode, entry_price, exit_price, stop_price, trigger_price
          FROM trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT ?`
       )
       .all(limit) as Array<Record<string, unknown>>;
@@ -238,7 +243,7 @@ export class DeskStore {
   closedSince(sinceTs: number): ClosedTrade[] {
     const rows = this.db
       .prepare(
-        `SELECT id, mint, symbol, opened_at, closed_at, cost_usd, proceeds_usd, pnl_usd, pnl_pct, exit_code, score, mode, entry_price, exit_price
+        `SELECT id, mint, symbol, opened_at, closed_at, cost_usd, proceeds_usd, pnl_usd, pnl_pct, exit_code, score, mode, entry_price, exit_price, stop_price, trigger_price
          FROM trades WHERE closed_at IS NOT NULL AND closed_at >= ? ORDER BY closed_at ASC`
       )
       .all(sinceTs) as Array<Record<string, unknown>>;
@@ -249,6 +254,26 @@ export class DeskStore {
     this.db
       .prepare(`INSERT INTO kv (key, value) VALUES ('book', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
       .run(JSON.stringify(book));
+  }
+
+  /**
+   * v13.3 session archive before a paper reset. The trades and equity tables are never
+   * deleted; this adds a JSON snapshot of the session (kv `archive:<name>` and, on disk,
+   * data/archive/<name>.json next to the database). Returns the file path when written.
+   */
+  archiveSession(name: string, payload: unknown): string | null {
+    const safe = name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    this.writeJson(`archive:${safe}`, payload);
+    const index = this.readJson("archives");
+    const list = Array.isArray(index) ? (index as string[]) : [];
+    if (!list.includes(safe)) list.push(safe);
+    this.writeJson("archives", list);
+    if (this.dbPath === ":memory:") return null;
+    const dir = path.join(path.dirname(this.dbPath), "archive");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${safe}.json`);
+    writeFileSync(file, JSON.stringify(payload, null, 2));
+    return file;
   }
 
   readJson(key: string): unknown | null {
@@ -297,6 +322,8 @@ function rowToClosed(row: Record<string, unknown>): ClosedTrade {
     score: Number(row.score),
     mode: row.mode as ClosedTrade["mode"],
     ...(row.entry_price != null ? { entryPrice: Number(row.entry_price) } : {}),
-    ...(row.exit_price != null ? { exitPrice: Number(row.exit_price) } : {})
+    ...(row.exit_price != null ? { exitPrice: Number(row.exit_price) } : {}),
+    ...(row.stop_price != null ? { stopPrice: Number(row.stop_price) } : {}),
+    ...(row.trigger_price != null ? { triggerPrice: Number(row.trigger_price) } : {})
   };
 }

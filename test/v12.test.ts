@@ -433,7 +433,8 @@ describe("v12 web settings cover every server key", () => {
       expect(before.scoutPump).toBe(true);
       expect(changedPatch(before, { ...before })).toEqual({});
       const patch = changedPatch(before, { ...before, maxPositionPct: 25, autoBuy: false, maxEntrySlippage: 1.5 });
-      expect(patch).toEqual({ maxPositionPct: 0.25, autoBuy: false, maxEntrySlippage: 0.015 });
+      // v13.3: slippage goes on the wire as a percent.
+      expect(patch).toEqual({ maxPositionPct: 0.25, autoBuy: false, maxEntrySlippage: 1.5 });
       const saved = desk.updateSettings(patch);
       expect(saved).toMatchObject({ ok: true, settings: { maxPositionPct: 0.25, autoBuy: false, maxEntrySlippage: 0.015 } });
       expect(SETTINGS_FIELDS.every((f) => f.group)).toBe(true);

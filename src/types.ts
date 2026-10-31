@@ -38,7 +38,13 @@ export type ReasonCode =
   | "EXPOSURE_CAP"
   | "PARTIAL_SELL"
   | "HARD_KILL"
-  | "LOOKUP_FAILED";
+  | "LOOKUP_FAILED"
+  /** v13.3: a stop exit that filled materially below the stop line (price gapped or the pool was pulled). */
+  | "GAP_RUG"
+  /** v13.3 pre-buy guard: price fell hard in the last ~60s. */
+  | "PRICE_CRASH"
+  /** v13.3 pre-buy guard: pool liquidity is being pulled. */
+  | "LIQUIDITY_PULL";
 
 export interface Rejection {
   code: ReasonCode;
@@ -206,7 +212,12 @@ export interface ClosedTrade {
   score: number;
   mode: "paper" | "live";
   entryPrice?: number;
+  /** The true fill price. */
   exitPrice?: number;
+  /** v13.3 the stop line in force (entry × (1 − stop)). */
+  stopPrice?: number;
+  /** v13.3 the mark that triggered the exit (may already be past the stop). */
+  triggerPrice?: number;
 }
 
 export interface FeedEvent {
@@ -282,10 +293,11 @@ export interface FeedStatus {
   budgets?: FeedBudgetStatus[];
 }
 
-export type FeedSourceState = "live" | "backoff" | "down" | "off";
+/** v13.3 "stale": connected but silent past the watchdog window (Pump stream). */
+export type FeedSourceState = "live" | "stale" | "backoff" | "down" | "off";
 
 export interface FeedSourceStatus {
-  id: "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery";
+  id: "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab";
   label: string;
   enabled: boolean;
   state: FeedSourceState;
@@ -325,6 +337,8 @@ export interface PipelineCounts {
   fills: number;
   riskExits: number;
   executorSkips: number;
+  /** v13.3 stop exits that filled past the stop line (gap/rug). */
+  gapExits?: number;
 }
 
 export interface AdviceNote {
@@ -366,6 +380,8 @@ export interface ManualBuyResult {
   mode: "paper" | "live";
   /** Present when the request was larger than the cap and cut down to sizeUsd. */
   clampedFrom?: number;
+  /** v13.3 the booked fill price (for the one-tap toast). */
+  fillPriceUsd?: number;
 }
 
 export interface ManualBuyRefusal {
@@ -400,6 +416,9 @@ export interface DeskPrefs {
   scoutJupiter: boolean;
   scoutDexpaprika: boolean;
   scoutBitquery: boolean;
+  /** v13.3 keyless Pump.fun API and Raydium LaunchLab (Bonk.fun) listings. */
+  scoutPumpApi: boolean;
+  scoutLaunchLab: boolean;
   /** v12. Fixed $ per position; null = size from the % cap. */
   positionSizeUsd: number | null;
   /** v12. Total open exposure as a share of equity (0.1–1). 1 = no extra limit. */
@@ -408,6 +427,8 @@ export interface DeskPrefs {
   paperResetUsd: number;
   /** v13.2 held-position price loop, ms (1000–10000, default 1500). */
   positionRefreshMs?: number;
+  /** v13.3 full-exit impact tolerance checked before a buy. null = entry cap + 3%. */
+  maxExitSlippage?: number | null;
 }
 
 /** v12 GET /api/lookup result. */

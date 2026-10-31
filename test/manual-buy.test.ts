@@ -113,7 +113,7 @@ describe("manual buy and live-ready checklist", () => {
       expect(desk.snapshot().events.some((event) => event.code === "TRAIL_STOP")).toBe(false);
       await desk.markPrice(mint, 0.93);
       expect(desk.book.positions.has(mint)).toBe(false);
-      expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS")).toBe(true);
+      expect(desk.snapshot().events.some((event) => (event.code === "STOP_LOSS" || event.code === "GAP_RUG"))).toBe(true);
       const banned = await desk.manualBuy(mint, 10);
       expect(banned.ok).toBe(false);
       if (!banned.ok) {
@@ -121,9 +121,15 @@ describe("manual buy and live-ready checklist", () => {
         expect(banned.error).toContain("minute");
       }
       expect(desk.book.positions.has(mint)).toBe(false);
+      // v13.3: right after a 1.4 → 0.93 fall the crash guard refuses even an override.
+      const tooSoon = await desk.manualBuy(mint, 10, { ignoreCooldown: true });
+      expect(tooSoon).toMatchObject({ ok: false, code: "PRICE_CRASH" });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 61_000);
       const override = await desk.manualBuy(mint, 10, { ignoreCooldown: true });
       expect(override.ok).toBe(true);
     } finally {
+      vi.useRealTimers();
       desk.stop();
     }
   });

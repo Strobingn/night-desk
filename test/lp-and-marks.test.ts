@@ -64,7 +64,7 @@ describe("unlocked LP flag and held-mint marks", () => {
       expect(desk.book.positions.has(floatMint)).toBe(true);
       await desk.markPrice(floatMint, stop * 0.5);
       expect(desk.book.positions.has(floatMint)).toBe(false);
-      expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS")).toBe(true);
+      expect(desk.snapshot().events.some((event) => (event.code === "STOP_LOSS" || event.code === "GAP_RUG"))).toBe(true);
     } finally {
       desk.stop();
     }
@@ -114,7 +114,7 @@ describe("unlocked LP flag and held-mint marks", () => {
       expect(desk.book.positions.has(mint)).toBe(true);
       await desk.repricePositions();
       expect(desk.book.positions.has(mint)).toBe(false);
-      expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS" && event.symbol === "GROKNAM")).toBe(true);
+      expect(desk.snapshot().events.some((event) => (event.code === "STOP_LOSS" || event.code === "GAP_RUG") && event.symbol === "GROKNAM")).toBe(true);
     } finally {
       desk.stop();
     }

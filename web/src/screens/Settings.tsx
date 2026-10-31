@@ -125,7 +125,7 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
           ))}
           {group === "Exits / stops" ? (
             <p className="hard-stop">
-              Hard stop −{(snap.rules.stopLossPct * 100).toFixed(0)}% from the fill. It stays fixed. Entry slippage cap {((snap.rules.maxEntrySlippage ?? 0.03) * 100).toFixed(2)}%. A quote above that cap is refused. Mint authority and dev rugs stay hard kills.
+              Hard stop −{(snap.rules.stopLossPct * 100).toFixed(0)}% from the fill. It stays fixed. Entry slippage cap {((snap.rules.maxEntrySlippage ?? 0.03) * 100).toFixed(2)}%. A quote above that cap is refused. A stop cannot prevent a gap: when price jumps past it between marks, the exit fills at the real price and is labelled gap/rug. Mint authority and dev rugs stay hard kills.
             </p>
           ) : null}
         </section>
@@ -168,7 +168,7 @@ function SliderRow({ field, value, edited, onChange }: { field: SliderField; val
       </div>
       {field.nullable ? (
         <label className="null-toggle">
-          <input type="checkbox" checked={off} onChange={(event) => onChange(event.target.checked ? null : field.min > 10 ? field.min : 25)} />
+          <input type="checkbox" checked={off} onChange={(event) => onChange(event.target.checked ? null : field.nullDefault ?? (field.min > 10 ? field.min : 25))} />
           {field.nullable}
         </label>
       ) : null}

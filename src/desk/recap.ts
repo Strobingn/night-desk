@@ -1,4 +1,5 @@
 import type { ClosedTrade, EquityPoint, FeedEvent, PositionView } from "../types.js";
+import { exitLabel } from "./gap.js";
 
 export interface Recap {
   since: number;
@@ -247,10 +248,26 @@ export function formatRecap(recap: Recap): string {
         : "Recent closes:"
     );
     for (const trade of recent.slice().reverse()) {
-      lines.push(`  ${trade.symbol.padEnd(10)} ${signedUsd(trade.pnlUsd)}  ${trade.exitCode}`);
+      lines.push(`  ${trade.symbol.padEnd(10)} ${signedUsd(trade.pnlUsd)}  ${closeLabel(trade)}`);
+    }
+    const gaps = recap.closed.filter((trade) => trade.exitCode === "GAP_RUG").length;
+    if (gaps) {
+      lines.push(
+        `  ${gaps} gap/rug exit${gaps === 1 ? "" : "s"}: the price moved past the stop line between marks (or the pool was pulled). A stop cannot fill better than the market, so these are recorded at the true fill.`
+      );
     }
   }
   return lines.join("\n");
+}
+
+/** v13.3: honest exit label with the true fill vs entry, e.g. "gap/rug, fill −99.9%". */
+function closeLabel(trade: ClosedTrade): string {
+  const label = exitLabel(trade.exitCode);
+  if (trade.entryPrice && trade.entryPrice > 0 && trade.exitPrice != null && (trade.exitCode === "GAP_RUG" || trade.exitCode === "STOP_LOSS")) {
+    const pct = (trade.exitPrice / trade.entryPrice - 1) * 100;
+    return `${label}, fill ${pct < 0 ? "−" : "+"}${Math.abs(pct).toFixed(1)}%`;
+  }
+  return label;
 }
 
 function table(counts: Record<string, number>): string[] {

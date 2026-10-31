@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { mergeMarks, stampSnapshot } from "./marks";
 import type { MarksDelta } from "../../src/types";
 import { formatBuyNotice } from "../../src/desk/buy-notice";
@@ -11,6 +11,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
+import { TAP_SIZE_KEY, buyToast, defaultTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
 export const TABS = [
@@ -45,6 +46,18 @@ export interface DeskActions {
   askBuy: (ask: BuyAsk) => void;
   sell: (mint: string, symbol: string, percent: 25 | 50 | 100) => Promise<void>;
   openAddCoin: (q: string) => void;
+  /** v13.3 one tap: paper-buy now at the one-tap size. No dialog; every desk risk check still runs. */
+  oneTapBuy: (mint: string, symbol: string, sizeUsd?: number) => Promise<void>;
+  /** v13.3 one tap: close the whole position now. No dialog. */
+  oneTapSell: (mint: string, symbol: string) => Promise<void>;
+  sellAll: () => Promise<void>;
+  /** v13.3 one-tap size in dollars (this device). */
+  tapUsd: number;
+  setTapUsd: (n: number) => void;
+  /** v13.3 saves the entry (and optionally exit) slippage percent to the desk. */
+  saveSlippage: (entryPct: number, exitPct?: number | null) => Promise<boolean>;
+  /** Mints with a one-tap order in flight. */
+  tapping: ReadonlySet<string>;
   theme: ThemePref;
   setTheme: (pref: ThemePref) => void;
 }
@@ -64,6 +77,19 @@ export function App() {
   const [buyAsk, setBuyAsk] = useState<BuyAsk | null>(null);
   const [addQuery, setAddQuery] = useState<{ q: string; n: number }>(() => ({ q: new URLSearchParams(location.search).get("add") ?? "", n: 0 }));
   const [busy, setBusy] = useState<string | null>(null);
+  // v13.3 one tap. The ref is the double-tap guard (state updates are async); the set mirrors it for rendering.
+  const inflight = useRef(new Set<string>());
+  const [tapping, setTapping] = useState<ReadonlySet<string>>(() => new Set());
+  const [tapSaved, setTapSaved] = useState<number | null>(() => {
+    const raw = Number(localStorage.getItem(TAP_SIZE_KEY));
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  });
+  const setTapUsd = useCallback((n: number) => {
+    if (!Number.isFinite(n) || n <= 0) return;
+    const v = Math.round(n * 100) / 100;
+    setTapSaved(v);
+    localStorage.setItem(TAP_SIZE_KEY, String(v));
+  }, []);
   const [theme, setThemeState] = useState<ThemePref>(() => readThemePref());
   const setTheme = useCallback((pref: ThemePref) => {
     setThemeState(pref);
@@ -206,8 +232,79 @@ export function App() {
     );
   }, []);
 
+  const tapUsd = defaultTapUsd(tapSaved, snap?.prefs.defaultBuyUsd, snap?.positionCapUsd ?? 0);
+
+  const track = useCallback((key: string, on: boolean) => {
+    if (on) inflight.current.add(key);
+    else inflight.current.delete(key);
+    setTapping(new Set(inflight.current));
+  }, []);
+
+  const oneTapBuy = useCallback(
+    async (mint: string, symbol: string, sizeUsd?: number) => {
+      const key = `buy:${mint}`;
+      if (inflight.current.has(key)) return;
+      track(key, true);
+      const started = performance.now();
+      const res = await api<BuyReply>("/api/positions/buy", { body: { mint, sizeUsd: sizeUsd ?? tapUsd, idemKey: newIdemKey(), oneTap: true } });
+      track(key, false);
+      const body = { ...res.body, ok: res.ok };
+      const hint = !res.ok && (body.code === "HARD_KILL" || body.code === "REVENGE_COOLDOWN") ? " Use Buy… on the card to override." : "";
+      setNotice({ ok: res.ok, text: buyToast(symbol, body, Math.round(performance.now() - started)) + hint });
+    },
+    [tapUsd, track]
+  );
+
+  const oneTapSell = useCallback(
+    async (mint: string, symbol: string) => {
+      const key = `sell:${mint}`;
+      if (inflight.current.has(key)) return;
+      track(key, true);
+      const started = performance.now();
+      const res = await api<SellReply>("/api/positions/sell", { body: { mint, percent: 100, idemKey: newIdemKey() } });
+      track(key, false);
+      setNotice({ ok: res.ok, text: sellToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
+    },
+    [track]
+  );
+
+  const sellAll = useCallback(async () => {
+    const key = "sell-all";
+    if (inflight.current.has(key)) return;
+    track(key, true);
+    const started = performance.now();
+    const res = await api<{ sold?: Array<{ symbol: string }>; failed?: Array<{ symbol: string; error: string }>; pnlUsd?: number }>("/api/positions/sell-all", {
+      body: { confirm: true, idemKey: newIdemKey() }
+    });
+    track(key, false);
+    const ms = Math.round(performance.now() - started);
+    const sold = res.body.sold?.length ?? 0;
+    const failed = res.body.failed ?? [];
+    setNotice({
+      ok: res.ok && failed.length === 0,
+      text: res.ok
+        ? `Sold all: ${sold} closed${failed.length ? `, ${failed.length} failed (${failed.map((f) => f.symbol).join(", ")})` : ""} · ${signedUsd(res.body.pnlUsd ?? 0)} · ${ms} ms`
+        : res.body.error ?? "Sell all failed."
+    });
+  }, [track]);
+
+  const saveSlippage = useCallback(async (entryPct: number, exitPct?: number | null) => {
+    const body: Record<string, unknown> = { maxEntrySlippage: Math.round(entryPct * 100) / 100 };
+    if (exitPct !== undefined) body.maxExitSlippage = exitPct == null ? null : Math.round(exitPct * 100) / 100;
+    const res = await api("/api/settings", { body });
+    setNotice(res.ok ? { ok: true, text: `Max slippage ${entryPct}% saved. Buys past it are refused.` } : { ok: false, text: res.body.error ?? "Slippage save failed." });
+    return res.ok;
+  }, []);
+
   const actions: DeskActions = {
     notify: setNotice,
+    oneTapBuy,
+    oneTapSell,
+    sellAll,
+    tapUsd,
+    setTapUsd,
+    saveSlippage,
+    tapping,
     buy,
     askBuy,
     sell,
@@ -242,7 +339,7 @@ export function App() {
           </h1>
           <p className={offline ? "warn" : "ok"}>
             {offline ? "Socket dropped · polling · " : ""}
-            {snap.feed.pumpConnected ? "Pump stream live" : "Pump stream quiet"}
+            {pumpHeader(snap)}
             {snap.feed.dexLastPollAt ? " · DexScreener" : ""}
             {snap.feed.geckoLastPollAt ? " · Gecko" : ""}
             {snap.feed.jupiterLastPollAt ? " · Jupiter" : ""}
@@ -367,6 +464,14 @@ export function Metric({ label, value, hint, tone: t = "flat" }: { label: string
       <em>{hint}</em>
     </div>
   );
+}
+
+/** v13.3: the watchdog's stale state wins over the socket flag, so a silent stream never reads "live". */
+export function pumpHeader(snap: DeskSnapshot): string {
+  const src = snap.feed.sources?.find((s) => s.id === "pump");
+  if (src?.state === "stale") return "Pump stream stale · reconnecting";
+  if (src?.state === "down") return "Pump stream down";
+  return snap.feed.pumpConnected ? "Pump stream live" : "Pump stream quiet";
 }
 
 export function tone(n: number): "up" | "down" | "flat" {

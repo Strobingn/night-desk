@@ -4,7 +4,16 @@ import { enrichSighting } from "../market/enrich.js";
 import { DexTokenBatcher } from "../market/dex-batch.js";
 import { bucketFor, type NetLimiter, type SourceId } from "../market/net.js";
 import { FeedHealth, SOURCE_ORDER } from "./feed-health.js";
-import { parseDexListings, parseDexPaprika, parseGeckoPools, parseJupiterRecent } from "../market/listings.js";
+import {
+  LAUNCHLAB_NEW_URL,
+  PUMP_API_NEW_URL,
+  parseDexListings,
+  parseDexPaprika,
+  parseGeckoPools,
+  parseJupiterRecent,
+  parseLaunchLabList,
+  parsePumpApiCoins
+} from "../market/listings.js";
 import type { DeskEvents, FeedStatus, RawSighting } from "../types.js";
 
 /**
@@ -23,8 +32,27 @@ export const SCOUT_POLL_MS = {
   jupiterRecent: 15_000,
   dexPaprikaNew: 20_000,
   dexPaprikaTop: 60_000,
-  bitquery: 30_000
+  bitquery: 30_000,
+  pumpApi: 10_000,
+  launchLab: 15_000
 } as const;
+
+/** v13.3 Pump stream watchdog: no message for this long marks the stream stale and reconnects. */
+export const PUMP_STALE_MS = 60_000;
+export const PUMP_WATCHDOG_EVERY_MS = 10_000;
+export const PUMP_BACKOFF_MIN_MS = 2_000;
+export const PUMP_BACKOFF_MAX_MS = 60_000;
+
+/** The small part of a WebSocket the Pump stream uses, so tests can inject a fake. */
+export interface PumpSocket {
+  on(event: "open", fn: () => void): unknown;
+  on(event: "message", fn: (buf: { toString(): string }) => void): unknown;
+  on(event: "close", fn: () => void): unknown;
+  on(event: "error", fn: (err: unknown) => void): unknown;
+  send(data: string): void;
+  close(): void;
+  terminate?: () => void;
+}
 
 /** After an HTTP 410 the source is marked down and only re-checked this often. */
 export const GONE_RECHECK_MS = 30 * 60_000;
@@ -40,6 +68,10 @@ export interface ScoutSources {
   jupiter: boolean;
   dexpaprika: boolean;
   bitquery: boolean;
+  /** v13.3 Pump.fun frontend-api-v3 newest coins (keyless backstop for the stream). */
+  pumpapi: boolean;
+  /** v13.3 Raydium LaunchLab newest launches (Bonk.fun and friends), keyless. */
+  launchlab: boolean;
 }
 
 export const DEFAULT_SCOUT_SOURCES: ScoutSources = {
@@ -47,7 +79,9 @@ export const DEFAULT_SCOUT_SOURCES: ScoutSources = {
   gecko: true,
   jupiter: true,
   dexpaprika: false,
-  bitquery: true
+  bitquery: true,
+  pumpapi: true,
+  launchlab: true
 };
 
 export interface ScoutOptions {
@@ -68,6 +102,12 @@ export interface ScoutOptions {
   /** v12.1 shared request budget. Without it (unit tests) calls go straight to fetchImpl. */
   net?: NetLimiter;
   onStatus: (patch: Partial<FeedStatus>) => void;
+  /** v13.3 desk log line for watchdog events (stale, reconnect, back). */
+  onLog?: (message: string, code: "PUMP_STALE" | "PUMP_RECONNECT" | "PUMP_BACK") => void;
+  /** Test hook. Defaults to a real `ws` WebSocket. */
+  pumpSocketFactory?: (url: string) => PumpSocket;
+  /** Test hook. Default PUMP_STALE_MS. */
+  pumpStaleMs?: number;
 }
 
 /**
@@ -82,8 +122,14 @@ export class Scout {
   private stopped = false;
   private readonly concurrency: number;
   private readonly queueCap: number;
-  private pump: WebSocket | null = null;
+  private pump: PumpSocket | null = null;
   private pumpTimer: NodeJS.Timeout | null = null;
+  private pumpWatchdog: NodeJS.Timeout | null = null;
+  /** Last frame of any kind from the Pump stream (create, migrate, or ack). */
+  private pumpLastMsgAt: number | null = null;
+  private pumpStale: string | null = null;
+  private pumpBackoffMs = PUMP_BACKOFF_MIN_MS;
+  private pumpReconnects = 0;
   private readonly timers: NodeJS.Timeout[] = [];
   private sources: ScoutSources = { ...DEFAULT_SCOUT_SOURCES };
   readonly status: FeedStatus;
@@ -116,6 +162,9 @@ export class Scout {
   start(): void {
     if (this.opts.feedMode === "replay") return;
     this.connectPump();
+    this.pumpWatchdog = setInterval(() => this.checkPumpWatchdog(), PUMP_WATCHDOG_EVERY_MS);
+    this.every(500, SCOUT_POLL_MS.pumpApi, () => this.pollPumpApi());
+    this.every(1_500, SCOUT_POLL_MS.launchLab, () => this.pollLaunchLab());
     this.every(0, SCOUT_POLL_MS.dexProfiles, () => this.pollDexList("https://api.dexscreener.com/token-profiles/latest/v1"));
     this.every(2_000, SCOUT_POLL_MS.dexBoostsLatest, () => this.pollDexList("https://api.dexscreener.com/token-boosts/latest/v1"));
     this.every(4_000, SCOUT_POLL_MS.dexBoostsTop, () => this.pollDexList("https://api.dexscreener.com/token-boosts/top/v1"));
@@ -138,6 +187,7 @@ export class Scout {
   stop(): void {
     this.stopped = true;
     if (this.pumpTimer) clearTimeout(this.pumpTimer);
+    if (this.pumpWatchdog) clearInterval(this.pumpWatchdog);
     for (const timer of this.timers) clearTimeout(timer);
     this.timers.length = 0;
     this.pump?.close();
@@ -244,11 +294,16 @@ export class Scout {
     }
   }
 
+  /** Exposed for tests: the Pump stream socket currently in use. */
+  get pumpSocket(): PumpSocket | null {
+    return this.pump;
+  }
+
   private connectPump(): void {
     if (this.stopped) return;
-    let ws: WebSocket;
+    let ws: PumpSocket;
     try {
-      ws = new WebSocket(this.opts.pumpWsUrl);
+      ws = this.opts.pumpSocketFactory ? this.opts.pumpSocketFactory(this.opts.pumpWsUrl) : (new WebSocket(this.opts.pumpWsUrl) as unknown as PumpSocket);
     } catch (err) {
       this.health.fail("pump", err instanceof Error ? err.message : String(err));
       this.schedulePumpReconnect();
@@ -256,12 +311,18 @@ export class Scout {
     }
     this.pump = ws;
     ws.on("open", () => {
-      this.health.ok("pump");
+      if (this.pump !== ws) return;
       this.status.pumpConnected = true;
+      // The watchdog clock starts at open: an open socket that never speaks still goes stale.
+      this.pumpLastMsgAt = Date.now();
       this.opts.onStatus({ ...this.status });
       ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+      // v13.3: graduations to PumpSwap ride the same free socket.
+      ws.send(JSON.stringify({ method: "subscribeMigration" }));
     });
     ws.on("message", (buf) => {
+      if (this.pump !== ws) return;
+      this.notePumpMessage();
       try {
         const msg = JSON.parse(buf.toString()) as {
           mint?: string;
@@ -271,13 +332,13 @@ export class Scout {
           txType?: string;
         };
         if (!msg.mint) return;
-        if (msg.txType && msg.txType !== "create") return;
+        if (msg.txType && msg.txType !== "create" && msg.txType !== "migrate") return;
         this.ingest({
           mint: msg.mint,
           symbol: msg.symbol,
           name: msg.name,
           source: "pumpfun",
-          devWallet: msg.traderPublicKey,
+          devWallet: msg.txType === "migrate" ? undefined : msg.traderPublicKey,
           observedAt: Date.now()
         }, "pump");
       } catch {
@@ -285,22 +346,92 @@ export class Scout {
       }
     });
     ws.on("close", () => {
-      this.health.fail("pump", "stream closed, reconnecting");
+      if (this.pump !== ws) return;
+      this.pump = null;
+      this.health.fail("pump", this.pumpStale ?? "stream closed, reconnecting");
       this.status.pumpConnected = false;
       this.opts.onStatus({ ...this.status });
       this.schedulePumpReconnect();
     });
     ws.on("error", (err) => {
+      if (this.pump !== ws) return;
       this.health.fail("pump", err instanceof Error ? err.message : String(err));
       this.status.pumpConnected = false;
       this.opts.onStatus({ ...this.status });
     });
   }
 
+  /** Any frame proves the stream is alive: lastOkAt follows the last message, not the last connect. */
+  private notePumpMessage(now = Date.now()): void {
+    this.pumpLastMsgAt = now;
+    this.health.ok("pump", now);
+    this.pumpBackoffMs = PUMP_BACKOFF_MIN_MS;
+    if (this.pumpStale) {
+      this.pumpStale = null;
+      this.opts.onLog?.(`Pump stream back after ${this.pumpReconnects} reconnect${this.pumpReconnects === 1 ? "" : "s"}.`, "PUMP_BACK");
+      this.pumpReconnects = 0;
+    }
+    if (!this.status.pumpConnected) {
+      this.status.pumpConnected = true;
+      this.opts.onStatus({ ...this.status });
+    }
+  }
+
+  /**
+   * v13.3 watchdog. A socket that is open but silent for 60s is not live: mark it stale,
+   * log it, drop the socket, and reconnect with backoff (2s doubling to 60s).
+   */
+  checkPumpWatchdog(now = Date.now()): void {
+    if (this.stopped || !this.pump || this.pumpLastMsgAt == null) return;
+    const staleMs = this.opts.pumpStaleMs ?? PUMP_STALE_MS;
+    const silent = now - this.pumpLastMsgAt;
+    if (silent < staleMs) return;
+    const secs = Math.round(silent / 1000);
+    const first = this.pumpStale == null;
+    this.pumpStale = `no message for ${secs}s, reconnecting`;
+    this.health.fail("pump", this.pumpStale, now);
+    this.status.pumpConnected = false;
+    this.opts.onStatus({ ...this.status });
+    if (first) this.opts.onLog?.(`Pump stream stale: no message for ${secs}s. Dropping the socket and reconnecting.`, "PUMP_STALE");
+    const ws = this.pump;
+    this.pump = null;
+    try {
+      if (ws.terminate) ws.terminate();
+      else ws.close();
+    } catch {
+      /* already gone */
+    }
+    this.schedulePumpReconnect();
+  }
+
   private schedulePumpReconnect(): void {
     if (this.stopped) return;
     if (this.pumpTimer) clearTimeout(this.pumpTimer);
-    this.pumpTimer = setTimeout(() => this.connectPump(), 5_000);
+    const delay = this.pumpBackoffMs;
+    this.pumpBackoffMs = Math.min(PUMP_BACKOFF_MAX_MS, this.pumpBackoffMs * 2);
+    this.pumpReconnects += 1;
+    if (this.pumpStale) this.opts.onLog?.(`Pump stream reconnect #${this.pumpReconnects} in ${Math.round(delay / 1000)}s.`, "PUMP_RECONNECT");
+    this.pumpTimer = setTimeout(() => {
+      this.pumpTimer = null;
+      // The watchdog clock restarts with the new socket.
+      this.pumpLastMsgAt = Date.now();
+      this.connectPump();
+    }, delay);
+  }
+
+  /** Exposed for tests. */
+  get pumpReconnectDelayMs(): number {
+    return this.pumpBackoffMs;
+  }
+
+  private pollPumpApi(): Promise<void> {
+    if (!this.sources.pumpapi) return Promise.resolve();
+    return this.poll("pumpapi", PUMP_API_NEW_URL, (body) => parsePumpApiCoins(body), () => undefined);
+  }
+
+  private pollLaunchLab(): Promise<void> {
+    if (!this.sources.launchlab) return Promise.resolve();
+    return this.poll("launchlab", LAUNCHLAB_NEW_URL, (body) => parseLaunchLabList(body), () => undefined);
   }
 
   private pollDexList(url: string): Promise<void> {
@@ -389,9 +520,9 @@ export class Scout {
     const sources = SOURCE_ORDER.map((id) => {
       const enabled =
         !replay &&
-        (id === "pump" ? true : id === "bitquery" ? this.sources.bitquery && Boolean(this.opts.bitqueryKey) : this.sources[id]);
+        (id === "pump" ? true : id === "bitquery" ? this.sources.bitquery && Boolean(this.opts.bitqueryKey) : this.sources[id as keyof ScoutSources]);
       const idleReason = replay ? "replay mode" : id === "bitquery" && !this.opts.bitqueryKey ? "no API key" : "turned off";
-      return this.health.status(id, { enabled, idleReason, buckets: budgets, connected: id === "pump" ? this.status.pumpConnected : undefined, now });
+      return this.health.status(id, { enabled, idleReason, buckets: budgets, connected: id === "pump" ? this.status.pumpConnected : undefined, stale: id === "pump" ? this.pumpStale ?? undefined : undefined, now });
     });
     return { sources, budgets, lastError: this.health.banner(sources, now) };
   }

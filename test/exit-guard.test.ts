@@ -87,9 +87,11 @@ describe("exit impact gate", () => {
       expect(closed?.proceedsUsd).toBeGreaterThanOrEqual(0);
       expect(closed?.proceedsUsd).not.toBe(-0.01);
       expect(desk.book.cashUsd).toBeGreaterThanOrEqual(cashBefore);
-      const logged = desk.snapshot().events.find((event) => event.code === "STOP_LOSS" && event.message.includes("Stop trigger"));
-      expect(logged?.message).toMatch(/Stop trigger .+ vs fill .+/);
-      expect(desk.snapshot().events.some((event) => event.kind === "fill" && event.message.includes("Stop trigger") && event.message.includes("vs fill"))).toBe(true);
+      // v13.3: a 1 → 1e-8 crash is a gap/rug, not a clean stop. It is labelled honestly with the true fill.
+      expect(closed?.exitCode).toBe("GAP_RUG");
+      const logged = desk.snapshot().events.find((event) => event.code === "GAP_RUG" && event.message.includes("stop line"));
+      expect(logged?.message).toMatch(/stop line .+ trigger mark .+ true fill .+cannot fill better than the market/);
+      expect(desk.snapshot().events.some((event) => event.kind === "fill" && event.message.includes("true fill"))).toBe(true);
     } finally {
       desk.stop();
     }

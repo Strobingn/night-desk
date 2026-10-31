@@ -10,10 +10,12 @@ export const SOURCE_LABELS: Record<SourceId, string> = {
   gecko: "GeckoTerminal",
   jupiter: "Jupiter",
   dexpaprika: "DexPaprika",
-  bitquery: "Bitquery"
+  bitquery: "Bitquery",
+  pumpapi: "Pump.fun API",
+  launchlab: "Bonk.fun / LaunchLab"
 };
 
-export const SOURCE_ORDER: SourceId[] = ["pump", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery"];
+export const SOURCE_ORDER: SourceId[] = ["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery"];
 
 interface Health {
   lastOkAt: number | null;
@@ -72,7 +74,7 @@ export class FeedHealth {
 
   status(
     id: SourceId,
-    opts: { enabled: boolean; idleReason?: string; buckets: BucketStats[]; connected?: boolean; now?: number }
+    opts: { enabled: boolean; idleReason?: string; buckets: BucketStats[]; connected?: boolean; stale?: string; now?: number }
   ): FeedSourceStatus {
     const now = opts.now ?? Date.now();
     const h = this.get(id);
@@ -91,6 +93,9 @@ export class FeedHealth {
     } else if (h.failingSince != null && failingMs >= BANNER_AFTER_MS) {
       state = "down";
       detail = h.lastError;
+    } else if (opts.stale) {
+      state = "stale";
+      detail = opts.stale;
     } else if (retryAt || h.failingSince != null) {
       state = "backoff";
       detail = h.lastError;

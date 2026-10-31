@@ -160,3 +160,66 @@ export function parseDexPaprika(payload: unknown, now = Date.now()): RawSighting
   }
   return out;
 }
+
+/** v13.3 Pump.fun frontend-api-v3 newest coins (keyless). Only coins created inside `maxAgeMs` count as new. */
+export const PUMP_API_NEW_URL =
+  "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false";
+
+export function parsePumpApiCoins(payload: unknown, now = Date.now(), maxAgeMs = 10 * 60_000): RawSighting[] {
+  const rows = Array.isArray(payload) ? payload : Array.isArray((payload as { coins?: unknown })?.coins) ? (payload as { coins: unknown[] }).coins : [];
+  const out: RawSighting[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as {
+      mint?: unknown;
+      symbol?: unknown;
+      name?: unknown;
+      creator?: unknown;
+      created_timestamp?: unknown;
+      is_banned?: unknown;
+      hidden?: unknown;
+      is_backfill?: unknown;
+    };
+    const mint = text(rec.mint);
+    if (!mint || QUOTE_MINTS.has(mint)) continue;
+    if (rec.is_banned === true || rec.hidden === true || rec.is_backfill === true) continue;
+    const created = num(rec.created_timestamp);
+    if (created > 0 && now - created > maxAgeMs) continue;
+    out.push({
+      mint,
+      symbol: text(rec.symbol)?.slice(0, 16),
+      name: text(rec.name)?.slice(0, 48),
+      source: "pumpfun",
+      devWallet: text(rec.creator),
+      observedAt: now
+    });
+  }
+  return out;
+}
+
+/** v13.3 Raydium LaunchLab newest launches (Bonk.fun and other LaunchLab platforms), keyless. */
+export const LAUNCHLAB_NEW_URL =
+  "https://launch-mint-v1.raydium.io/get/list?sort=new&size=50&mintType=default&includeNsfw=false";
+
+export function parseLaunchLabList(payload: unknown, now = Date.now(), maxAgeMs = 15 * 60_000): RawSighting[] {
+  const data = payload && typeof payload === "object" ? (payload as { data?: { rows?: unknown } }).data : undefined;
+  const rows = Array.isArray(data?.rows) ? (data!.rows as unknown[]) : [];
+  const out: RawSighting[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as { mint?: unknown; symbol?: unknown; name?: unknown; creator?: unknown; createAt?: unknown };
+    const mint = text(rec.mint);
+    if (!mint || QUOTE_MINTS.has(mint)) continue;
+    const created = num(rec.createAt);
+    if (created > 0 && now - created > maxAgeMs) continue;
+    out.push({
+      mint,
+      symbol: text(rec.symbol)?.slice(0, 16),
+      name: text(rec.name)?.slice(0, 48),
+      source: "raydium",
+      devWallet: text(rec.creator),
+      observedAt: now
+    });
+  }
+  return out;
+}

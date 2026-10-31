@@ -41,7 +41,8 @@ describe("manual close, log, and commentary", () => {
       expect(desk.snapshot().events.some((event) => event.code === "MANUAL_CLOSE")).toBe(true);
       expect(desk.snapshot().events.some((event) => event.code === "REVENGE_COOLDOWN")).toBe(false);
 
-      await desk.submitCandidate(makeToken({ mint, symbol: "HOLD", priceUsd: 1 }));
+      // Re-bought at the current price (v13.3: a re-entry 29% under the last mark would be a PRICE_CRASH skip).
+      await desk.submitCandidate(makeToken({ mint, symbol: "HOLD", priceUsd: 1.4 }));
       expect(desk.book.positions.has(mint)).toBe(true);
 
       const log = readFileSync(cfg.logPath, "utf8");
@@ -150,7 +151,8 @@ describe("manual close, log, and commentary", () => {
       desk.config.mode = "paper";
 
       const done = desk.resetPaperBook(true);
-      expect(done).toEqual({ ok: true, cashUsd: 100, startingBalanceUsd: 100 });
+      expect(done).toMatchObject({ ok: true, cashUsd: 100, startingBalanceUsd: 100 });
+      if (done.ok) expect(done.archive).toMatch(/^session-/);
       const snap = desk.snapshot();
       expect(snap.cashUsd).toBe(100);
       expect(snap.equityUsd).toBe(100);

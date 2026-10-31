@@ -4,6 +4,7 @@ import { api } from "../api";
 import { clock } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
+import { OneTapBar, TapBuyButton, TapSellButton } from "./OneTap";
 import { ScoutStatus } from "./ScoutStatus";
 import { coinCards, HOT_RANK, parseTapeSort, sortCoins, TAPE_SORT_KEY, TAPE_SORTS, TOP_VOLUME, VERDICT_LABEL, type CoinRow, type TapeSort, type Verdict } from "../coins";
 import { compactUsd, px } from "../format";
@@ -255,6 +256,7 @@ export function TapeScreen({
       )}
       {logError ? <div className="banner">{logError}</div> : null}
       <ScoutStatus feed={snap.feed} />
+      {view === "coins" ? <OneTapBar snap={snap} actions={actions} /> : null}
       <form
         className="buybar"
         onSubmit={(event) => {
@@ -303,6 +305,7 @@ export function TapeScreen({
                 coin={coin}
                 selected={selected?.mint === coin.mint}
                 busy={busy === coin.mint}
+                actions={actions}
                 onSelect={() => {
                   setSelected({ mint: coin.mint, symbol: coin.symbol });
                   setBuySize(capText);
@@ -349,7 +352,7 @@ export function TapeScreen({
   );
 }
 
-function CoinCard({ coin, selected, busy, onSelect, onBuy }: { coin: CoinRow; selected: boolean; busy: boolean; onSelect: () => void; onBuy: () => void }) {
+function CoinCard({ coin, selected, busy, actions, onSelect, onBuy }: { coin: CoinRow; selected: boolean; busy: boolean; actions: DeskActions; onSelect: () => void; onBuy: () => void }) {
   const tone: Record<Verdict, "up" | "down" | "flat"> = { open: "up", bought: "up", trade: "up", near: "flat", killed: "down", seen: "flat" };
   const rank = coin.volRank;
   const top = rank != null && rank <= TOP_VOLUME;
@@ -397,19 +400,26 @@ function CoinCard({ coin, selected, busy, onSelect, onBuy }: { coin: CoinRow; se
           {coin.source ?? "scout"} · {clock(coin.lastTs || Date.now())}
         </span>
         {coin.verdict !== "open" ? (
-          <button
-            className="primary sm"
-            type="button"
-            disabled={busy}
-            onClick={(event) => {
-              event.stopPropagation();
-              onBuy();
-            }}
-          >
-            {busy ? "Buying" : "Buy"}
-          </button>
+          <span className="cc-buys">
+            <TapBuyButton mint={coin.mint} symbol={coin.symbol} actions={actions} />
+            <button
+              className="tonal sm"
+              type="button"
+              disabled={busy}
+              title="Buy with the confirm dialog (size, Buy anyway)"
+              onClick={(event) => {
+                event.stopPropagation();
+                onBuy();
+              }}
+            >
+              {busy ? "Buying" : "Buy"}…
+            </button>
+          </span>
         ) : (
-          <span className="verdict-chip v-open">Holding</span>
+          <span className="cc-buys">
+            <span className="verdict-chip v-open">Holding</span>
+            <TapSellButton mint={coin.mint} symbol={coin.symbol} actions={actions} />
+          </span>
         )}
       </div>
     </article>

@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { IdempotencyCache } from "./idempotency.js";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -63,6 +64,7 @@ export function startServer(
   uiDist: string = DEFAULT_DIST
 ): http.Server {
   const dist = path.resolve(uiDist);
+  const idem = new IdempotencyCache();
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -110,12 +112,21 @@ export function startServer(
       if (url.pathname === "/api/paper/reset" && req.method === "POST") {
         const body = await readJson(req);
         const confirm = Boolean(body && typeof body === "object" && "confirm" in body && (body as { confirm?: unknown }).confirm === true);
-        const result = desk.resetPaperBook(confirm);
+        const rawStart = body && typeof body === "object" ? (body as { startingUsd?: unknown }).startingUsd : undefined;
+        if (rawStart !== undefined && (typeof rawStart !== "number" || !Number.isFinite(rawStart) || rawStart < 100 || rawStart > 10_000)) {
+          return json(res, 400, { ok: false, error: "startingUsd must be a number from 100 to 10,000." });
+        }
+        const result = desk.resetPaperBook(confirm, rawStart as number | undefined);
         return json(res, result.ok ? 200 : 400, result);
       }
       if (url.pathname === "/api/positions/buy" && req.method === "POST") {
         const body = await readJson(req);
         const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+        const replay = idem.lookup("buy", record.idemKey);
+        if (replay) {
+          const first = await replay;
+          return json(res, first.status, { ...first.body, replayed: true });
+        }
         const mint =
           (typeof record.mint === "string" ? record.mint : "") || url.searchParams.get("mint") || "";
         const sizeUsd = parseSizeUsd(record);
@@ -127,11 +138,16 @@ export function startServer(
           });
         }
         const ignoreCooldown = record.ignoreCooldown === true;
-        const result = await desk.manualBuy(mint, sizeUsd, {
-          ignoreCooldown,
-          confirmHardKill: record.confirmHardKill === true,
-          confirmSize: record.confirmSize === true
-        });
+        const started = Date.now();
+        const job = desk
+          .manualBuy(mint, sizeUsd, {
+            ignoreCooldown,
+            confirmHardKill: record.confirmHardKill === true,
+            confirmSize: record.confirmSize === true
+          })
+          .then((result) => ({ ...result, ms: Date.now() - started }));
+        idem.remember("buy", record.idemKey, job, (r) => (r.ok ? 200 : 400));
+        const result = await job;
         return json(res, result.ok ? 200 : 400, result);
       }
       if (url.pathname === "/api/live/ready" && req.method === "GET") return json(res, 200, desk.readiness());
@@ -157,8 +173,31 @@ export function startServer(
         if (fraction === "bad") {
           return json(res, 400, { ok: false, error: "Sell size must be 25, 50 or 100 percent (or a fraction above 0 and at most 1)." });
         }
-        const result = await desk.closePosition(mint.trim(), fraction);
-        return json(res, result.ok ? 200 : result.error.startsWith("No open position") ? 404 : 400, result);
+        const replay = idem.lookup("sell", record.idemKey);
+        if (replay) {
+          const first = await replay;
+          return json(res, first.status, { ...first.body, replayed: true });
+        }
+        const started = Date.now();
+        const job = desk.closePosition(mint.trim(), fraction).then((result) => ({ ...result, ms: Date.now() - started }));
+        const statusOf = (r: Awaited<typeof job>) => (r.ok ? 200 : r.error.startsWith("No open position") ? 404 : 400);
+        idem.remember("sell", record.idemKey, job, statusOf);
+        const result = await job;
+        return json(res, statusOf(result), result);
+      }
+      if (url.pathname === "/api/positions/sell-all" && req.method === "POST") {
+        const body = await readJson(req);
+        const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+        if (record.confirm !== true) return json(res, 400, { ok: false, error: 'Send {"confirm": true} to sell every open position.' });
+        const replay = idem.lookup("sell-all", record.idemKey);
+        if (replay) {
+          const first = await replay;
+          return json(res, first.status, { ...first.body, replayed: true });
+        }
+        const started = Date.now();
+        const job = desk.closeAllPositions().then((result) => ({ ...result, ms: Date.now() - started }));
+        idem.remember("sell-all", record.idemKey, job, () => 200);
+        return json(res, 200, await job);
       }
       if (url.pathname === "/api/lookup" && req.method === "GET") {
         const q = url.searchParams.get("q") ?? "";
@@ -330,6 +369,7 @@ export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "maxOpenPositions",
   "allowUnlockedLp",
   "maxEntrySlippage",
+  "maxExitSlippage",
   "minLiquidityUsd",
   "minTokenAgeMin",
   "maxTokenAgeMin",
@@ -348,6 +388,8 @@ export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "scoutJupiter",
   "scoutDexpaprika",
   "scoutBitquery",
+  "scoutPumpApi",
+  "scoutLaunchLab",
   "notifyNearMiss",
   "notifyFills",
   "notifyStops",

@@ -29,6 +29,8 @@ export interface SliderField extends Base {
   fromState: (raw: number) => number;
   /** When set, the field can be blank (null) with this toggle label. */
   nullable?: string;
+  /** Value used when the blank toggle is turned off. */
+  nullDefault?: number;
 }
 
 export interface ToggleField extends Base {
@@ -39,6 +41,8 @@ export interface ToggleField extends Base {
 export type SettingField = SliderField | ToggleField;
 
 const same = (n: number) => n;
+/** v13.3 slippage is sent as a percent (0.5–50); the desk also still reads an old fraction ≤ 0.03. */
+const slipPct = { toWire: (d: number) => Math.round(d * 100) / 100, fromState: (raw: number) => Math.round(raw * 10_000) / 100 };
 const pct = { toWire: (d: number) => Math.round(d * 100) / 10_000, fromState: (raw: number) => Math.round(raw * 10_000) / 100 };
 
 export const SETTINGS_FIELDS: SettingField[] = [
@@ -51,7 +55,8 @@ export const SETTINGS_FIELDS: SettingField[] = [
   { key: "positionRefreshMs", label: "Position price refresh", group: "Sizing / risk", kind: "slider", min: 1, max: 10, step: 0.5, unit: "s", toWire: (d: number) => Math.round(d * 1_000), fromState: (raw: number) => Math.round(raw / 100) / 10, hint: "How often open positions are re-priced. 1.5 s default. Pool reserves are read every cycle; DexScreener at most every 3 s and Jupiter every 5 s so the Scout is never rate-limited. The −6% stop still needs a mark from the entry feed." },
   { key: "maxTradesPerHour", label: "Max trades / hour", group: "Sizing / risk", kind: "slider", min: 0, max: 60, step: 1, unit: "", toWire: same, fromState: same, hint: "0 = no hourly cap." },
   { key: "dailyMaxLossUsd", label: "Daily max loss $", group: "Sizing / risk", kind: "slider", min: 0, max: 5_000, step: 5, unit: "$", toWire: same, fromState: same, hint: "0 = off. Pauses auto-buys until the next UTC day." },
-  { key: "maxEntrySlippage", label: "Entry slippage %", group: "Sizing / risk", kind: "slider", min: 0.5, max: 3, step: 0.1, unit: "%", ...pct, hint: "Locked at 3% or tighter. Buys past it, or past the pool-depth exit check, are refused." },
+  { key: "maxEntrySlippage", label: "Entry slippage %", group: "Sizing / risk", kind: "slider", min: 0.5, max: 50, step: 0.5, unit: "%", ...slipPct, hint: "Max price impact a buy may pay above the mark, 0.5–50% (3% default). A paper or live buy whose estimated impact is past it is refused, never filled worse. The fill is recorded at its real price. The −6% stop is unchanged." },
+  { key: "maxExitSlippage", label: "Exit slippage %", group: "Sizing / risk", kind: "slider", min: 0.5, max: 50, step: 0.5, unit: "%", ...slipPct, nullable: "Entry cap + 3% (default)", nullDefault: 6, hint: "Max cost of selling the whole position back into the pool, checked before every buy. Sells themselves always go through (a stop must exit) at the real fill." },
   { key: "paperResetUsd", label: "Paper reset amount $", group: "Sizing / risk", kind: "slider", min: 100, max: 10_000, step: 100, unit: "$", toWire: same, fromState: same, hint: "What Reset paper book refills to." },
   { key: "autoBuy", label: "Auto-buy", group: "Sizing / risk", kind: "toggle", hint: "Off still leaves manual Buy and Buy anyway." },
   // Filter / Analyst gates
@@ -73,6 +78,8 @@ export const SETTINGS_FIELDS: SettingField[] = [
   { key: "trailGapPct", label: "Trail gap %", group: "Exits / stops", kind: "slider", min: 0.5, max: 4, step: 0.5, unit: "%", ...pct },
   // Scout sources
   { key: "scoutPump", label: "Pump", group: "Scout sources", kind: "toggle", locked: true, hint: "Pump stays on. It is the primary feed." },
+  { key: "scoutPumpApi", label: "Pump.fun API", group: "Scout sources", kind: "toggle", hint: "Keyless newest-coins list. Backstop when the Pump stream goes quiet." },
+  { key: "scoutLaunchLab", label: "Bonk.fun / LaunchLab", group: "Scout sources", kind: "toggle", hint: "Keyless Raydium LaunchLab launches (Bonk.fun and others) Pump never sees." },
   { key: "scoutDexscreener", label: "DexScreener", group: "Scout sources", kind: "toggle" },
   { key: "scoutGecko", label: "Gecko", group: "Scout sources", kind: "toggle" },
   { key: "scoutJupiter", label: "Jupiter", group: "Scout sources", kind: "toggle" },

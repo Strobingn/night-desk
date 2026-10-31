@@ -3,8 +3,10 @@ import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
+import { classifyStopExit } from "./gap.js";
+import { MomentumTracker } from "../market/momentum.js";
 import { DEFAULT_SCOUT_SOURCES, type ScoutSources } from "../agents/scout.js";
 import { evaluateFilter } from "../agents/filter.js";
 import { scoreToken } from "../agents/analyst.js";
@@ -68,6 +70,7 @@ interface DeskSettings {
   maxEntrySlippage?: number;
   /** v13.2 Position price refresh, ms. */
   positionRefreshMs?: number;
+  maxExitSlippage?: number | null;
   operatorReady?: boolean;
   minLiquidityUsd?: number;
   minTokenAgeMin?: number;
@@ -87,6 +90,8 @@ interface DeskSettings {
   scoutJupiter?: boolean;
   scoutDexpaprika?: boolean;
   scoutBitquery?: boolean;
+  scoutPumpApi?: boolean;
+  scoutLaunchLab?: boolean;
   notifyNearMiss?: boolean;
   notifyFills?: boolean;
   notifyStops?: boolean;
@@ -98,6 +103,8 @@ interface DeskSettings {
 
 interface DeskSettingsView {
   positionRefreshMs: number;
+  /** v13.3 null = entry cap + 3% (the v13.2 behavior). */
+  maxExitSlippage: number | null;
   minVolume1hUsd: number;
   analystMinScore: number;
   volumeBoost: number;
@@ -125,6 +132,8 @@ interface DeskSettingsView {
   scoutJupiter: boolean;
   scoutDexpaprika: boolean;
   scoutBitquery: boolean;
+  scoutPumpApi: boolean;
+  scoutLaunchLab: boolean;
   notifyNearMiss: boolean;
   notifyFills: boolean;
   notifyStops: boolean;
@@ -231,6 +240,8 @@ export class Desk {
   /** v13.2 one PRICE_SOURCE / PRICE_UNUSABLE line per mint per 5 minutes. */
   private logGate = new Map<string, number>();
   private positionRefreshMs: number = POSITION_REFRESH_BAND.fallback;
+  /** v13.3 operator exit-impact tolerance; null keeps entry cap + 3%. */
+  private maxExitSlippage: number | null = null;
   private startedAt = Date.now();
   /** Earliest instant the current paper book owns. Recaps never look past it. */
   private resetAt = 0;
@@ -249,9 +260,12 @@ export class Desk {
     analystReject: 0,
     fills: 0,
     riskExits: 0,
-    executorSkips: 0
+    executorSkips: 0,
+    gapExits: 0
   };
   private killReasons: Record<string, number> = {};
+  /** v13.3 recent marks and liquidity per mint for the pre-buy crash guard. */
+  readonly momentum = new MomentumTracker();
   private feed: FeedStatus;
 
   constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch } = {}) {
@@ -282,6 +296,10 @@ export class Desk {
     if ("defaultBuyUsd" in saved) this.defaultBuyUsd = clampBuyUsd(saved.defaultBuyUsd ?? null);
     if (typeof saved.maxOpenPositions === "number") this.maxOpenPositions = clampOpenPositions(saved.maxOpenPositions);
     if (typeof saved.positionRefreshMs === "number") this.positionRefreshMs = clampPositionRefreshMs(saved.positionRefreshMs);
+    if ("maxExitSlippage" in saved) {
+      this.maxExitSlippage =
+        typeof saved.maxExitSlippage === "number" ? clampExitSlippage(saved.maxExitSlippage, this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack) : null;
+    }
     if (typeof saved.allowUnlockedLp === "boolean") this.allowUnlockedLp = saved.allowUnlockedLp;
     this.absorbGates(saved);
     this.operatorReady = saved.operatorReady === true;
@@ -322,6 +340,9 @@ export class Desk {
       net: this.net,
       onStatus: (patch) => {
         this.feed = { ...this.feed, ...patch };
+      },
+      onLog: (message, code) => {
+        this.log({ stage: "scout", kind: "info", code, message });
       }
     });
     this.scout.setSources(this.scoutSources);
@@ -455,12 +476,47 @@ export class Desk {
    * and no order is sent. The event log, advisor memory, and settings (including
    * the 1h volume floor) stay. Live mode is refused and LIVE_TRADING is not changed.
    */
-  resetPaperBook(confirm: boolean): { ok: true; cashUsd: number; startingBalanceUsd: number } | { ok: false; error: string } {
+  resetPaperBook(
+    confirm: boolean,
+    startingUsd?: number
+  ): { ok: true; cashUsd: number; startingBalanceUsd: number; archive: string; archivePath: string | null } | { ok: false; error: string } {
     if (confirm !== true) return { ok: false, error: "Confirm the reset before the paper book is cleared." };
     if (this.config.mode !== "paper") {
       return { ok: false, error: "Reset only clears the paper book. Live trading is unchanged." };
     }
+    if (startingUsd !== undefined && (typeof startingUsd !== "number" || !Number.isFinite(startingUsd) || startingUsd <= 0)) {
+      return { ok: false, error: "startingUsd must be a positive dollar amount (100 to 10,000)." };
+    }
+    if (startingUsd !== undefined) {
+      // v13.3: the new start is also the saved "Paper reset $" setting, so the next reset matches.
+      this.paperResetUsd = clampResetUsd(startingUsd);
+      this.store.writeJson("settings", { ...this.readSettings(), paperResetUsd: this.paperResetUsd });
+    }
     const starting = clampResetUsd(this.paperResetUsd);
+    // v13.3: archive the session before anything is cleared. Trades and equity rows are kept too.
+    const archiveAt = Date.now();
+    const archiveName = `session-${new Date(archiveAt).toISOString().replace(/[:]/g, "-").replace(/\..+$/, "")}`;
+    const archivePath = this.store.archiveSession(archiveName, {
+      archivedAt: archiveAt,
+      sessionStart: this.resetAt,
+      startingBalanceUsd: this.config.startingBalanceUsd,
+      cashUsd: this.book.cashUsd,
+      equityUsd: this.book.equity(),
+      openPositions: [...this.book.positions.values()].map((pos) => ({
+        mint: pos.mint,
+        symbol: pos.symbol,
+        qty: pos.qty,
+        costUsd: pos.costUsd,
+        entryPrice: pos.entryPrice,
+        markUsd: this.book.price(pos.mint, pos.entryPrice),
+        openedAt: pos.openedAt
+      })),
+      closed: this.store.closedSince(this.resetAt),
+      equity: this.store.equitySince(this.resetAt),
+      pipeline: { ...this.pipeline },
+      settings: this.readSettings(),
+      nextStartingUsd: starting
+    });
     this.bookEpoch += 1;
     this.config.startingBalanceUsd = starting;
     this.book.positions.clear();
@@ -480,10 +536,10 @@ export class Desk {
     this.log({
       stage: "system",
       kind: "info",
-      message: `Paper book reset to ${money(starting)}. Open positions dropped. The log, advisor memory, and volume floor stay. Live trading is still off.`
+      message: `Paper book reset to ${money(starting)}. The previous session was archived as ${archiveName} (trades and equity history kept). Open positions dropped. The log, advisor memory, and volume floor stay. Live trading is still off.`
     });
     this.publishAdvice(this.buildAdvice());
-    return { ok: true, cashUsd: this.book.cashUsd, startingBalanceUsd: starting };
+    return { ok: true, cashUsd: this.book.cashUsd, startingBalanceUsd: starting, archive: archiveName, archivePath };
   }
 
   /**
@@ -593,11 +649,21 @@ export class Desk {
     }
     if ("maxEntrySlippage" in patch) {
       if (patch.maxEntrySlippage == null || patch.maxEntrySlippage === "") {
-        return { ok: false, error: "Entry slippage cap cannot be removed. Send a percent from 0.5 to 3." };
+        return { ok: false, error: "Entry slippage cap cannot be removed. Send a percent from 0.5 to 50." };
       }
       const raw = Number(patch.maxEntrySlippage);
-      if (!Number.isFinite(raw)) return { ok: false, error: "Entry slippage cap must be a percent from 0.5 to 3." };
-      next.maxEntrySlippage = clampEntrySlippage(raw);
+      if (!Number.isFinite(raw) || raw <= 0 || raw > 50) return { ok: false, error: "Entry slippage cap must be a percent from 0.5 to 50." };
+      // v13.3: the wire value is a percent (0.5–50); an old web build's fraction (≤ 0.03) still reads right.
+      next.maxEntrySlippage = slippageFromWire(raw);
+    }
+    if ("maxExitSlippage" in patch) {
+      if (patch.maxExitSlippage == null || patch.maxExitSlippage === "") {
+        next.maxExitSlippage = null;
+      } else {
+        const raw = Number(patch.maxExitSlippage);
+        if (!Number.isFinite(raw) || raw <= 0 || raw > 50) return { ok: false, error: "Exit slippage must be a percent from 0.5 to 50 (or blank for entry cap + 3%)." };
+        next.maxExitSlippage = slippageFromWire(raw);
+      }
     }
     const refused = this.assignGates(patch, next);
     if (refused) return refused;
@@ -607,7 +673,7 @@ export class Desk {
     this.log({
       stage: "system",
       kind: "info",
-      message: `Settings saved. Volume ${money(view.minVolume1hUsd)}, trade line ${view.analystMinScore.toFixed(2)}, volume boost ${(view.volumeBoost * 100).toFixed(0)}%, top 10 ${(view.maxTop10Pct * 100).toFixed(0)}%, position ${(view.maxPositionPct * 100).toFixed(0)}%, entry slip ${(view.maxEntrySlippage * 100).toFixed(2)}%, buy ${view.defaultBuyUsd == null ? "cap" : money(view.defaultBuyUsd)}, open ${view.maxOpenPositions}, unlocked LP ${view.allowUnlockedLp ? "allowed" : "blocked"}. Hard stop stays −${(HARD_RULES.stopLossPct * 100).toFixed(0)}%.`
+      message: `Settings saved. Volume ${money(view.minVolume1hUsd)}, trade line ${view.analystMinScore.toFixed(2)}, volume boost ${(view.volumeBoost * 100).toFixed(0)}%, top 10 ${(view.maxTop10Pct * 100).toFixed(0)}%, position ${(view.maxPositionPct * 100).toFixed(0)}%, entry slip ${(view.maxEntrySlippage * 100).toFixed(2)}%, exit slip ${view.maxExitSlippage == null ? "entry+3%" : `${(view.maxExitSlippage * 100).toFixed(2)}%`}, buy ${view.defaultBuyUsd == null ? "cap" : money(view.defaultBuyUsd)}, open ${view.maxOpenPositions}, unlocked LP ${view.allowUnlockedLp ? "allowed" : "blocked"}. Hard stop stays −${(HARD_RULES.stopLossPct * 100).toFixed(0)}%.`
     });
     return { ok: true, settings: view };
   }
@@ -619,7 +685,10 @@ export class Desk {
   async closePosition(
     mint: string,
     fraction = 1
-  ): Promise<{ ok: true; soldFraction?: number; proceedsUsd?: number } | { ok: false; error: string }> {
+  ): Promise<
+    | { ok: true; soldFraction?: number; proceedsUsd?: number; symbol?: string; pnlUsd?: number; pnlPct?: number; exitPrice?: number; exitCode?: string }
+    | { ok: false; error: string }
+  > {
     const pos = this.book.positions.get(mint);
     if (!pos) return { ok: false, error: "No open position for that mint." };
     if (pos.closing) return { ok: false, error: "Close already in progress." };
@@ -657,7 +726,40 @@ export class Desk {
     });
     this.bus.emit("risk.exit", order);
     await this.drain();
-    return { ok: true };
+    if (this.book.positions.has(mint)) return { ok: false, error: `Close of ${pos.symbol} did not complete. Position is still open.` };
+    const closed = this.store.recentClosed(20).find((trade) => trade.id === pos.tradeId);
+    return {
+      ok: true,
+      soldFraction: 1,
+      symbol: pos.symbol,
+      ...(closed
+        ? { proceedsUsd: closed.proceedsUsd, pnlUsd: closed.pnlUsd, pnlPct: closed.pnlPct, exitPrice: closed.exitPrice, exitCode: closed.exitCode }
+        : {})
+    };
+  }
+
+  /** v13.3 Sell all: closes every open position at its current mark, one after another. */
+  async closeAllPositions(): Promise<{
+    ok: true;
+    sold: Array<{ mint: string; symbol: string; proceedsUsd?: number; pnlUsd?: number }>;
+    failed: Array<{ mint: string; symbol: string; error: string }>;
+    pnlUsd: number;
+  }> {
+    const sold: Array<{ mint: string; symbol: string; proceedsUsd?: number; pnlUsd?: number }> = [];
+    const failed: Array<{ mint: string; symbol: string; error: string }> = [];
+    for (const pos of [...this.book.positions.values()]) {
+      const result = await this.closePosition(pos.mint, 1);
+      if (result.ok) sold.push({ mint: pos.mint, symbol: pos.symbol, proceedsUsd: result.proceedsUsd, pnlUsd: result.pnlUsd });
+      else failed.push({ mint: pos.mint, symbol: pos.symbol, error: result.error });
+    }
+    const pnlUsd = roundUsd(sold.reduce((sum, row) => sum + (row.pnlUsd ?? 0), 0));
+    this.log({
+      stage: "system",
+      kind: "info",
+      code: "MANUAL_CLOSE",
+      message: `Sell all: closed ${sold.length} position${sold.length === 1 ? "" : "s"}${failed.length ? `, ${failed.length} could not close` : ""}. Realized ${signed(pnlUsd)}.`
+    });
+    return { ok: true, sold, failed, pnlUsd };
   }
 
   /** Paper partial sell. Sells part of the qty into the same pool model a full exit uses. */
@@ -783,7 +885,7 @@ export class Desk {
     const cooldownUntil = this.cooldowns.get(mint) ?? 0;
     const capUsd = this.positionCapUsd();
     const manualMaxUsd = this.positionCapUsd(this.book.equity(), SIZING_BAND.manualMaxPct);
-    const poolMaxUsd = maxSizeForPool(token.liquidityUsd, this.config.rules.maxEntrySlippage);
+    const poolMaxUsd = maxSizeForPool(token.liquidityUsd, this.config.rules.maxEntrySlippage, this.maxExitSlippage);
     const blocked = held
       ? "Already holding it. The desk does not average down."
       : !(capUsd >= 0.01)
@@ -1208,6 +1310,7 @@ export class Desk {
 
     this.bus.on("market.tick", (tick) => {
       this.pricer.noteTick(tick.mint);
+      if (!markUnusable(tick.priceUsd)) this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
       this.applyMark(tick.mint, tick.priceUsd, {
         feed: tick.feed,
         pairAddress: tick.pairAddress,
@@ -1375,7 +1478,22 @@ export class Desk {
     }
 
     const pctLabel = (capPct * 100).toFixed(0);
-    const exitGate = exitImpactAllowed(sized.sizeUsd, token.liquidityUsd, this.config.rules.maxEntrySlippage);
+    // v13.3 pre-buy crash guard (auto and one-tap alike): skip a coin dumping or losing its pool right now.
+    const crash = this.momentum.check(token.mint, token.priceUsd, token.liquidityUsd);
+    if (crash) {
+      this.pipeline.executorSkips += 1;
+      this.bus.emit("executor.skip", { token, reason: { code: crash.code, message: crash.message }, score });
+      this.log({
+        stage: "executor",
+        kind: "reject",
+        mint: token.mint,
+        symbol: token.symbol,
+        code: crash.code,
+        message: `Executor skipped ${token.symbol}. ${crash.message}`
+      });
+      return { ok: false, error: crash.message, code: crash.code };
+    }
+    const exitGate = exitImpactAllowed(sized.sizeUsd, token.liquidityUsd, this.config.rules.maxEntrySlippage, this.maxExitSlippage);
     if (!exitGate.ok) {
       this.pipeline.executorSkips += 1;
       this.bus.emit("executor.skip", { token, reason: { code: "EXIT_IMPACT", message: exitGate.message }, score });
@@ -1688,6 +1806,15 @@ export class Desk {
     this.book.positions.delete(pos.mint);
     const pnlUsd = roundUsd(proceedsUsd - pos.costUsd);
     const pnlPct = pos.costUsd > 0 ? pnlUsd / pos.costUsd : order.pnlPct;
+    const label = classifyStopExit({
+      code: order.reason.code,
+      entryPrice: pos.entryPrice,
+      stopPct: this.config.rules.stopLossPct,
+      fillPrice,
+      triggerPrice: order.markPrice
+    });
+    const exitCode = label.code;
+    const stopPrice = label.stopPrice;
     const closed: ClosedTrade = {
       id: pos.tradeId,
       mint: pos.mint,
@@ -1698,14 +1825,19 @@ export class Desk {
       proceedsUsd,
       pnlUsd,
       pnlPct,
-      exitCode: order.reason.code,
+      exitCode,
       score: pos.score,
       mode: booked.mode,
       entryPrice: pos.entryPrice,
-      exitPrice: fillPrice
+      exitPrice: fillPrice,
+      ...(stopPrice > 0 ? { stopPrice } : {}),
+      ...(Number.isFinite(order.markPrice) && order.markPrice > 0 ? { triggerPrice: order.markPrice } : {})
     };
-    const stopPrice = pos.entryPrice > 0 ? pos.entryPrice * (1 - this.config.rules.stopLossPct) : 0;
-    const compared = `Stop trigger ${price(stopPrice)} vs fill ${price(fillPrice)}.`;
+    const vsEntry = (p: number) => (pos.entryPrice > 0 ? ` (${signedPctText(p / pos.entryPrice - 1)})` : "");
+    const compared =
+      exitCode === "GAP_RUG"
+        ? `Gap/${label.rug ? "rug" : "gap"}: stop line ${price(stopPrice)} (−${(this.config.rules.stopLossPct * 100).toFixed(0)}%), trigger mark ${price(order.markPrice)}${vsEntry(order.markPrice)}, true fill ${price(fillPrice)}${vsEntry(fillPrice)}. The price moved past the stop between marks; a stop cannot fill better than the market.`
+        : `Stop trigger ${price(stopPrice)} vs fill ${price(fillPrice)}.`;
     this.store.closeTrade(closed);
     const lesson = noteOutcome(this.advisor.memory, pos.mint, pnlPct, pnlPct > 0);
     this.advisor.save();
@@ -1720,6 +1852,7 @@ export class Desk {
     }
     this.pipeline.fills += 1;
     if (order.reason.code === "STOP_LOSS") this.pipeline.riskExits += 1;
+    if (exitCode === "GAP_RUG") this.pipeline.gapExits = (this.pipeline.gapExits ?? 0) + 1;
     this.bus.emit("executor.fill", booked);
     this.log(
       {
@@ -1727,8 +1860,8 @@ export class Desk {
         kind: "exit",
         mint: pos.mint,
         symbol: pos.symbol,
-        code: order.reason.code,
-        message: `Risk ${exitVerb(order.reason.code)} ${pos.symbol}. ${order.reason.message} ${compared} Realized ${signed(pnlUsd)}.`,
+        code: exitCode,
+        message: `Risk ${exitVerb(exitCode)} ${pos.symbol}. ${order.reason.message} ${compared} Realized ${signed(pnlUsd)}.`,
         detail: signed(pnlUsd)
       },
       { ...closed, fill: booked }
@@ -1739,7 +1872,7 @@ export class Desk {
         kind: "fill",
         mint: pos.mint,
         symbol: pos.symbol,
-        code: order.reason.code,
+        code: exitCode,
         message: `Executor filled ${pos.symbol} sell ${money(proceedsUsd)} @ ${price(fillPrice)} (${booked.mode}). ${compared}`,
         detail: money(proceedsUsd)
       },
@@ -2082,6 +2215,7 @@ export class Desk {
 
   private remember(token: CandidateToken): void {
     this.sightings.set(token.mint, { ...token, social: { ...token.social } });
+    this.momentum.note(token.mint, token.priceUsd, token.liquidityUsd);
   }
 
   /**
@@ -2115,6 +2249,10 @@ export class Desk {
     if ("defaultBuyUsd" in saved) this.defaultBuyUsd = clampBuyUsd(saved.defaultBuyUsd ?? null);
     if (typeof saved.maxOpenPositions === "number") this.maxOpenPositions = clampOpenPositions(saved.maxOpenPositions);
     if (typeof saved.positionRefreshMs === "number") this.positionRefreshMs = clampPositionRefreshMs(saved.positionRefreshMs);
+    if ("maxExitSlippage" in saved) {
+      this.maxExitSlippage =
+        typeof saved.maxExitSlippage === "number" ? clampExitSlippage(saved.maxExitSlippage, this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack) : null;
+    }
     if (typeof saved.allowUnlockedLp === "boolean") this.allowUnlockedLp = saved.allowUnlockedLp;
     this.absorbGates(saved);
     if (typeof saved.operatorReady === "boolean") this.operatorReady = saved.operatorReady;
@@ -2153,13 +2291,15 @@ export class Desk {
       symbol: token.symbol,
       sizeUsd: sized.sizeUsd,
       mode,
-      ...(sized.clampedFrom != null ? { clampedFrom: sized.clampedFrom } : {})
+      ...(sized.clampedFrom != null ? { clampedFrom: sized.clampedFrom } : {}),
+      ...(this.book.positions.get(token.mint)?.entryPrice ? { fillPriceUsd: this.book.positions.get(token.mint)!.entryPrice } : {})
     };
   }
 
   private settingsView(): DeskSettingsView {
     return {
       positionRefreshMs: this.positionRefreshMs,
+      maxExitSlippage: this.maxExitSlippage,
       minVolume1hUsd: this.config.rules.minVolume1hUsd,
       analystMinScore: this.config.rules.analystMinScore,
       volumeBoost: this.config.rules.volumeBoost ?? 0,
@@ -2187,6 +2327,8 @@ export class Desk {
       scoutJupiter: this.scoutSources.jupiter,
       scoutDexpaprika: this.scoutSources.dexpaprika,
       scoutBitquery: this.scoutSources.bitquery,
+      scoutPumpApi: this.scoutSources.pumpapi,
+      scoutLaunchLab: this.scoutSources.launchlab,
       notifyNearMiss: this.notifyNearMiss,
       notifyFills: this.notifyFills,
       notifyStops: this.notifyStops,
@@ -2288,6 +2430,8 @@ export class Desk {
       "scoutJupiter",
       "scoutDexpaprika",
       "scoutBitquery",
+      "scoutPumpApi",
+      "scoutLaunchLab",
       "notifyNearMiss",
       "notifyFills",
       "notifyStops"
@@ -2323,7 +2467,9 @@ export class Desk {
       gecko: saved.scoutGecko !== false,
       jupiter: saved.scoutJupiter !== false,
       dexpaprika: saved.scoutDexpaprika === true,
-      bitquery: saved.scoutBitquery !== false
+      bitquery: saved.scoutBitquery !== false,
+      pumpapi: saved.scoutPumpApi !== false,
+      launchlab: saved.scoutLaunchLab !== false
     };
     if (typeof saved.notifyNearMiss === "boolean") this.notifyNearMiss = saved.notifyNearMiss;
     if (typeof saved.notifyFills === "boolean") this.notifyFills = saved.notifyFills;
@@ -2379,10 +2525,13 @@ export class Desk {
       scoutJupiter: view.scoutJupiter,
       scoutDexpaprika: view.scoutDexpaprika,
       scoutBitquery: view.scoutBitquery,
+      scoutPumpApi: view.scoutPumpApi,
+      scoutLaunchLab: view.scoutLaunchLab,
       positionSizeUsd: view.positionSizeUsd,
       maxExposurePct: view.maxExposurePct,
       paperResetUsd: view.paperResetUsd,
-      positionRefreshMs: view.positionRefreshMs
+      positionRefreshMs: view.positionRefreshMs,
+      maxExitSlippage: view.maxExitSlippage
     };
   }
 
@@ -2462,6 +2611,7 @@ export function loadWatchlist(raw: unknown): WatchItem[] {
 function exitVerb(code: string): string {
   if (code === "STOP_LOSS") return "stopped";
   if (code === "TRAIL_STOP") return "trailed";
+  if (code === "GAP_RUG") return "gapped through the stop on";
   if (code === "MANUAL_CLOSE") return "closed";
   if (code === "PARTIAL_SELL") return "trimmed";
   return "exited";
@@ -2479,6 +2629,13 @@ export function scoutExtras(token: { volume5mUsd?: number; priceChange1hPct?: nu
 
 function money(n: number): string {
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function signedPctText(f: number): string {
+  if (!Number.isFinite(f)) return "—";
+  const v = f * 100;
+  const digits = Math.abs(v) >= 99 && Math.abs(v) < 100 ? 1 : Math.abs(v) < 10 ? 1 : 0;
+  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(digits)}%`;
 }
 
 function signed(n: number): string {

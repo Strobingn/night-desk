@@ -6,6 +6,8 @@ import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../t
 import { tone, type DeskActions } from "../App";
 import { CoinAvatar, PnlChip, Sparkline, StopTrailBar } from "../ui";
 import { dayBase } from "../coins";
+import { exitLabel } from "../../../src/desk/gap";
+import { OneTapBar, TapSellButton } from "./OneTap";
 
 
 
@@ -56,6 +58,8 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
           {snap.prefs.maxExposurePct != null && snap.prefs.maxExposurePct < 1 ? ` of ${(snap.prefs.maxExposurePct * 100).toFixed(0)}% cap` : ""}
         </span>
       </div>
+
+      <OneTapBar snap={snap} actions={actions} />
 
       {snap.positions.length === 0 ? (
         <p className="empty">Flat. A name has to clear every hard filter and score at least {snap.rules.analystMinScore.toFixed(2)}. Or add one yourself on Add coin.</p>
@@ -111,7 +115,7 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
                 <div>
                   <span className="sym">{trade.symbol}</span>
                   <span className="sub">
-                    entry {px(trade.entryPrice ?? 0)} → exit {px(trade.exitPrice ?? 0)} · {trade.exitCode} · {clock(trade.closedAt)}
+                    entry {px(trade.entryPrice ?? 0)} → exit {px(trade.exitPrice ?? 0)} · <span className={trade.exitCode === "GAP_RUG" ? "gap-label" : undefined}>{exitLabel(trade.exitCode)}</span> · {clock(trade.closedAt)}
                   </span>
                 </div>
                 <div className={trade.pnlUsd >= 0 ? "up num" : "down num"}>
@@ -230,6 +234,7 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
         </div>
       </dl>
       <div className="sells" role="group" aria-label={`Sell ${pos.symbol}`}>
+        <TapSellButton mint={pos.mint} symbol={pos.symbol} actions={actions} />
         {([25, 50] as const).map((pct) => (
           <button key={pct} className="tonal" type="button" disabled={busy === `${pos.mint}:${pct}`} onClick={() => void actions.sell(pos.mint, pos.symbol, pct)}>
             Sell {pct}%

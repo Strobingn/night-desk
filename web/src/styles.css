@@ -542,3 +542,22 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .mark-updated.is-amber .dot { background: var(--amber); }
 .mark-updated.is-red { color: var(--down); font-weight: 600; }
 .mark-updated.is-red .dot { background: var(--down); }
+
+/* v13.3 one-tap trading */
+.onetap { padding: 12px 14px; display: grid; gap: 6px; }
+.onetap .ot-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.onetap .ot-field { display: flex; align-items: center; gap: 8px; flex: 1 1 260px; font-size: 13px; font-weight: 700; }
+.onetap .ot-field > span:first-child { min-width: 92px; color: var(--ink-2, var(--ink)); }
+.onetap .ot-field input[type="range"] { flex: 1 1 120px; min-width: 90px; }
+.onetap .ot-num { display: inline-flex; align-items: center; gap: 2px; font-weight: 800; }
+.onetap .ot-num .num { width: 64px; min-height: 36px; padding: 4px 8px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--card-2, var(--card)); color: var(--ink); font: inherit; text-align: right; }
+.onetap .sell-all { min-height: 40px; padding: 6px 14px; border-radius: 12px; }
+.onetap .sell-all.armed { outline: 3px solid var(--down); outline-offset: 2px; }
+.onetap .fine { margin: 0; }
+.cc-buys { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.coin-card .cc-foot .tap-buy { min-width: 110px; }
+.coin-card .cc-foot .tonal.sm { min-height: 44px; padding: 6px 12px; border-radius: 14px; font-size: 14px; }
+.tap-sell { min-height: 40px; padding: 6px 14px; border-radius: 12px; }
+.coin-card .tap-sell { min-height: 44px; }
+.gap-label { color: var(--down); font-weight: 800; }
+.scout-status li.stale i { background: var(--amber); } .scout-status li.stale em { color: var(--amber); font-weight: 700; }

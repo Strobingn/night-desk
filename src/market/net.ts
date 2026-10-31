@@ -11,7 +11,7 @@
  * - Hosts without a known limit pass straight through (still counted).
  */
 
-export type SourceId = "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery";
+export type SourceId = "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab";
 
 export interface BucketSpec {
   id: string;
@@ -38,6 +38,10 @@ export interface BucketSpec {
  *   tokens and quotes (headers on lite-api showed 5 per 10s).
  * - DexPaprika: response headers ratelimit-limit 10 per window; budget 8/min.
  * - Bitquery free: 10/min; budget 8/min.
+ * v13.3 (checked 2026-10-31, keyless):
+ * - Pump.fun frontend-api-v3 /coins: x-ratelimit-limit 60 per window; budget 45/min (desk polls 6/min).
+ * - Raydium LaunchLab (Bonk.fun and other LaunchLab platforms) /get/list: no published limit
+ *   and no rate headers, so stay polite at 8/min (desk polls 4/min).
  */
 export const BUCKETS: BucketSpec[] = [
   { id: "dexscreener:pairs", source: "dexscreener", limitPerMin: 300, budgetPerMin: 240, burst: 10, cacheMs: 3_000, note: "/tokens/v1, /latest/dex/tokens, /latest/dex/pairs" },
@@ -48,7 +52,9 @@ export const BUCKETS: BucketSpec[] = [
   { id: "gecko", source: "gecko", limitPerMin: 5, budgetPerMin: 4, burst: 1, cacheMs: 30_000, note: "keyless ~5/min per IP (docs: 10–30/min)" },
   { id: "jupiter", source: "jupiter", limitPerMin: 30, budgetPerMin: 24, burst: 4, cacheMs: 2_000, note: "keyless 0.5 rps, shared by price/tokens/quote" },
   { id: "dexpaprika", source: "dexpaprika", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "ratelimit-limit 10" },
-  { id: "bitquery", source: "bitquery", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 0, note: "free plan" }
+  { id: "bitquery", source: "bitquery", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 0, note: "free plan" },
+  { id: "pumpapi", source: "pumpapi", limitPerMin: 60, budgetPerMin: 45, burst: 3, cacheMs: 3_000, note: "pump.fun frontend-api-v3, x-ratelimit-limit 60" },
+  { id: "launchlab", source: "launchlab", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "Raydium LaunchLab list (Bonk.fun), no published limit" }
 ];
 
 const BY_ID = new Map(BUCKETS.map((b) => [b.id, b]));
@@ -73,6 +79,8 @@ export function bucketFor(url: string): BucketSpec | null {
   if (host === "lite-api.jup.ag" || host === "api.jup.ag" || host === "quote-api.jup.ag") return BY_ID.get("jupiter")!;
   if (host === "api.dexpaprika.com") return BY_ID.get("dexpaprika")!;
   if (host === "streaming.bitquery.io" || host === "graphql.bitquery.io") return BY_ID.get("bitquery")!;
+  if (host === "frontend-api-v3.pump.fun") return BY_ID.get("pumpapi")!;
+  if (host === "launch-mint-v1.raydium.io") return BY_ID.get("launchlab")!;
   return null;
 }
 

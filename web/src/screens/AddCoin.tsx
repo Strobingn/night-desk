@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { OneTapBar, TapBuyButton } from "./OneTap";
 import { api } from "../api";
 import { age, compactUsd, px, signedPct, usd } from "../format";
 import type { CoinLookup, DeskSnapshot, WatchItem } from "../types";
@@ -225,6 +226,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
                 >
                   {busy === result.mint ? "Buying" : result.hardKills.length ? `Buy ${result.symbol} anyway…` : `Paper buy ${usd(size)}`}
                 </button>
+                {!result.hardKills.length ? <TapBuyButton mint={result.mint} symbol={result.symbol} actions={actions} sizeUsd={size} className="tonal big tap-buy" /> : null}
                 <button className="ghost" type="button" disabled={result.watching || watchBusy === result.mint} onClick={() => void watch(result.mint)}>
                   {result.watching ? "Watching" : "Add to watchlist"}
                 </button>
@@ -240,6 +242,8 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
           )}
         </section>
       ) : null}
+
+      <OneTapBar snap={snap} actions={actions} showSellAll={false} />
 
       <section className="card watch">
         <header>
@@ -268,6 +272,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
                     <a className="ghost" href={item.dexscreenerUrl} target="_blank" rel="noopener noreferrer">
                       Chart
                     </a>
+                    {held ? null : <TapBuyButton mint={item.mint} symbol={item.symbol} actions={actions} className="primary sm tap-buy" />}
                     <button className="ghost buy" type="button" disabled={held} onClick={() => { setInput(item.mint); void lookup(item.mint); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
                       {held ? "Open" : "Buy"}
                     </button>

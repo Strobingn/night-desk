@@ -228,10 +228,20 @@ export interface ExitImpactRefusal {
   message: string;
 }
 
-export function exitImpactMessage(slippage: number, cap: number): string {
-  const limit = cap + HARD_RULES.exitImpactSlack;
+export function exitImpactMessage(slippage: number, cap: number, exitCap?: number | null): string {
   const slipText = Number.isFinite(slippage) ? `${(slippage * 100).toFixed(2)}%` : "unknown";
+  if (exitCap != null) {
+    return `A full exit would cost ${slipText}, more than your ${(exitCap * 100).toFixed(2)}% exit slippage setting. Buy refused.`;
+  }
+  const limit = cap + HARD_RULES.exitImpactSlack;
   return `A full exit would cost ${slipText}, more than the ${(cap * 100).toFixed(2)}% entry cap plus ${(HARD_RULES.exitImpactSlack * 100).toFixed(0)}% (${(limit * 100).toFixed(2)}%). Buy refused.`;
+}
+
+/** v13.3 the full-exit limit: the exit setting when set, else entry cap + exitImpactSlack. Capped below 100%. */
+export function exitLimit(maxEntrySlippage: number, maxExitSlippage?: number | null): number {
+  const cap = clampEntrySlippage(maxEntrySlippage);
+  const limit = maxExitSlippage != null && Number.isFinite(maxExitSlippage) ? maxExitSlippage : cap + HARD_RULES.exitImpactSlack;
+  return Math.min(0.5, Math.max(0.005, limit));
 }
 
 /**
@@ -241,13 +251,14 @@ export function exitImpactMessage(slippage: number, cap: number): string {
 export function exitImpactAllowed(
   notionalUsd: number,
   liquidityUsd: number,
-  maxEntrySlippage: number = HARD_RULES.maxEntrySlippage
+  maxEntrySlippage: number = HARD_RULES.maxEntrySlippage,
+  maxExitSlippage?: number | null
 ): { ok: true; slippage: number } | ExitImpactRefusal {
   const cap = clampEntrySlippage(maxEntrySlippage);
   const slippage = slippageFor(notionalUsd, liquidityUsd, "sell");
-  const limit = cap + HARD_RULES.exitImpactSlack;
+  const limit = exitLimit(cap, maxExitSlippage);
   if (!Number.isFinite(slippage) || slippage > limit + 1e-9) {
-    return { ok: false, code: "EXIT_IMPACT", slippage, message: exitImpactMessage(slippage, cap) };
+    return { ok: false, code: "EXIT_IMPACT", slippage, message: exitImpactMessage(slippage, cap, maxExitSlippage ?? null) };
   }
   return { ok: true, slippage };
 }
@@ -323,12 +334,16 @@ export function slippageFor(notionalUsd: number, liquidityUsd: number, side: "bu
  * Largest buy, in whole cents, that this pool takes under the entry slippage cap and the
  * full-exit depth check. Unknown liquidity is 0. Used for the Add coin slider and messages.
  */
-export function maxSizeForPool(liquidityUsd: number, maxEntrySlippage: number = HARD_RULES.maxEntrySlippage): number {
+export function maxSizeForPool(
+  liquidityUsd: number,
+  maxEntrySlippage: number = HARD_RULES.maxEntrySlippage,
+  maxExitSlippage?: number | null
+): number {
   if (!(liquidityUsd > 0) || !Number.isFinite(liquidityUsd)) return 0;
   const cap = clampEntrySlippage(maxEntrySlippage);
   const reserve = liquidityUsd * HARD_RULES.poolSideShare;
   const entryRoom = cap - HARD_RULES.baseSlippage;
-  const exitRoom = cap + HARD_RULES.exitImpactSlack - HARD_RULES.baseSlippage;
+  const exitRoom = exitLimit(cap, maxExitSlippage) - HARD_RULES.baseSlippage;
   if (!(entryRoom > 0) || !(exitRoom > 0) || exitRoom >= 1) return 0;
   const byEntry = entryRoom * reserve;
   const byExit = (exitRoom * reserve) / (1 - exitRoom);

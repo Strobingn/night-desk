@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import type { DeskSnapshot } from "../types";
+import { stateText } from "../feedText";
+
+export { stateText };
 
 type Source = NonNullable<DeskSnapshot["feed"]["sources"]>[number];
 
@@ -17,7 +20,7 @@ export function ScoutStatus({ feed }: { feed: DeskSnapshot["feed"] }) {
   if (!sources.length) return null;
   const live = sources.filter((s) => s.state === "live").length;
   // v12.3: collapsible. Collapsed still lists any source that is backing off or down.
-  const shown = open ? sources : sources.filter((s) => s.state === "backoff" || s.state === "down");
+  const shown = open ? sources : sources.filter((s) => s.state === "backoff" || s.state === "down" || s.state === "stale");
   return (
     <section className="card scout-status" aria-label="Scout status">
       <header>
@@ -41,15 +44,6 @@ export function ScoutStatus({ feed }: { feed: DeskSnapshot["feed"] }) {
       </ul>
     </section>
   );
-}
-
-export function stateText(s: Source, now: number): string {
-  if (s.state === "live") return s.id === "pump" ? "live · websocket" : "live";
-  if (s.state === "off") return s.detail ? `off · ${s.detail}` : "off";
-  if (s.state === "down") return s.detail ? `down · ${s.detail}` : "down";
-  const left = s.retryAt ? Math.max(0, Math.ceil((s.retryAt - now) / 1000)) : null;
-  const wait = left != null && left > 0 ? ` · retry in ${left >= 60 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : `${left}s`}` : "";
-  return `backing off${wait}${s.detail ? ` · ${s.detail}` : ""}`;
 }
 
 function rateText(s: Source): string {

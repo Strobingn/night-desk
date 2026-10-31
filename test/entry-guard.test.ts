@@ -91,9 +91,11 @@ describe("entry slippage guard", () => {
       expect(desk.snapshot().rules.maxEntrySlippage).toBe(0.03);
       const removed = desk.updateSettings({ maxEntrySlippage: null });
       expect(removed.ok).toBe(false);
+      // v13.3: Dirk may raise it, up to 50%. Past 50% is refused, not stored.
       const widened = desk.updateSettings({ maxEntrySlippage: 50 });
       expect(widened.ok).toBe(true);
-      if (widened.ok) expect(widened.settings.maxEntrySlippage).toBe(0.03);
+      if (widened.ok) expect(widened.settings.maxEntrySlippage).toBe(0.5);
+      expect(desk.updateSettings({ maxEntrySlippage: 80 }).ok).toBe(false);
       const tighter = desk.updateSettings({ maxEntrySlippage: 1 });
       expect(tighter.ok).toBe(true);
       if (tighter.ok) expect(tighter.settings.maxEntrySlippage).toBe(0.01);

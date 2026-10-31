@@ -90,8 +90,30 @@ export function clampVolumeBoost(raw: number, fallback: number = VOLUME_BOOST_BA
 /** How many names may be open at once. The desk can move this. It does not change the stop. */
 export const OPEN_POSITION_BAND = { min: 1, max: 24, fallback: 12 } as const;
 
-/** Entry slippage. 3% is the loosest. 0.5% is the tightest. The gate cannot be turned off. */
-export const ENTRY_SLIPPAGE_BAND = { min: 0.005, max: HARD_RULES.maxEntrySlippage } as const;
+/**
+ * Entry slippage. v13.3: the operator may raise it up to 50% (default stays 3%). 0.5% is the
+ * tightest. The gate cannot be turned off: a paper or live buy whose estimated impact is past
+ * the setting is refused.
+ */
+export const ENTRY_SLIPPAGE_BAND = { min: 0.005, max: 0.5 } as const;
+/** v13.3 exit (full-sell) impact tolerance checked before a buy. null/unset = entry cap + exitImpactSlack. */
+export const EXIT_SLIPPAGE_BAND = { min: 0.005, max: 0.5 } as const;
+
+/**
+ * v13.3 settings wire format. Every client sends a percent (0.5 to 50). Old web builds sent a
+ * fraction of at most 0.03, so a value at or under 0.03 is still read as a fraction.
+ */
+export function slippageFromWire(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) return Number.NaN;
+  const fraction = raw > HARD_RULES.maxEntrySlippage ? raw / 100 : raw;
+  return Math.round(Math.min(ENTRY_SLIPPAGE_BAND.max, Math.max(ENTRY_SLIPPAGE_BAND.min, fraction)) * 10_000) / 10_000;
+}
+
+export function clampExitSlippage(raw: number, fallback: number): number {
+  if (!Number.isFinite(raw)) return fallback;
+  const fraction = raw > EXIT_SLIPPAGE_BAND.max ? raw / 100 : raw;
+  return Math.round(Math.min(EXIT_SLIPPAGE_BAND.max, Math.max(EXIT_SLIPPAGE_BAND.min, fraction)) * 10_000) / 10_000;
+}
 
 export function clampVolumeUsd(raw: number, fallback = HARD_RULES.minVolume1hUsd): number {
   if (!Number.isFinite(raw)) return fallback;
@@ -181,7 +203,7 @@ export function clampOpenPositions(raw: number, fallback = OPEN_POSITION_BAND.fa
  */
 export function clampEntrySlippage(raw: number, fallback = HARD_RULES.maxEntrySlippage): number {
   if (!Number.isFinite(raw)) return fallback;
-  // The settings field is a percent (3, 1, 0.5). A fraction (0.03) is already inside the cap.
+  // A stored value is a fraction (≤ 0.5). A bigger number is a percent (3, 20, 50).
   const fraction = raw > ENTRY_SLIPPAGE_BAND.max ? raw / 100 : raw;
   const clamped = Math.min(ENTRY_SLIPPAGE_BAND.max, Math.max(ENTRY_SLIPPAGE_BAND.min, fraction));
   return Math.round(clamped * 10_000) / 10_000;
