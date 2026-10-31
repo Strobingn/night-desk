@@ -533,3 +533,12 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .rows .row .when { font-size: 13px; color: var(--dim); }
 .rows .row .detail { color: var(--dim); }
 .rows .row .tag { font-size: 12px; }
+
+/* ---- v13.2 live "updated Xs ago" on position cards ---- */
+.mark-updated { display: flex; align-items: center; gap: 6px; margin: 10px 0 2px; font-size: 13.5px; color: var(--muted, #9aa3b2); font-variant-numeric: tabular-nums; }
+.mark-updated .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); flex: none; }
+.mark-updated.is-fresh .dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--up) 22%, transparent); }
+.mark-updated.is-amber { color: var(--amber); font-weight: 600; }
+.mark-updated.is-amber .dot { background: var(--amber); }
+.mark-updated.is-red { color: var(--down); font-weight: 600; }
+.mark-updated.is-red .dot { background: var(--down); }

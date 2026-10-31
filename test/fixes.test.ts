@@ -345,6 +345,8 @@ describe("open positions get priced on the live feed", () => {
       await desk.repricePositions();
       expect(desk.snapshot().feed.lastError).toContain("dexscreener HTTP 503");
       ok = true;
+      // v13.2: a 5xx cools that source (2 s, doubling), so the next good poll comes after the cool-off.
+      vi.setSystemTime(Date.now() + 5_000);
       await desk.repricePositions();
       expect(desk.snapshot().feed.lastError).toBeUndefined();
     } finally {

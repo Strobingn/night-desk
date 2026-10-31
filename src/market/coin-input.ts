@@ -46,6 +46,8 @@ const HOSTS: Array<{ test: RegExp; platform: Exclude<CoinPlatform, "Mint"> }> = 
   { test: /(^|\.)dexscreener\.com$/i, platform: "DexScreener" },
   { test: /(^|\.)pump\.fun$/i, platform: "pump.fun" },
   { test: /(^|\.)birdeye\.so$/i, platform: "Birdeye" },
+  // v13.2: birdeye.so/solana/token/<mint> now redirects here.
+  { test: /(^|\.)birdeyeterminal\.com$/i, platform: "Birdeye" },
   { test: /(^|\.)gmgn\.ai$/i, platform: "GMGN" },
   { test: /(^|\.)jup\.ag$/i, platform: "Jupiter" },
   { test: /(^|\.)raydium\.io$/i, platform: "Raydium" },
@@ -87,6 +89,9 @@ export function parseCoinInput(raw: string): ParsedCoinInput {
   const chain = (url.searchParams.get("chain") ?? "").toLowerCase();
   if (platform === "Birdeye" && chain && chain !== "solana") {
     return { ok: false, error: `That Birdeye link is on ${chain}. Only Solana coins can be added.` };
+  }
+  if (platform === "Birdeye" && lower[1] === "token" && lower[0] && lower[0] !== "solana") {
+    return { ok: false, error: `That Birdeye link is on ${segments[0]}. Only Solana coins can be added.` };
   }
 
   const fromQuery = firstAddress(QUERY_KEYS.map((key) => url.searchParams.get(key) ?? ""));

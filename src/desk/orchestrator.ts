@@ -3,7 +3,7 @@ import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
 import { DEFAULT_SCOUT_SOURCES, type ScoutSources } from "../agents/scout.js";
 import { evaluateFilter } from "../agents/filter.js";
@@ -15,14 +15,16 @@ import { enrichSighting } from "../market/enrich.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
 import { EventBus } from "../bus.js";
+import type { MarksDelta } from "../types.js";
 import type { DeskConfig } from "../config.js";
 import { ReplayFeed } from "../demo/replay.js";
 import { advise, AdvisorBook, noteEntry, noteKill, noteNearMissSurface, noteNearMissTaken, noteOutcome, notePass, type Advice, type FeatureSample, type WeakSurvivor } from "./advisor.js";
 import { classifyNearMiss } from "./near-miss.js";
 import { phraseAdvice } from "./commentary.js";
-import { markUnusable, needsShockConfirm, sameMarkSource, type MarkOrigin } from "../market/mark-guard.js";
+import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump, markUnusable, needsShockConfirm, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
-import { PositionPricer } from "../market/position-pricer.js";
+import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
+import { ChainMarkReader } from "../market/chain-marks.js";
 import { inspectDeskKeypair } from "../market/wallet-status.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { DeskStore } from "../store/db.js";
@@ -64,6 +66,8 @@ interface DeskSettings {
   maxOpenPositions?: number;
   allowUnlockedLp?: boolean;
   maxEntrySlippage?: number;
+  /** v13.2 Position price refresh, ms. */
+  positionRefreshMs?: number;
   operatorReady?: boolean;
   minLiquidityUsd?: number;
   minTokenAgeMin?: number;
@@ -93,6 +97,7 @@ interface DeskSettings {
 }
 
 interface DeskSettingsView {
+  positionRefreshMs: number;
   minVolume1hUsd: number;
   analystMinScore: number;
   volumeBoost: number;
@@ -213,7 +218,19 @@ export class Desk {
   private readonly inflight = new Set<Promise<unknown>>();
   private cooldowns = new Map<string, number>();
   /** First >30% print inside 10s of entry, keyed by mint. The feed has to repeat it. */
-  private shocks = new Map<string, { feed: string }>();
+  private shocks = new Map<string, { feed: string; price?: number }>();
+  /** v13.2 calibrated on-chain marks. Display and stop confirmation only. */
+  private liveMarks = new Map<string, { price: number; at: number; feed: string }>();
+  /** v13.2 a >30% live jump waiting for a second read. */
+  private livePending = new Map<string, { price: number; at: number }>();
+  private lastConfirmAt = new Map<string, number>();
+  /** v13.2 feed that supplied the last accepted risk mark. */
+  private riskFeed = new Map<string, string>();
+  /** v13.2 a different feed proposing itself while the entry feed is silent. */
+  private reanchors = new Map<string, ReanchorCandidate>();
+  /** v13.2 one PRICE_SOURCE / PRICE_UNUSABLE line per mint per 5 minutes. */
+  private logGate = new Map<string, number>();
+  private positionRefreshMs: number = POSITION_REFRESH_BAND.fallback;
   private startedAt = Date.now();
   /** Earliest instant the current paper book owns. Recaps never look past it. */
   private resetAt = 0;
@@ -237,7 +254,7 @@ export class Desk {
   private killReasons: Record<string, number> = {};
   private feed: FeedStatus;
 
-  constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch } = {}) {
+  constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch } = {}) {
     this.config = config;
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
@@ -264,6 +281,7 @@ export class Desk {
     }
     if ("defaultBuyUsd" in saved) this.defaultBuyUsd = clampBuyUsd(saved.defaultBuyUsd ?? null);
     if (typeof saved.maxOpenPositions === "number") this.maxOpenPositions = clampOpenPositions(saved.maxOpenPositions);
+    if (typeof saved.positionRefreshMs === "number") this.positionRefreshMs = clampPositionRefreshMs(saved.positionRefreshMs);
     if (typeof saved.allowUnlockedLp === "boolean") this.allowUnlockedLp = saved.allowUnlockedLp;
     this.absorbGates(saved);
     this.operatorReady = saved.operatorReady === true;
@@ -319,6 +337,13 @@ export class Desk {
           liquidityUsd: quote?.liquidityUsd
         }),
       fetchImpl: deps.priceFetch ?? this.net.fetchAt(0),
+      pollMs: () => this.positionRefreshMs,
+      pairFor: (mint) => this.book.positions.get(mint)?.pairAddress,
+      live: (mint, priceUsd, origin) => this.liveMark(mint, priceUsd, origin),
+      chain:
+        deps.chainFetch || (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch)
+          ? new ChainMarkReader(config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
+          : undefined,
       onStale: (mint, silentMs) => {
         const pos = this.book.positions.get(mint);
         this.log({
@@ -556,6 +581,11 @@ export class Desk {
       const raw = Number(patch.maxOpenPositions);
       if (!Number.isFinite(raw)) return { ok: false, error: "Max open positions must be a whole number from 1 to 24." };
       next.maxOpenPositions = clampOpenPositions(raw);
+    }
+    if ("positionRefreshMs" in patch) {
+      const raw = Number(patch.positionRefreshMs);
+      if (!Number.isFinite(raw)) return { ok: false, error: `Position price refresh must be ${POSITION_REFRESH_BAND.min} to ${POSITION_REFRESH_BAND.max} ms.` };
+      next.positionRefreshMs = clampPositionRefreshMs(raw);
     }
     if ("allowUnlockedLp" in patch) {
       if (typeof patch.allowUnlockedLp !== "boolean") return { ok: false, error: "Allow unlocked LP must be true or false." };
@@ -1024,7 +1054,8 @@ export class Desk {
   }
 
   snapshot(): DeskSnapshot {
-    const equityUsd = this.book.equity();
+    const riskEquityUsd = this.book.equity();
+    const equityUsd = this.displayEquity();
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
     return {
@@ -1041,7 +1072,7 @@ export class Desk {
       sessionPnlPct: this.config.startingBalanceUsd > 0 ? sessionPnlUsd / this.config.startingBalanceUsd : 0,
       rules: this.config.rules,
       prefs: this.prefsView(),
-      positionCapUsd: this.positionCapUsd(equityUsd),
+      positionCapUsd: this.positionCapUsd(riskEquityUsd),
       cooldowns: [...this.cooldowns.entries()]
         .filter(([, until]) => until > Date.now())
         .map(([mint, until]) => ({
@@ -1062,8 +1093,9 @@ export class Desk {
       advice: this.advice,
       watchlist: this.watchlist.map((item) => ({ ...item })),
       exposureUsd: roundUsd(this.exposureUsd()),
-      manualMaxUsd: this.positionCapUsd(equityUsd, SIZING_BAND.manualMaxPct),
-      lastClientCrash: this.lastClientCrash
+      manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
+      lastClientCrash: this.lastClientCrash,
+      markLoop: this.pricer.stats()
     };
   }
 
@@ -1761,10 +1793,12 @@ export class Desk {
   }
 
   private view(pos: Position): PositionView {
-    const markPrice = this.book.price(pos.mint, pos.entryPrice);
+    const shown = this.displayMark(pos);
+    const markPrice = shown.price;
     const marketValueUsd = pos.qty * markPrice;
     const pnlUsd = marketValueUsd - pos.costUsd;
-    const assessment = assessPosition(pos, markPrice, this.config.rules);
+    // The stop and peak shown are the risk book's, never moved by a display-only mark.
+    const assessment = assessPosition(pos, this.book.price(pos.mint, pos.entryPrice), this.config.rules);
     return {
       mint: pos.mint,
       symbol: pos.symbol,
@@ -1784,7 +1818,10 @@ export class Desk {
       source: pos.source,
       entry: pos.entry ?? "analyst",
       lpUnlocked: pos.lpUnlocked === true,
-      markAgeMs: Math.max(0, Date.now() - (this.book.markedAt(pos.mint) ?? pos.openedAt)),
+      markAgeMs: Math.max(0, Date.now() - shown.at),
+      markAt: shown.at,
+      markFeed: shown.feed,
+      riskMarkAgeMs: Math.max(0, Date.now() - (this.book.markedAt(pos.mint) ?? pos.openedAt)),
       openedAt: pos.openedAt,
       ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {})
     };
@@ -1844,10 +1881,20 @@ export class Desk {
     this.advice = notes;
   }
 
+  /** v13.2: true when this mint/code already logged inside the throttle window. */
+  private quiet(code: string, mint: string): boolean {
+    const key = `${code}:${mint}`;
+    const now = Date.now();
+    const last = this.logGate.get(key);
+    if (last != null && now - last < LOG_THROTTLE_MS) return true;
+    this.logGate.set(key, now);
+    return false;
+  }
+
   private applyMark(mint: string, priceUsd: number, origin?: MarkOrigin, advise = true): void {
     const pos = this.book.positions.get(mint);
     if (markUnusable(priceUsd)) {
-      if (pos && !pos.closing) {
+      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", mint)) {
         this.log({
           stage: "risk",
           kind: "reject",
@@ -1859,30 +1906,70 @@ export class Desk {
       }
       return;
     }
+    let reanchored = false;
     if (pos && !sameMarkSource(pos, origin)) {
-      this.log({
-        stage: "risk",
-        kind: "reject",
-        mint,
-        symbol: pos.symbol,
-        code: "PRICE_SOURCE",
-        message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${originLabel(origin)}. Entry was ${pos.priceFeed ?? pos.source}${pos.pairAddress ? ` pair ${pos.pairAddress.slice(0, 4)}` : ""}. Waiting for a valid mark.`
-      });
-      return;
+      const now = Date.now();
+      const lastGoodAt = this.book.markedAt(mint) ?? pos.openedAt;
+      if (!pos.closing && origin && now - lastGoodAt >= REANCHOR_SILENT_MS) {
+        const step = reanchorCandidate(this.reanchors.get(mint), origin, priceUsd, this.book.price(mint, pos.entryPrice), now);
+        if (step.verdict === "adopt") {
+          const was = `${pos.priceFeed ?? pos.source}${pos.pairAddress ? ` pair ${pos.pairAddress.slice(0, 4)}` : ""}`;
+          pos.priceFeed = origin.feed as Position["priceFeed"];
+          if (origin.pairAddress) pos.pairAddress = origin.pairAddress;
+          else delete pos.pairAddress;
+          if (origin.dex) pos.dex = origin.dex;
+          this.reanchors.delete(mint);
+          this.shocks.delete(mint);
+          reanchored = true;
+          this.persist();
+          this.log({
+            stage: "risk",
+            kind: "info",
+            mint,
+            symbol: pos.symbol,
+            code: "PRICE_REANCHOR",
+            message: `Risk moved ${pos.symbol} to ${originLabel(origin)}. ${was} had no price for ${Math.round((now - lastGoodAt) / 1000)}s and the new feed printed twice in agreement (${price(priceUsd)}). The stop now uses it.`
+          });
+        } else if (step.verdict === "wait" && step.next) {
+          this.reanchors.set(mint, step.next);
+        }
+      }
+      if (!reanchored) {
+        if (!this.quiet("PRICE_SOURCE", mint)) {
+          this.log({
+            stage: "risk",
+            kind: "reject",
+            mint,
+            symbol: pos.symbol,
+            code: "PRICE_SOURCE",
+            message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${originLabel(origin)}. Entry was ${pos.priceFeed ?? pos.source}${pos.pairAddress ? ` pair ${pos.pairAddress.slice(0, 4)}` : ""}. Waiting for a valid mark.`
+          });
+        }
+        return;
+      }
+    } else if (pos) {
+      this.reanchors.delete(mint);
     }
-    if (pos && !pos.closing && needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now())) {
+    const shock = !!pos && !pos.closing && needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now());
+    // Operator and replay marks carry no feed and are trusted as before; feed prints must repeat a >30% jump.
+    const jump = !!pos && !pos.closing && !reanchored && !!origin?.feed && isJump(this.book.lastPrice.get(mint), priceUsd);
+    if (pos && (shock || jump)) {
       const feed = origin?.feed ?? pos.priceFeed ?? "mark";
       const pending = this.shocks.get(mint);
-      if (!pending || pending.feed !== feed) {
-        this.shocks.set(mint, { feed });
-        const move = ((priceUsd - pos.entryPrice) / pos.entryPrice) * 100;
+      const agrees = pending?.price == null || Math.abs(priceUsd / pending.price - 1) <= SHOCK_MOVE;
+      if (!pending || pending.feed !== feed || !agrees) {
+        this.shocks.set(mint, { feed, price: priceUsd });
+        const base = shock ? pos.entryPrice : this.book.price(mint, pos.entryPrice);
+        const move = ((priceUsd - base) / base) * 100;
         this.log({
           stage: "risk",
           kind: "info",
           mint,
           symbol: pos.symbol,
           code: "PRICE_UNCONFIRMED",
-          message: `Risk held a ${pos.symbol} move of ${move.toFixed(2)}% from ${originLabel(origin)} inside 10s of entry. A second tick from the same source has to confirm it before the stop fires.`
+          message: shock
+            ? `Risk held a ${pos.symbol} move of ${move.toFixed(2)}% from ${originLabel(origin)} inside 10s of entry. A second tick from the same source has to confirm it before the stop fires.`
+            : `Risk held a ${pos.symbol} jump of ${move.toFixed(2)}% from ${originLabel(origin)}. A second tick from the same source has to confirm it before the stop fires.`
         });
         return;
       }
@@ -1894,8 +1981,89 @@ export class Desk {
     if (seen) this.sightings.set(mint, { ...seen, priceUsd });
     if (origin?.liquidityUsd && origin.liquidityUsd > 0 && pos) this.markLiquidity.set(mint, origin.liquidityUsd);
     this.book.mark(mint, priceUsd);
+    if (pos) {
+      this.riskFeed.set(mint, origin?.feed ?? pos.priceFeed ?? pos.source);
+      this.bus.emit("position.mark", { mint, at: Date.now() });
+    }
     this.review(mint, priceUsd);
     if (advise) this.publishAdvice(this.buildAdvice());
+  }
+
+  /**
+   * v13.2 calibrated on-chain mark from the anchored pool. It updates the card, P&L and the
+   * "updated" clock. It never moves the stop, the peak, or a fill. When it reaches the stop,
+   * or runs 3% away from the risk mark, the entry feed is asked right away.
+   */
+  private liveMark(mint: string, priceUsd: number, origin: LiveOrigin): void {
+    const pos = this.book.positions.get(mint);
+    if (!pos || pos.closing || markUnusable(priceUsd)) return;
+    const now = Date.now();
+    const prev = this.liveMarks.get(mint);
+    const last = prev?.price ?? this.book.lastPrice.get(mint);
+    if (isJump(last, priceUsd)) {
+      const pending = this.livePending.get(mint);
+      if (!pending || Math.abs(priceUsd / pending.price - 1) > 0.1) {
+        this.livePending.set(mint, { price: priceUsd, at: now });
+        return;
+      }
+    }
+    this.livePending.delete(mint);
+    this.liveMarks.set(mint, { price: priceUsd, at: origin.at || now, feed: origin.feed });
+    const risk = this.book.price(mint, pos.entryPrice);
+    const stop = assessPosition(pos, risk, this.config.rules).stopPrice;
+    const drift = risk > 0 ? Math.abs(priceUsd / risk - 1) : 1;
+    const lastAsk = this.lastConfirmAt.get(mint) ?? 0;
+    if ((priceUsd <= stop && now - lastAsk >= 1_500) || (drift > 0.03 && now - lastAsk >= 5_000)) {
+      this.lastConfirmAt.set(mint, now);
+      this.pricer.confirm(mint);
+    }
+    this.bus.emit("position.mark", { mint, at: now });
+  }
+
+  /** v13.2 what the card shows: a fresh live mark, else the latest of risk and live. */
+  private displayMark(pos: Position): { price: number; at: number; feed: string } {
+    const riskAt = this.book.markedAt(pos.mint) ?? pos.openedAt;
+    const risk = { price: this.book.price(pos.mint, pos.entryPrice), at: riskAt, feed: this.riskFeed.get(pos.mint) ?? pos.priceFeed ?? pos.source };
+    const live = this.liveMarks.get(pos.mint);
+    if (!live) return risk;
+    const now = Date.now();
+    if (now - live.at <= LIVE_FRESH_MS || live.at >= riskAt) return live;
+    return risk;
+  }
+
+  /** v13.2 small WS payload: only what a position card needs. */
+  marksDelta(): MarksDelta {
+    const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
+    return {
+      now: Date.now(),
+      cashUsd: roundUsd(this.book.cashUsd),
+      equityUsd: roundUsd(this.displayEquity()),
+      positions: positions.map((p) => ({
+        mint: p.mint,
+        markPrice: p.markPrice,
+        marketValueUsd: p.marketValueUsd,
+        pnlUsd: p.pnlUsd,
+        pnlPct: p.pnlPct,
+        stopPrice: p.stopPrice,
+        peakPrice: p.peakPrice,
+        trailArmed: p.trailArmed,
+        trailHintPrice: p.trailHintPrice,
+        markAgeMs: p.markAgeMs ?? 0,
+        markAt: p.markAt ?? 0,
+        markFeed: p.markFeed ?? ""
+      }))
+    };
+  }
+
+  private displayEquity(): number {
+    let total = this.book.cashUsd;
+    for (const pos of this.book.positions.values()) total += pos.qty * this.displayMark(pos).price;
+    return total;
+  }
+
+  /** v13.2 fast-loop health for the feed panel. */
+  pricerStats() {
+    return this.pricer.stats();
   }
 
   /** Paper exits price off the last accepted mark when the trigger itself is unusable. */
@@ -1946,6 +2114,7 @@ export class Desk {
     if (typeof saved.maxEntrySlippage === "number") this.config.rules.maxEntrySlippage = clampEntrySlippage(saved.maxEntrySlippage);
     if ("defaultBuyUsd" in saved) this.defaultBuyUsd = clampBuyUsd(saved.defaultBuyUsd ?? null);
     if (typeof saved.maxOpenPositions === "number") this.maxOpenPositions = clampOpenPositions(saved.maxOpenPositions);
+    if (typeof saved.positionRefreshMs === "number") this.positionRefreshMs = clampPositionRefreshMs(saved.positionRefreshMs);
     if (typeof saved.allowUnlockedLp === "boolean") this.allowUnlockedLp = saved.allowUnlockedLp;
     this.absorbGates(saved);
     if (typeof saved.operatorReady === "boolean") this.operatorReady = saved.operatorReady;
@@ -1990,6 +2159,7 @@ export class Desk {
 
   private settingsView(): DeskSettingsView {
     return {
+      positionRefreshMs: this.positionRefreshMs,
       minVolume1hUsd: this.config.rules.minVolume1hUsd,
       analystMinScore: this.config.rules.analystMinScore,
       volumeBoost: this.config.rules.volumeBoost ?? 0,
@@ -2211,7 +2381,8 @@ export class Desk {
       scoutBitquery: view.scoutBitquery,
       positionSizeUsd: view.positionSizeUsd,
       maxExposurePct: view.maxExposurePct,
-      paperResetUsd: view.paperResetUsd
+      paperResetUsd: view.paperResetUsd,
+      positionRefreshMs: view.positionRefreshMs
     };
   }
 

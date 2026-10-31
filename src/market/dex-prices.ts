@@ -1,6 +1,9 @@
+import { SourceGate } from "./source-gate.js";
+
 type FetchLike = typeof fetch;
 
 const BATCH = 30;
+const WSOL = "So11111111111111111111111111111111111111112";
 
 export interface DexQuote {
   priceUsd: number;
@@ -8,6 +11,8 @@ export interface DexQuote {
   feed?: "dexscreener" | "jupiter";
   pairAddress?: string;
   dex?: string;
+  /** v13.2: SOL per token when the pool is quoted in SOL (DexScreener priceNative). */
+  priceNative?: number;
 }
 
 /**
@@ -15,12 +20,14 @@ export interface DexQuote {
  * A mint with no listed pair is absent. This never invents a price.
  * Throws if a request fails, so callers can tell "no price" from "could not ask".
  */
-export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fetch): Promise<Map<string, DexQuote>> {
+export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fetch, opts: { bust?: number } = {}): Promise<Map<string, DexQuote>> {
   const out = new Map<string, DexQuote>();
   mints = [...new Set(mints)];
   for (let i = 0; i < mints.length; i += BATCH) {
     const batch = mints.slice(i, i + BATCH);
-    const res = await fetchImpl(`https://api.dexscreener.com/tokens/v1/solana/${batch.join(",")}`, {
+    // v13.2: the endpoint is CDN-cached 30s. A stop confirmation may skip that cache, rarely.
+    const bust = opts.bust ? `?t=${opts.bust}` : "";
+    const res = await fetchImpl(`https://api.dexscreener.com/tokens/v1/solana/${batch.join(",")}${bust}`, {
       headers: { accept: "application/json", "user-agent": "night-desk/1.0" },
       signal: AbortSignal.timeout(6_000)
     });
@@ -31,6 +38,8 @@ export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fet
       liquidity?: { usd?: number };
       pairAddress?: string;
       dexId?: string;
+      priceNative?: string | number;
+      quoteToken?: { address?: string };
     }>;
     if (!Array.isArray(rows)) continue;
     const best = new Map<string, DexQuote>();
@@ -46,7 +55,10 @@ export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fet
           liquidityUsd,
           feed: "dexscreener",
           pairAddress: typeof row.pairAddress === "string" ? row.pairAddress : undefined,
-          dex: typeof row.dexId === "string" ? row.dexId : undefined
+          dex: typeof row.dexId === "string" ? row.dexId : undefined,
+          ...(row.quoteToken?.address === WSOL && Number(row.priceNative) > 0 && Number.isFinite(Number(row.priceNative))
+            ? { priceNative: Number(row.priceNative) }
+            : {})
         });
       }
     }
@@ -110,33 +122,79 @@ export type QuoteSource = "dexscreener" | "jupiter";
 const SOURCES: QuoteSource[] = ["dexscreener", "jupiter"];
 
 /**
- * Held-mint prices. Rotates DexScreener and Jupiter so one feed cannot freeze the book.
- * A 429 cools that source (5s, then doubled, capped at 60s). The other source is tried immediately.
+ * v13.2 pacing for held marks. DexScreener's tokens endpoint is CDN-cached 30s, so asking
+ * faster than every 3s gains nothing. Jupiter's keyless bucket is ~5 requests per 10s and
+ * is shared with the Scout and paper-fill quotes, so held marks take at most one per 5s.
+ */
+export const SOURCE_MIN_MS: Record<QuoteSource, number> = { dexscreener: 3_000, jupiter: 5_000 };
+
+export interface SourceResult {
+  source: QuoteSource;
+  quotes?: Map<string, DexQuote>;
+  error?: string;
+}
+
+/**
+ * Held-mint prices. Each source has its own gate: a 429 cools that source (5s, doubled,
+ * capped at 60s), a 5xx or timeout cools it 2s doubling to 30s. The other source is still tried.
  */
 export class HeldQuoteBook {
   private next = 0;
-  private coolUntil = new Map<QuoteSource, number>();
-  private backoffMs = new Map<QuoteSource, number>();
+  readonly gates: Record<QuoteSource, SourceGate> = {
+    dexscreener: new SourceGate(SOURCE_MIN_MS.dexscreener),
+    jupiter: new SourceGate(SOURCE_MIN_MS.jupiter)
+  };
+  /** Last SOL/USD seen from Jupiter (SOL rides in the same batch). */
+  solUsd: { value: number; at: number } | null = null;
+
+  private async one(source: QuoteSource, mints: string[], fetchImpl: FetchLike, now: number, bust?: number): Promise<Map<string, DexQuote>> {
+    this.gates[source].started(now);
+    if (source === "dexscreener") return fetchDexQuotes(mints, fetchImpl, bust ? { bust } : {});
+    const quotes = await fetchJupiterQuotes([...mints, WSOL], fetchImpl);
+    const sol = quotes.get(WSOL);
+    if (sol && !mints.includes(WSOL)) {
+      this.solUsd = { value: sol.priceUsd, at: now };
+      quotes.delete(WSOL);
+    }
+    return quotes;
+  }
+
+  /** Runs the given sources in parallel. Each result carries its quotes or its error. */
+  async fetchSources(
+    mints: string[],
+    sources: QuoteSource[],
+    fetchImpl: FetchLike,
+    now = Date.now(),
+    opts: { bust?: number } = {}
+  ): Promise<SourceResult[]> {
+    const ready = sources.filter((source) => !this.gates[source].cooling(now));
+    return Promise.all(
+      ready.map(async (source): Promise<SourceResult> => {
+        try {
+          const quotes = await this.one(source, mints, fetchImpl, now, source === "dexscreener" ? opts.bust : undefined);
+          this.gates[source].ok(now);
+          for (const quote of quotes.values()) quote.feed = source;
+          return { source, quotes };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.gates[source].fail(message, now);
+          return { source, error: message };
+        }
+      })
+    );
+  }
 
   async fetch(mints: string[], fetchImpl: FetchLike, now = Date.now()): Promise<Map<string, DexQuote>> {
     const ready = this.ready(now);
     if (!ready.length) return new Map();
     const errors: string[] = [];
     for (const source of ready) {
-      try {
-        const quotes = source === "dexscreener" ? await fetchDexQuotes(mints, fetchImpl) : await fetchJupiterQuotes(mints, fetchImpl);
-        this.backoffMs.set(source, 5_000);
+      const [result] = await this.fetchSources(mints, [source], fetchImpl, now);
+      if (result?.quotes) {
         this.next = (SOURCES.indexOf(source) + 1) % SOURCES.length;
-        return quotes;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        errors.push(message);
-        if (/\b429\b/.test(message)) {
-          const wait = this.backoffMs.get(source) ?? 5_000;
-          this.coolUntil.set(source, now + wait);
-          this.backoffMs.set(source, Math.min(60_000, wait * 2));
-        }
+        return result.quotes;
       }
+      if (result?.error) errors.push(result.error);
     }
     throw new Error(errors.join("; ") || "no price source");
   }
@@ -149,38 +207,29 @@ export class HeldQuoteBook {
   async fetchAll(mints: string[], fetchImpl: FetchLike, now = Date.now()): Promise<Map<string, DexQuote[]>> {
     const ready = this.ready(now);
     if (!ready.length) return new Map();
-    const out = new Map<string, DexQuote[]>();
-    const errors: string[] = [];
-    let ok = false;
-    for (const source of ready) {
-      try {
-        const quotes = source === "dexscreener" ? await fetchDexQuotes(mints, fetchImpl) : await fetchJupiterQuotes(mints, fetchImpl);
-        this.backoffMs.set(source, 5_000);
-        ok = true;
-        for (const [mint, quote] of quotes) {
-          const list = out.get(mint) ?? [];
-          list.push({ ...quote, feed: source });
-          out.set(mint, list);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        errors.push(message);
-        if (/\b429\b/.test(message)) {
-          const wait = this.backoffMs.get(source) ?? 5_000;
-          this.coolUntil.set(source, now + wait);
-          this.backoffMs.set(source, Math.min(60_000, wait * 2));
-        }
-      }
-    }
-    if (!ok) throw new Error(errors.join("; ") || "no price source");
-    return out;
+    return mergeResults(await this.fetchSources(mints, ready, fetchImpl, now));
   }
 
   private ready(now: number): QuoteSource[] {
-    const open = SOURCES.filter((source) => (this.coolUntil.get(source) ?? 0) <= now);
+    const open = SOURCES.filter((source) => !this.gates[source].cooling(now));
     if (!open.length) return [];
     const start = open.indexOf(SOURCES[this.next] ?? "dexscreener");
     const at = start >= 0 ? start : 0;
     return [...open.slice(at), ...open.slice(0, at)];
   }
+}
+
+/** Per-mint quote lists. Throws only when every source that ran failed. */
+export function mergeResults(results: SourceResult[]): Map<string, DexQuote[]> {
+  const out = new Map<string, DexQuote[]>();
+  if (!results.length) return out;
+  if (!results.some((r) => r.quotes)) throw new Error(results.map((r) => r.error).join("; ") || "no price source");
+  for (const r of results) {
+    for (const [mint, quote] of r.quotes ?? []) {
+      const list = out.get(mint) ?? [];
+      list.push(quote);
+      out.set(mint, list);
+    }
+  }
+  return out;
 }

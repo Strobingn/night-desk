@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { mergeMarks, stampSnapshot } from "./marks";
+import type { MarksDelta } from "../../src/types";
 import { formatBuyNotice } from "../../src/desk/buy-notice";
 import { api, authHeaders, withToken } from "./api";
 import { signedPct, signedUsd, usd } from "./format";
@@ -104,7 +106,7 @@ export function App() {
     let stopped = false;
     const apply = (data: DeskSnapshot) => {
       if (stopped) return;
-      setSnap(data);
+      setSnap(stampSnapshot(data, Date.now()));
       setHistory((prev) => mergeEvents(prev, data.events));
       setOffline(false);
       setDenied(false);
@@ -130,8 +132,10 @@ export function App() {
     try {
       ws = new WebSocket(`${proto}://${location.host}${withToken("/ws")}`);
       ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data) as { type: string; data: DeskSnapshot };
-        if (msg.type === "snapshot") apply(msg.data);
+        const msg = JSON.parse(event.data) as { type: string; data: unknown };
+        if (msg.type === "snapshot") apply(msg.data as DeskSnapshot);
+        // v13.2: small position-mark deltas between full snapshots.
+        else if (msg.type === "marks" && !stopped) setSnap((prev) => mergeMarks(prev, msg.data as MarksDelta, Date.now()));
       };
       ws.onerror = () => setOffline(true);
     } catch {

@@ -212,6 +212,8 @@ function fmt(field: SliderField, n: number): string {
       return `${n} min`;
     case "h":
       return `${n} h`;
+    case "s":
+      return `${n} s`;
     case "score":
       return n.toFixed(2);
     default:

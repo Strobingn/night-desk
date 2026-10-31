@@ -52,7 +52,8 @@ export function clock(ts: number): string {
 export function chartLinks(mint: string): { label: string; href: string }[] {
   return [
     { label: "Chart", href: `https://dexscreener.com/solana/${mint}` },
-    { label: "Birdeye", href: `https://birdeye.so/token/${mint}?chain=solana` },
+    // v13.2: Birdeye retired /token/<mint>?chain=solana (404). /solana/token/<mint> redirects to Birdeye Terminal.
+    { label: "Birdeye", href: `https://birdeye.so/solana/token/${mint}` },
     { label: "Jupiter", href: `https://jup.ag/tokens/${mint}` }
   ];
 }

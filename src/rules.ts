@@ -69,6 +69,17 @@ export const VOLUME_BOOST_BAND = {
 } as const;
 
 /** Fraction (0.5) or percent (50). Non-finite falls back; out of band is clamped. */
+/** v13.2 Position price refresh: how often the held-position loop runs, in ms. */
+export const POSITION_REFRESH_BAND = { min: 1_000, max: 10_000, step: 500, fallback: 1_500 } as const;
+
+/** Seconds (≤ 60) are read as seconds; otherwise ms. Rounded to the 500 ms step. */
+export function clampPositionRefreshMs(raw: number, fallback: number = POSITION_REFRESH_BAND.fallback): number {
+  if (!Number.isFinite(raw)) return fallback;
+  const ms = raw <= 60 ? raw * 1_000 : raw;
+  const clamped = Math.min(POSITION_REFRESH_BAND.max, Math.max(POSITION_REFRESH_BAND.min, ms));
+  return Math.round(clamped / POSITION_REFRESH_BAND.step) * POSITION_REFRESH_BAND.step;
+}
+
 export function clampVolumeBoost(raw: number, fallback: number = VOLUME_BOOST_BAND.default): number {
   if (!Number.isFinite(raw)) return fallback;
   const fraction = raw > 1 ? raw / 100 : raw;

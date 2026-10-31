@@ -22,7 +22,7 @@ export interface SliderField extends Base {
   max: number;
   step: number;
   /** Shown next to the number. */
-  unit: "$" | "%" | "min" | "h" | "" | "score";
+  unit: "$" | "%" | "min" | "h" | "" | "score" | "s";
   /** Display value → value sent to POST /api/settings. */
   toWire: (display: number) => number;
   /** Value read from /api/state → display value. */
@@ -48,6 +48,7 @@ export const SETTINGS_FIELDS: SettingField[] = [
   { key: "maxExposurePct", label: "Max total exposure %", group: "Sizing / risk", kind: "slider", min: 10, max: 100, step: 5, unit: "%", ...pct, hint: "Open positions at market value, as a share of equity. 100% = cash is the only limit." },
   { key: "defaultBuyUsd", label: "Manual buy $", group: "Sizing / risk", kind: "slider", min: 1, max: 10_000, step: 1, unit: "$", toWire: same, fromState: same, nullable: "Use the position cap instead" },
   { key: "maxOpenPositions", label: "Max open", group: "Sizing / risk", kind: "slider", min: 1, max: 24, step: 1, unit: "", toWire: same, fromState: same },
+  { key: "positionRefreshMs", label: "Position price refresh", group: "Sizing / risk", kind: "slider", min: 1, max: 10, step: 0.5, unit: "s", toWire: (d: number) => Math.round(d * 1_000), fromState: (raw: number) => Math.round(raw / 100) / 10, hint: "How often open positions are re-priced. 1.5 s default. Pool reserves are read every cycle; DexScreener at most every 3 s and Jupiter every 5 s so the Scout is never rate-limited. The −6% stop still needs a mark from the entry feed." },
   { key: "maxTradesPerHour", label: "Max trades / hour", group: "Sizing / risk", kind: "slider", min: 0, max: 60, step: 1, unit: "", toWire: same, fromState: same, hint: "0 = no hourly cap." },
   { key: "dailyMaxLossUsd", label: "Daily max loss $", group: "Sizing / risk", kind: "slider", min: 0, max: 5_000, step: 5, unit: "$", toWire: same, fromState: same, hint: "0 = off. Pauses auto-buys until the next UTC day." },
   { key: "maxEntrySlippage", label: "Entry slippage %", group: "Sizing / risk", kind: "slider", min: 0.5, max: 3, step: 0.1, unit: "%", ...pct, hint: "Locked at 3% or tighter. Buys past it, or past the pool-depth exit check, are refused." },

@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { feedLabel, liveAgeMs, markFreshness, updatedLabel } from "../marks";
 import { api } from "../api";
-import { chartLinks, clock, markAge, px, signedPct, signedUsd, usd } from "../format";
+import { chartLinks, clock, px, signedPct, signedUsd, usd } from "../format";
 import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../types";
 import { tone, type DeskActions } from "../App";
 import { CoinAvatar, PnlChip, Sparkline, StopTrailBar } from "../ui";
@@ -154,6 +155,26 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
   );
 }
 
+/** v13.2 live "updated Xs ago". Ticks every second; amber past 10 s, red past 30 s. */
+export function MarkUpdated({ pos }: { pos: PositionView }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const age = liveAgeMs(pos, now);
+  const fresh = markFreshness(age);
+  const feed = feedLabel(pos.markFeed);
+  return (
+    <p className={`mark-updated is-${fresh}`} aria-label={`Mark ${updatedLabel(age)}`}>
+      <i className="dot" />
+      {updatedLabel(age)}
+      {feed ? ` · ${feed}` : ""}
+      {fresh === "red" ? " · stale" : ""}
+    </p>
+  );
+}
+
 function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionView; actions: DeskActions; busy: string | null; armPct: number; trailOn: boolean }) {
   const tag = pos.tag ?? (pos.entry === "manual" ? "manual" : null);
   const valueUsd = pos.marketValueUsd;
@@ -166,7 +187,7 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
           <h3>{pos.symbol}</h3>
           <p className="sub">
             {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
-            {pos.lpUnlocked ? " · LP unlocked" : ""} · mark {markAge(pos.markAgeMs)}
+            {pos.lpUnlocked ? " · LP unlocked" : ""}
           </p>
         </div>
         <div className="pnl">
@@ -174,6 +195,7 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
           <span className="pos-value">{usd(valueUsd)}</span>
         </div>
       </header>
+      <MarkUpdated pos={pos} />
       <StopTrailBar stop={pos.stopPrice} entry={pos.entryPrice} mark={pos.markPrice} peak={pos.peakPrice} armPct={armPct} trailOn={trailOn} />
       <dl>
         <div>

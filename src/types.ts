@@ -248,8 +248,16 @@ export interface PositionView {
   source: TokenSource;
   entry?: "manual" | "analyst";
   lpUnlocked?: boolean;
-  /** Milliseconds since the last fresh mark. The hard stop uses that mark. */
+  /** Milliseconds since the mark shown on the card was taken. */
   markAgeMs?: number;
+  /** v13.2 wall time of the mark shown (server clock; compare with snapshot.now). */
+  markAt?: number;
+  /** v13.2 feed of the mark shown: "chain" (pool reserves), "dexscreener", "jupiter", … */
+  markFeed?: string;
+  /** v13.2 age of the mark the hard stop uses. */
+  riskMarkAgeMs?: number;
+  /** v13.2 client only: local wall time the shown mark was taken (receive time − markAgeMs). */
+  markLocalAt?: number;
   openedAt: number;
   /** v12 tag shown on the card, e.g. "manual · pump.fun". */
   tag?: string;
@@ -398,6 +406,8 @@ export interface DeskPrefs {
   maxExposurePct: number;
   /** v12. Amount the paper book resets to ($100–$10,000). */
   paperResetUsd: number;
+  /** v13.2 held-position price loop, ms (1000–10000, default 1500). */
+  positionRefreshMs?: number;
 }
 
 /** v12 GET /api/lookup result. */
@@ -497,11 +507,40 @@ export interface DeskSnapshot {
   exposureUsd: number;
   /** v12. Largest single confirmed manual buy right now: min(equity × 100%, cash, exposure room). */
   manualMaxUsd: number;
+  /** v13.2 held-position price loop: cycle length and each source's last success / cool-off. */
+  markLoop?: {
+    pollMs: number;
+    lastCycleAt: number | null;
+    sources: Record<string, { lastOkAt: number | null; coolUntil: number; lastError: string | null; count429: number }>;
+  };
   /** v12. Last crash the phone reported (POST /api/client-crash). */
   lastClientCrash: { at: number; version: string; brief: string } | null;
 }
 
+/** v13.2 WS "marks" message: position cards only, a few hundred bytes. */
+export interface MarksDelta {
+  now: number;
+  cashUsd: number;
+  equityUsd: number;
+  positions: Array<{
+    mint: string;
+    markPrice: number;
+    marketValueUsd: number;
+    pnlUsd: number;
+    pnlPct: number;
+    stopPrice: number;
+    peakPrice: number;
+    trailArmed: boolean;
+    trailHintPrice: number | null;
+    markAgeMs: number;
+    markAt: number;
+    markFeed: string;
+  }>;
+}
+
 export type DeskEvents = {
+  /** v13.2 an open position got a new accepted or live mark. */
+  "position.mark": { mint: string; at: number };
   /** v12. Something the UI shows changed outside the log (watchlist prices). */
   "desk.changed": { reason: string; at: number };
   "scout.candidate": CandidateToken;

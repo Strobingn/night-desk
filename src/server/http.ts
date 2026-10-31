@@ -28,6 +28,10 @@ export function readPublicUrl(dbPath: string, now = Date.now()): string | null {
 
 /** Snapshot pushes are coalesced to at most one per WS_PUSH_MS. */
 export const WS_PUSH_MS = 200;
+/** v13.2: a full snapshot (~80 KB) goes out at most once per second. */
+export const WS_SNAPSHOT_MIN_MS = 1_000;
+/** v13.2: position-mark deltas (a few hundred bytes) are coalesced to one per 250 ms. */
+export const WS_MARKS_MS = 250;
 /** A socket with more than this still queued is behind; it skips snapshots until it drains. */
 export const WS_BACKLOG_MAX = 256 * 1024;
 export const WS_HEARTBEAT_MS = 25_000;
@@ -254,18 +258,32 @@ export function startServer(
   server.on("close", () => clearInterval(heartbeat));
 
   let pending: NodeJS.Timeout | null = null;
+  let lastSnapshotAt = 0;
   const push = () => {
     if (pending) return;
+    const wait = Math.max(WS_PUSH_MS, lastSnapshotAt + WS_SNAPSHOT_MIN_MS - Date.now());
     pending = setTimeout(() => {
       pending = null;
+      lastSnapshotAt = Date.now();
       const payload = JSON.stringify({ type: "snapshot", data: desk.snapshot() });
       // A socket still draining an older snapshot skips this one and gets the latest once it drains.
       if (sendSnapshot(sockets, payload) > 0) push();
-    }, WS_PUSH_MS);
+    }, wait);
+  };
+  let marksPending: NodeJS.Timeout | null = null;
+  const pushMarks = () => {
+    if (marksPending) return;
+    marksPending = setTimeout(() => {
+      marksPending = null;
+      const payload = JSON.stringify({ type: "marks", data: desk.marksDelta() });
+      sendSnapshot(sockets, payload);
+    }, WS_MARKS_MS);
   };
   desk.bus.on("log.event", () => push());
+  // v13.2: a tick only refreshes the tape, so it rides the 1/s snapshot. Held marks go as deltas.
   desk.bus.on("market.tick", () => push());
   desk.bus.on("desk.changed", () => push());
+  desk.bus.on("position.mark", () => pushMarks());
 
   server.listen(port, host, () => {
     const bound = server.address();
@@ -302,6 +320,7 @@ const BLOCKED_SETTINGS = new Set([
 ]);
 
 export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
+  "positionRefreshMs",
   "minVolume1hUsd",
   "analystMinScore",
   "volumeBoost",
