@@ -86,6 +86,7 @@ class V135LiveTest {
         val payload = kt.substring(kt.indexOf("private fun payload"), kt.indexOf("private val GROUP_META"))
         for (key in listOf("liveTradeUsd", "liveDailyCapUsd", "liveTrailPct")) assertTrue(key, payload.contains("\"$key\" to"))
         assertTrue(kt.contains("Group(\"Live wallet\")"))
+        assertTrue("live size slider goes to \$100", kt.contains("draft.liveUsd, 1f..100f"))
         assertFalse("the phone never sends LIVE_TRADING", payload.contains("LIVE_TRADING"))
         assertFalse("the phone never sends a key", payload.contains("PRIVATE_KEY"))
     }

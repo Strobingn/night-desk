@@ -384,3 +384,45 @@ describe("v13.5 HTTP and web helpers", () => {
     expect(on).toMatchObject({ badge: "LIVE ON", tone: "live" });
   });
 });
+
+describe("v13.5 .env wallet keys and the $100 live cap", () => {
+  it("loads only the allow-listed wallet keys from .env, never overriding the process env", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { loadDeskEnv, envFileLiveFlag, parseEnvFile } = await import("../src/env-file.js");
+    const dir = mkdtempSync(path.join(tmpdir(), "night-desk-env-"));
+    const file = path.join(dir, ".env");
+    writeFileSync(file, '# c\nLIVE_TRADING=false\nWALLET_PRIVATE_KEY="abc"\nSOLANA_RPC_URL=https://rpc.example/?k=1\nPAPER_RESET=1\nDESK_TOKEN=zzz\n');
+    const env: NodeJS.ProcessEnv = { WALLET_KEYPAIR_PATH: "/keep" };
+    const applied = loadDeskEnv(file, env);
+    expect(applied.sort()).toEqual(["DESK_WALLET_RPC_URL", "LIVE_TRADING", "WALLET_PRIVATE_KEY"]);
+    expect(env.PAPER_RESET).toBeUndefined();
+    expect(env.DESK_TOKEN).toBeUndefined();
+    expect(env.SOLANA_RPC_URL).toBeUndefined();
+    expect(env.WALLET_KEYPAIR_PATH).toBe("/keep");
+    expect(env.WALLET_PRIVATE_KEY).toBe("abc");
+    expect(envFileLiveFlag(file)).toBe(false);
+    writeFileSync(file, "LIVE_TRADING=true\nWALLET_PRIVATE_KEY=\n");
+    expect(envFileLiveFlag(file)).toBe(true);
+    expect(loadDeskEnv(file, {})).toEqual(["LIVE_TRADING"]);
+    expect(parseEnvFile("WALLET_PRIVATE_KEY=").get("WALLET_PRIVATE_KEY")).toBe("");
+    const cfg = loadConfig({ SOLANA_RPC_URL: "https://scout.example", DESK_WALLET_RPC_URL: "https://wallet.example" });
+    expect(cfg.rpcUrl).toBe("https://scout.example");
+    expect(cfg.walletRpcUrl).toBe("https://wallet.example");
+    expect(loadConfig({}).walletRpcUrl).toBe("https://api.mainnet-beta.solana.com");
+  });
+
+  it("lets Dirk set the live size up to $100 and no further", async () => {
+    const desk = liveDesk(async () => ({ sol: 1, usdc: 500, at: Date.now(), error: null }));
+    try {
+      const at100 = desk.updateSettings({ liveTradeUsd: 100, autoBuy: false });
+      expect(at100.ok && at100.settings.liveTradeUsd).toBe(100);
+      expect(desk.updateSettings({ liveTradeUsd: 101 }).ok).toBe(false);
+      const m = "Hundred11111111111111111111111111111111111";
+      await desk.submitCandidate(makeToken({ mint: m, symbol: "HUN", priceUsd: 1, liquidityUsd: 900_000 }));
+      expect(await desk.manualBuy(m, 1223)).toMatchObject({ ok: true, sizeUsd: 100 });
+      expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ sizeUsd: 100 });
+    } finally {
+      desk.stop();
+    }
+  });
+});

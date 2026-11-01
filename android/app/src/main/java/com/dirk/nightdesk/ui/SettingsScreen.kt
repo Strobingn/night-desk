@@ -133,7 +133,7 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         exposure = ((snap?.maxExposurePct ?: 1.0) * 100.0).toFloat().coerceIn(10f, 100f),
         resetUsd = (snap?.paperResetUsd ?: 100.0).toFloat().coerceIn(100f, 10_000f),
         refresh = ((snap?.positionRefreshMs ?: 1_500L) / 1_000.0).toFloat().coerceIn(1f, 10f),
-        liveUsd = (snap?.liveTradeUsd ?: 5.0).toFloat().coerceIn(1f, 1_000f),
+        liveUsd = (snap?.liveTradeUsd ?: 5.0).toFloat().coerceIn(1f, 100f),
         liveCap = (snap?.liveDailyCapUsd ?: 50.0).toFloat().coerceIn(5f, 100_000f),
         useLiveCap = snap?.liveDailyCapUsd != null,
         liveTrail = ((snap?.liveTrailPct ?: 0.01) * 100.0).toFloat().coerceIn(0.5f, 20f)
@@ -168,8 +168,8 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         AppearanceGroup()
         Group("Live wallet") {
             WalletCard(snap)
-            ExactSlider("Live $ per trade", draft.liveUsd, 1f..250f, 1f, { "%.0f".format(it) }) { draft = draft.copy(liveUsd = it) }
-            Text("Every live buy, auto or one-tap, spends exactly this much USDC (\$5 default). Paper sizes are never used live.", color = Dim, fontSize = 12.sp)
+            ExactSlider("Live $ per trade", draft.liveUsd, 1f..100f, 1f, { "%.0f".format(it) }) { draft = draft.copy(liveUsd = it) }
+            Text("Up to \$100. Every live buy, auto or one-tap, spends exactly this much USDC (\$5 default). Paper sizes are never used live.", color = Dim, fontSize = 12.sp)
             ToggleRow("Live daily cap", draft.useLiveCap) { draft = draft.copy(useLiveCap = it) }
             if (draft.useLiveCap) {
                 ExactSlider("Live daily cap $", draft.liveCap, 5f..1_000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(liveCap = it) }

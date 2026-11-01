@@ -330,7 +330,7 @@ export class Desk {
       deps.walletBalances ??
       (async () =>
         owner
-          ? fetchWalletBalances(this.net.fetchAt(0), config.rpcUrl, owner)
+          ? fetchWalletBalances(this.net.fetchAt(0), config.walletRpcUrl, owner)
           : { sol: null, usdc: null, at: Date.now(), error: "No wallet key loaded" });
     this.rugs = new LayeredRugRegistry(new StaticRugRegistry(loadRugWalletMap(config.rugWalletsFile)));
     // v13.5: a live desk keeps its own book. The paper book (and Dirk's paper positions) stay saved
@@ -1582,7 +1582,7 @@ export class Desk {
             decimals: token.decimals,
             keypairPath: this.config.walletKeypairPath,
             readEnvSecret: this.config.readWalletSecret,
-            rpcUrl: this.config.rpcUrl,
+            rpcUrl: this.config.walletRpcUrl,
             quoteUrl: this.config.jupiterQuoteUrl,
             swapUrl: this.config.jupiterSwapUrl,
             markPriceUsd: token.priceUsd,
@@ -1791,7 +1791,7 @@ export class Desk {
           decimals: pos.decimals,
           keypairPath: this.config.walletKeypairPath,
           readEnvSecret: this.config.readWalletSecret,
-          rpcUrl: this.config.rpcUrl,
+          rpcUrl: this.config.walletRpcUrl,
           quoteUrl: this.config.jupiterQuoteUrl,
           swapUrl: this.config.jupiterSwapUrl,
           maxEntrySlippage: this.config.rules.maxEntrySlippage,
@@ -2725,7 +2725,7 @@ export class Desk {
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",
       liveRequested: this.config.liveRequested,
-      rpcPublic: isPublicRpc(this.config.rpcUrl),
+      rpcPublic: isPublicRpc(this.config.walletRpcUrl),
       liveTradeUsd: this.liveTradeUsd,
       liveDailyCapUsd: this.liveDailyCapUsd,
       liveTrailPct: this.liveTrailPct,

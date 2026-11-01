@@ -30,6 +30,8 @@ export interface DeskConfig {
    * string field on the config (JSON.stringify drops it; logs show [Function]).
    */
   readWalletSecret: () => string | undefined;
+  /** v13.5 RPC for live swaps and the wallet card (.env SOLANA_RPC_URL), else rpcUrl. Never sent to clients. */
+  walletRpcUrl: string;
   jupiterQuoteUrl: string;
   jupiterSwapUrl: string;
   resetPaper: boolean;
@@ -93,6 +95,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     bitqueryKey: env.BITQUERY_API_KEY?.trim() || undefined,
     walletKeypairPath,
     readWalletSecret,
+    walletRpcUrl: env.DESK_WALLET_RPC_URL?.trim() || rpcUrl,
     jupiterQuoteUrl: env.JUPITER_QUOTE_URL?.trim() || "https://lite-api.jup.ag/swap/v1/quote",
     jupiterSwapUrl: env.JUPITER_SWAP_URL?.trim() || "https://lite-api.jup.ag/swap/v1/swap",
     resetPaper: env.PAPER_RESET === "1",

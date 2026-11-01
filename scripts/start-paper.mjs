@@ -3,6 +3,17 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { ensureServer, ensureWeb, root } from "./ensure-build.mjs";
+import { existsSync, readFileSync } from "node:fs";
+
+/** Exactly LIVE_TRADING=true in .env. Reads only that one line's value; nothing is printed. */
+function envFileLiveFlag(file) {
+  if (!existsSync(file)) return false;
+  for (const raw of readFileSync(file, "utf8").split(/\r?\n/)) {
+    const m = /^\s*LIVE_TRADING\s*=\s*(.*?)\s*$/.exec(raw);
+    if (m) return m[1].replace(/^["']|["']$/g, "") === "true";
+  }
+  return false;
+}
 
 const args = process.argv.slice(2);
 const live = args.includes("--live");
@@ -10,7 +21,9 @@ const recap = args.includes("--recap");
 const forward = args.filter((arg) => arg !== "--live" && arg !== "--recap");
 
 if (live) {
-  process.env.LIVE_TRADING = "false";
+  // v13.5: live swaps only when Austin's .env says exactly LIVE_TRADING=true (and a valid
+  // WALLET_PRIVATE_KEY is there; the desk re-checks). Anything else stays paper.
+  process.env.LIVE_TRADING = envFileLiveFlag(path.join(root, ".env")) ? "true" : "false";
   process.env.DEMO_FEED = "0";
   process.env.FEED_MODE = "live";
 }

@@ -350,7 +350,8 @@ export function resolveRules(env: NodeJS.ProcessEnv = process.env): ResolvedRule
  * buys use liveTradeUsd and never the paper position size. The −6% hard stop is unchanged.
  */
 export const LIVE_BAND = {
-  tradeUsd: { min: 1, max: 1000, fallback: 5 },
+  /** Dirk: adjustable up to $100 per live trade. */
+  tradeUsd: { min: 1, max: 100, fallback: 5 },
   /** null = no daily cap (Dirk: "no max per day"). */
   dailyCapUsd: { min: 1, max: 100_000 },
   /** Trail as a fraction. 1% default. 0.5%–20%. */
