@@ -44,7 +44,8 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
         </div>
       ) : null}
       <div className="ot-row">
-        <label className={`ot-field${live ? " ot-paper-only" : ""}`} hidden={live}>
+        {live ? null : (
+        <label className="ot-field">
           <span>One-tap size</span>
           <input
             type="range"
@@ -70,6 +71,7 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
             />
           </span>
         </label>
+        )}
         <label className="ot-field">
           <span>Max slippage</span>
           <input
