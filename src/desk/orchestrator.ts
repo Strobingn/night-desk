@@ -956,13 +956,16 @@ export class Desk {
    * several → code AMBIGUOUS with a pick list (HTTP 200 so old apps still show the text).
    */
   async lookupTicker(query: string): Promise<CoinLookup | CoinLookupError> {
-    const heldMints = this.heldMintsAllBooks();
-    const tier1: LocalCoin[] = [];
+    // "Held" means open in the book the desk is trading now (paper, or live when LIVE).
+    const heldMints = new Set<string>(this.book.positions.keys());
+    const tier0: LocalCoin[] = [];
     for (const pos of this.book.positions.values()) {
-      tier1.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: true, origin: "position" });
+      tier0.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: true, origin: "position" });
     }
+    const tier1: LocalCoin[] = [];
+    // The other mode's saved book (live when paper, paper when live), then recent trades.
     for (const pos of this.otherBookPositions()) {
-      tier1.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: true, origin: "position" });
+      tier1.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: false, origin: "position" });
     }
     const trades = this.store.recentClosed(200).reverse();
     for (const trade of trades) tier1.push({ mint: trade.mint, symbol: trade.symbol, held: heldMints.has(trade.mint), origin: "trade" });
@@ -990,8 +993,10 @@ export class Desk {
         candidates: rows
       };
     };
+    const local0 = enrich(matchLocal(query, tier0));
+    if (local0.length) return pick(local0, "held");
     const local1 = enrich(matchLocal(query, tier1));
-    if (local1.length) return pick(local1, local1.some((r) => r.held) ? "held / traded" : "traded before");
+    if (local1.length) return pick(local1, "traded before");
     const tier2: LocalCoin[] = [];
     for (const token of this.sightings.values()) tier2.push({ mint: token.mint, symbol: token.symbol, name: token.name, liquidityUsd: token.liquidityUsd, volume1hUsd: token.volume1hUsd, origin: "tape" });
     for (const entry of this.lookups.values()) tier2.push({ mint: entry.token.mint, symbol: entry.token.symbol, name: entry.token.name, liquidityUsd: entry.token.liquidityUsd, volume1hUsd: entry.token.volume1hUsd, origin: "tape" });
@@ -1007,12 +1012,6 @@ export class Desk {
     }
     if (!ranked.some((r) => r.exact)) return { ok: false, code: "AMBIGUOUS", query, error: `No exact “${query}” on Solana. Close matches below; tap one.`, candidates: ranked };
     return pick(ranked, "DexScreener search");
-  }
-
-  private heldMintsAllBooks(): Set<string> {
-    const out = new Set<string>(this.book.positions.keys());
-    for (const pos of this.otherBookPositions()) out.add(pos.mint);
-    return out;
   }
 
   /** Positions saved in the other mode's book (live when paper, paper when live). Read-only. */

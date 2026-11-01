@@ -178,7 +178,7 @@ describe("v13.6 ticker / name lookup", () => {
       if (found.ok) {
         expect(found.mint).toBe(MINT2);
         expect(found.held).toBe(true);
-        expect(found.matchedBy).toContain("held");
+        expect(found.matchedBy).toBe("QTFALCN · held");
       }
       expect(urls.some((u) => u.includes("/latest/dex/search"))).toBe(false);
       // A second coin with the same ticker on the Tape is a different tier: held wins.
