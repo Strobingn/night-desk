@@ -15,6 +15,17 @@ object OneTap {
         else -> kotlin.math.max(1.0, kotlin.math.floor(capUsd * 100.0) / 100.0)
     }
 
+    /**
+     * v13.6 the one-tap hint names the limit behind the cap (per-position %, cash, or the
+     * max-exposure room) and only says "cut" when the size is actually cut. Same text as the web.
+     */
+    fun capHint(capLine: String?, capUsd: Double, tapUsd: Double): String {
+        val cap = "$" + "%.2f".format(java.util.Locale.US, capUsd)
+        val cut = tapUsd > capUsd + 0.005
+        if (capLine.isNullOrBlank()) return if (cut) "cut to the $cap cap and cash" else "within the $cap cap"
+        return if (cut) "cut to $cap by the $capLine" else "within the $cap cap, set by the $capLine"
+    }
+
     /** v13.5: a LIVE desk always taps the live per-trade size ($5 default), never this phone's paper amount. */
     fun effectiveTapUsd(mode: String?, tapUsd: Double, liveTradeUsd: Double?): Double =
         if (mode == "live") (liveTradeUsd?.takeIf { it > 0 && it.isFinite() } ?: 5.0) else tapUsd

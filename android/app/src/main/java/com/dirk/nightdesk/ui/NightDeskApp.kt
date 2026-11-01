@@ -288,6 +288,7 @@ fun NightDeskApp(desk: DeskRepository) {
         OneTapUi(
             tapUsd = tapNow,
             capUsd = s.positionCapUsd,
+            capLine = s.capLine,
             maxUsd = kotlin.math.max(s.positionCapUsd, s.cashUsd),
             slipPct = kotlin.math.round(s.maxEntrySlippage * 10_000.0) / 100.0,
             stopPct = s.stopLossPct,
@@ -404,7 +405,11 @@ fun NightDeskApp(desk: DeskRepository) {
                     onReset = { scope.launch { desk.resetPaperBook() } },
                     onReady = { ready -> scope.launch { desk.setOperatorReady(ready) } },
                     onBuy = { mint, ignore -> scope.launch { desk.buyPosition(mint, null, ignore) } },
-                    oneTap = oneTap
+                    oneTap = oneTap,
+                    onOpenCoin = { mint ->
+                        addPrefill = mint to ((addPrefill?.second ?: 0) + 1)
+                        tab = 2
+                    }
                 )
                 1 -> TapeScreen(
                     snap?.events.orEmpty(),
@@ -513,7 +518,9 @@ private fun BookScreen(
     onReset: () -> Unit,
     onReady: (Boolean) -> Unit,
     onBuy: (String, Boolean) -> Unit,
-    oneTap: OneTapUi? = null
+    oneTap: OneTapUi? = null,
+    /** v13.6 tapping a held coin opens its Add coin card. */
+    onOpenCoin: (String) -> Unit = {}
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -546,7 +553,7 @@ private fun BookScreen(
             }
         } else {
             itemsIndexed(snap.positions, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
-                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap)
+                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin)
             }
         }
         item { WalletCard(snap) }
@@ -962,17 +969,18 @@ private fun OpenPositionCard(
     onSell: (String, Int) -> Unit = { mint, _ -> onClose(mint) },
     armPct: Double = 0.12,
     trailOn: Boolean = false,
-    oneTap: OneTapUi? = null
+    oneTap: OneTapUi? = null,
+    onOpenCoin: (String) -> Unit = {}
 ) {
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
     var sellAsk by remember { mutableStateOf<Int?>(null) }
     Column(Modifier.deskCard().padding(16.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().clickable(onClickLabel = "Open ${pos.symbol} coin card") { onOpenCoin(pos.mint) }, verticalAlignment = Alignment.CenterVertically) {
             CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(pos.symbol, color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(pos.symbol + " ›", color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
@@ -1844,7 +1852,7 @@ private fun clock(ts: Long): String = if (ts <= 0) "—" else clockFmt.format(In
 
 /** v13 render harness for screenshot tests: the real screens with a fixed snapshot and no network. */
 @Composable
-internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null, scoutOpen: Boolean? = null, sheetOpen: Boolean = false) {
+internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null, scoutOpen: Boolean? = null, sheetOpen: Boolean = false, addPreview: Pair<String, com.dirk.nightdesk.CoinLookup>? = null) {
     NightTheme {
         Scaffold(
             containerColor = P.bg,
@@ -1887,6 +1895,11 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                         headerLive = true,
                         mode = snap.mode
                     )
+                    2 -> if (addPreview != null) {
+                        AddCoinScreen(com.dirk.nightdesk.DeskRepository.get(LocalContext.current), snap, null, oneTap, preview = addPreview)
+                    } else {
+                        SettingsScreen(snap) {}
+                    }
                     else -> SettingsScreen(snap) {}
                 }
             }

@@ -50,7 +50,9 @@ class OneTapUi(
     val onSlip: (Double) -> Unit,
     /** v13.5 the desk is LIVE: buttons say so, the size is the live per-trade size. */
     val live: Boolean = false,
-    val liveTrailPct: Double = 0.01
+    val liveTrailPct: Double = 0.01,
+    /** v13.6 the sentence naming which cap limits the size. */
+    val capLine: String? = null
 ) {
     fun buying(mint: String) = tapping.contains("buy:$mint")
     fun selling(mint: String) = tapping.contains("sell:$mint")
@@ -169,7 +171,7 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
             )
         }
         Text(
-            (if (ui.live) "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC." else "One tap buys ${fmtUsd(ui.tapUsd)} now (cut to the ${fmtUsd(ui.capUsd)} cap).") + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
+            (if (ui.live) "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC." else "One tap buys ${fmtUsd(ui.tapUsd)} now (" + com.dirk.nightdesk.OneTap.capHint(ui.capLine, ui.capUsd, ui.tapUsd) + ").") + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
             color = P.dim,
             fontSize = 11.5.sp,
             lineHeight = 15.sp

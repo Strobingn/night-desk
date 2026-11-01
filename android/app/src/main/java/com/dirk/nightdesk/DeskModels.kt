@@ -143,11 +143,72 @@ data class CoinLookup(
     val held: Boolean = false,
     val watching: Boolean = false,
     val canBuy: Boolean = false,
-    val buyBlockedReason: String? = null
+    val buyBlockedReason: String? = null,
+    /** v13.6 "QTFALCN · held / traded" when a ticker resolved to this coin. */
+    val matchedBy: String? = null,
+    /** v13.6 code AMBIGUOUS: several coins match a ticker/name; pick one. */
+    val query: String? = null,
+    val candidates: List<CoinCandidate> = emptyList()
 ) {
     /** Largest size the slider offers: manual max (100% with confirm) and cash, never below $1. */
     val sliderMaxUsd: Double
         get() = kotlin.math.floor(kotlin.math.min(manualMaxUsd, cashUsd).coerceAtLeast(1.0))
+}
+
+/** v13.6 one row of the ticker/name pick list. */
+data class CoinCandidate(
+    val mint: String,
+    val symbol: String,
+    val name: String,
+    val mintShort: String,
+    val liquidityUsd: Double?,
+    val volume1hUsd: Double?,
+    val held: Boolean,
+    val origin: String,
+    val exact: Boolean
+) {
+    /** "6Fpq…pump · liq $125.3K · 1h vol $34.3K · held" (same text as the web). */
+    val line: String
+        get() = "$mintShort · liq ${compactCandidate(liquidityUsd)} · 1h vol ${compactCandidate(volume1hUsd)} · " + when (origin) {
+            "position" -> "held"
+            "trade" -> "traded"
+            "tape" -> "Tape"
+            "dexscreener" -> "DexScreener"
+            else -> origin
+        }
+}
+
+fun compactCandidate(n: Double?): String {
+    if (n == null || !n.isFinite()) return "—"
+    return when {
+        n >= 1e9 -> "$" + "%.1f".format(java.util.Locale.US, n / 1e9) + "B"
+        n >= 1e6 -> "$" + "%.1f".format(java.util.Locale.US, n / 1e6) + "M"
+        n >= 1e3 -> "$" + "%.1f".format(java.util.Locale.US, n / 1e3) + "K"
+        else -> "$" + "%.0f".format(java.util.Locale.US, n)
+    }
+}
+
+fun parseCandidates(rows: org.json.JSONArray?): List<CoinCandidate> = buildList {
+    if (rows == null) return@buildList
+    for (i in 0 until rows.length()) {
+        val row = rows.optJSONObject(i) ?: continue
+        val mint = row.optText("mint")
+        if (mint.isBlank()) continue
+        fun num(key: String): Double? = if (row.has(key) && !row.isNull(key)) row.optDouble(key).takeIf { it.isFinite() } else null
+        add(
+            CoinCandidate(
+                mint = mint,
+                symbol = row.optText("symbol", mint.take(6)),
+                name = row.optText("name"),
+                mintShort = row.optText("mintShort", mint.take(4) + "…" + mint.takeLast(4)),
+                liquidityUsd = num("liquidityUsd"),
+                volume1hUsd = num("volume1hUsd"),
+                held = row.optBoolean("held", false),
+                origin = row.optText("origin"),
+                exact = row.optBoolean("exact", true)
+            )
+        )
+    }
 }
 
 fun parseLookup(raw: String): CoinLookup {
@@ -160,7 +221,9 @@ fun parseLookup(raw: String): CoinLookup {
         return CoinLookup(
             ok = false,
             error = root.optText("error", "Lookup failed. No buy without a reliable price."),
-            code = root.optText("code", "LOOKUP_FAILED")
+            code = root.optText("code", "LOOKUP_FAILED"),
+            query = root.optText("query").ifBlank { null },
+            candidates = parseCandidates(root.optJSONArray("candidates"))
         )
     }
     fun checks(key: String): List<LookupCheck> = buildList {
@@ -201,7 +264,8 @@ fun parseLookup(raw: String): CoinLookup {
         held = root.optBoolean("held", false),
         watching = root.optBoolean("watching", false),
         canBuy = root.optBoolean("canBuy", false),
-        buyBlockedReason = root.optText("buyBlockedReason").ifBlank { null }
+        buyBlockedReason = root.optText("buyBlockedReason").ifBlank { null },
+        matchedBy = root.optText("matchedBy").ifBlank { null }
     )
 }
 
@@ -293,6 +357,9 @@ data class DeskSnapshot(
     /** v13.3 exit slippage tolerance (fraction). Null = entry cap + 3%. */
     val maxExitSlippage: Double? = null,
     val manualMaxUsd: Double = 0.0,
+    /** v13.6 which limit set positionCapUsd: "position", "cash" or "exposure", and the sentence. */
+    val capBinding: String? = null,
+    val capLine: String? = null,
     val exposureUsd: Double = 0.0,
     val watchlist: List<WatchRow> = emptyList(),
     val lastClientCrash: String? = null,
@@ -717,6 +784,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         positionRefreshMs = (prefs?.optFinite("positionRefreshMs", 1_500.0) ?: 1_500.0).toLong().coerceIn(1_000L, 10_000L),
         maxExitSlippage = prefs?.let { row -> if (!row.has("maxExitSlippage") || row.isNull("maxExitSlippage")) null else row.optFinite("maxExitSlippage", Double.NaN).takeIf { it.isFinite() && it > 0 }?.let { if (it > 1) it / 100 else it }?.coerceIn(0.005, 0.5) },
         manualMaxUsd = data.optFinite("manualMaxUsd"),
+        capBinding = data.optJSONObject("capWhy")?.optText("binding")?.ifBlank { null },
+        capLine = data.optJSONObject("capWhy")?.optText("line")?.ifBlank { null },
         exposureUsd = data.optFinite("exposureUsd"),
         watchlist = parseWatchRows(data.optJSONArray("watchlist")),
         lastClientCrash = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("brief").ifBlank { null } }
