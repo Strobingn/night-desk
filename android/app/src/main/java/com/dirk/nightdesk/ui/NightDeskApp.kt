@@ -11,6 +11,8 @@ import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.graphics.Brush
 import com.dirk.nightdesk.CoinCard
 import com.dirk.nightdesk.Verdict
@@ -45,6 +47,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
@@ -129,9 +133,10 @@ private fun stageColor(stage: String): Color = when (stage) {
     else -> P.muted
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null) {
+    // v13.4 compact card: same facts and buttons as v13.1, packed into three rows so 4-5 cards fit
+    // on one phone screen. Symbol, 1h change and volume stay large; nothing was dropped.
     val vc = verdictColor(coin.verdict)
     val rank = coin.volRank
     val top = rank != null && rank <= TOP_VOLUME
@@ -142,116 +147,110 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
         top -> P.accent.copy(alpha = 0.45f)
         else -> P.line
     }
+    val ch = coin.change1h?.takeIf { it.isFinite() }
+    val chTint = when {
+        ch == null -> P.ink
+        ch > 0 -> P.up
+        ch < 0 -> P.down
+        else -> P.ink
+    }
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(P.card)
-            .border(if (selected) 2.dp else 1.dp, borderColor, RoundedCornerShape(20.dp))
+            .border(if (selected) 2.dp else 1.dp, borderColor, RoundedCornerShape(18.dp))
             .clickable(onClick = onSelect)
-            .padding(start = 16.dp, end = 14.dp, top = 14.dp, bottom = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(start = 12.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            CoinAvatar(coin.symbol, coin.mint, ring = vc, size = 46.dp)
-            Spacer(Modifier.width(12.dp))
+            CoinAvatar(coin.symbol, coin.mint, ring = vc, size = 36.dp)
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(coin.symbol, color = P.ink, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(top = 3.dp)) {
-                    Chip(coin.verdict.label, vc, vc.copy(alpha = 0.18f), size = 13)
-                    if (hot) Chip("HOT #$rank", if (P.isDark) Color(0xFF1A1000) else Color.White, if (P.isDark) P.amber else Color(0xFFB86E00), size = 13)
-                    else if (top) Chip("VOL #$rank", P.accent, P.accent.copy(alpha = 0.2f), size = 13)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Symbol is measured first so the chips never squeeze it away.
+                    Text(coin.symbol, color = P.ink, fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Row(Modifier.weight(1f, fill = false).clipToBounds(), verticalAlignment = Alignment.CenterVertically) {
+                        Chip(coin.verdict.label, vc, vc.copy(alpha = 0.18f), size = 11)
+                        if (hot) {
+                            Spacer(Modifier.width(4.dp))
+                            Chip("HOT #$rank", if (P.isDark) Color(0xFF1A1000) else Color.White, if (P.isDark) P.amber else Color(0xFFB86E00), size = 11)
+                        } else if (top) {
+                            Spacer(Modifier.width(4.dp))
+                            Chip("VOL #$rank", P.accent, P.accent.copy(alpha = 0.2f), size = 11)
+                        }
+                    }
                 }
-            }
-            coin.score?.let { sc ->
+                val sc = coin.score
                 val pass = coin.verdict == Verdict.TRADE || coin.verdict == Verdict.BOUGHT || coin.verdict == Verdict.OPEN
                 Text(
-                    "%.2f".format(Locale.US, sc),
-                    color = if (pass) P.up else P.ink,
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (pass) P.up.copy(alpha = 0.2f) else P.card3)
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                    "${coin.source ?: "scout"} · ${clock(if (coin.lastTs > 0) coin.lastTs else System.currentTimeMillis())}" +
+                        (if (sc != null) " · score " + "%.2f".format(Locale.US, sc) else ""),
+                    color = if (sc != null && pass) P.up else P.dim,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-        }
-        // Volume first: 1h volume and 1h change big on top, 5m volume and price below.
-        val ch = coin.change1h?.takeIf { it.isFinite() }
-        val chTint = when {
-            ch == null -> P.ink
-            ch > 0 -> P.up
-            ch < 0 -> P.down
-            else -> P.ink
-        }
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(P.surface)
-                .border(1.dp, P.line, RoundedCornerShape(14.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row {
-                TapeStat("1H VOLUME", coin.vol1h?.let { compact(it) } ?: "—", Modifier.weight(1f), big = true)
-                Row(Modifier.weight(1f).height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
-                    Box(Modifier.width(4.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(if (ch == null || ch == 0.0) P.card3 else chTint))
-                    Spacer(Modifier.width(10.dp))
-                    TapeStat(
-                        "1H CHANGE",
-                        if (ch == null) "—" else (if (ch > 0) "+" else if (ch < 0) "−" else "") + "%.1f%%".format(Locale.US, kotlin.math.abs(ch)),
-                        Modifier.weight(1f),
-                        big = true,
-                        tint = chTint
-                    )
-                }
-            }
-            Row {
-                TapeStat("5M VOLUME", coin.vol5m?.let { compact(it) } ?: "—", Modifier.weight(1f))
-                TapeStat("PRICE", coin.mark?.let { px(it) } ?: "—", Modifier.weight(1f).padding(start = 14.dp))
+            Spacer(Modifier.width(6.dp))
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    if (ch == null) "—" else (if (ch > 0) "+" else if (ch < 0) "−" else "") + "%.1f%%".format(Locale.US, kotlin.math.abs(ch)),
+                    color = chTint,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1
+                )
+                Text("1H CHG", color = P.dim, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
             }
         }
-        if (!coin.reason.isNullOrBlank()) {
-            Text(
-                (coin.codes.firstOrNull()?.let { "$it · " } ?: "") + coin.reason,
-                color = P.dim,
-                fontSize = 14.sp,
-                lineHeight = 19.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+        // 1h volume, 5m volume and price on one line, label then value.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TapeInline("1H VOL", coin.vol1h?.let { compact(it) } ?: "—", Modifier.weight(1f), big = true)
+            TapeInline("5M VOL", coin.vol5m?.let { compact(it) } ?: "—", Modifier.weight(0.9f))
+            TapeInline("PRICE", coin.mark?.let { com.dirk.nightdesk.TapeToolbar.shortPrice(it) } ?: "—", Modifier.weight(1.2f))
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "${coin.source ?: "scout"} · ${clock(if (coin.lastTs > 0) coin.lastTs else System.currentTimeMillis())}",
+                if (coin.reason.isNullOrBlank()) (coin.codes.firstOrNull() ?: "") else (coin.codes.firstOrNull()?.let { "$it · " } ?: "") + coin.reason,
                 color = P.dim,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                fontSize = 12.5.sp,
+                lineHeight = 15.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(end = 8.dp)
             )
             if (coin.verdict != Verdict.OPEN) {
                 if (oneTap != null) {
                     // v13.3: one tap buys now at the one-tap size; "Buy…" keeps the confirm dialog.
                     val inFlight = oneTap.buying(coin.mint)
-                    BigButton(if (inFlight) "Buying…" else oneTap.buyLabel, P.up, P.onUp, Modifier.width(118.dp), height = 46.dp, enabled = !inFlight) { oneTap.onBuy(coin.mint, coin.symbol) }
+                    BigButton(if (inFlight) "Buying…" else oneTap.buyLabel, P.up, P.onUp, Modifier.width(118.dp), height = 38.dp, enabled = !inFlight) { oneTap.onBuy(coin.mint, coin.symbol) }
                     Spacer(Modifier.width(6.dp))
-                    BigButton("Buy…", P.card3, P.ink, Modifier.width(70.dp), border = P.lineStrong, height = 46.dp, onClick = onBuy)
+                    BigButton("Buy…", P.card3, P.ink, Modifier.width(60.dp), border = P.lineStrong, height = 38.dp, onClick = onBuy)
                 } else {
-                    BigButton("Buy", P.up, P.onUp, Modifier.width(104.dp), height = 46.dp, onClick = onBuy)
+                    BigButton("Buy", P.up, P.onUp, Modifier.width(104.dp), height = 38.dp, onClick = onBuy)
                 }
             } else {
                 Chip("Holding", P.blue, P.blue.copy(alpha = 0.18f), size = 13)
                 if (oneTap != null) {
                     Spacer(Modifier.width(6.dp))
                     val inFlight = oneTap.selling(coin.mint)
-                    BigButton(if (inFlight) "Selling…" else "⚡ Sell", P.down, P.onDown, Modifier.width(92.dp), height = 46.dp, enabled = !inFlight) { oneTap.onSell(coin.mint, coin.symbol) }
+                    BigButton(if (inFlight) "Selling…" else "⚡ Sell", P.down, P.onDown, Modifier.width(92.dp), height = 38.dp, enabled = !inFlight) { oneTap.onSell(coin.mint, coin.symbol) }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TapeInline(label: String, value: String, modifier: Modifier, big: Boolean = false) {
+    Row(modifier, verticalAlignment = Alignment.Bottom) {
+        Text(label, color = P.dim, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.3.sp, maxLines = 1, modifier = Modifier.padding(bottom = 2.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(value, color = P.ink, fontSize = if (big) 16.sp else 15.sp, fontWeight = if (big) FontWeight.Black else FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -364,7 +363,7 @@ fun NightDeskApp(desk: DeskRepository) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
-            Header(status = status, live = live, mode = snap?.mode ?: "paper")
+            if (tab != 1) Header(status = status, live = live, mode = snap?.mode ?: "paper")
             snap?.feedBanner?.let { banner ->
                 StatusPill(text = "Feed: $banner", tint = Amber)
             }
@@ -411,7 +410,10 @@ fun NightDeskApp(desk: DeskRepository) {
                     onBuy = { mint, size, ignore -> scope.launch { desk.buyPosition(mint, size, ignore) } },
                     feedSources = snap?.feedSources.orEmpty(),
                     positionMints = snap?.positions.orEmpty().map { it.mint }.toSet(),
-                    oneTap = oneTap
+                    oneTap = oneTap,
+                    headerStatus = status,
+                    headerLive = live,
+                    mode = snap?.mode ?: "paper"
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -445,22 +447,25 @@ fun NightDeskApp(desk: DeskRepository) {
 }
 
 @Composable
-private fun Header(status: String, live: Boolean, mode: String) {
+private fun Header(status: String, live: Boolean, mode: String, compact: Boolean = false, subline: (@Composable () -> Unit)? = null) {
     val context = LocalContext.current
+    // v13.4: the Tape tab uses a slimmer header so the coin list gets the room.
+    val box = if (compact) 34.dp else 40.dp
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = if (compact) 6.dp else 14.dp, bottom = if (compact) 2.dp else 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(P.accent), contentAlignment = Alignment.Center) {
-            DeskIcon("moon", tint = P.onAccent, size = 20.dp)
+        Box(Modifier.size(box).clip(RoundedCornerShape(12.dp)).background(P.accent), contentAlignment = Alignment.Center) {
+            DeskIcon("moon", tint = P.onAccent, size = if (compact) 18.dp else 20.dp)
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(if (compact) 10.dp else 12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.Bottom) {
-                Text("Night", color = P.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text(" Desk", color = P.muted, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                Text("Night", color = P.ink, fontSize = if (compact) 19.sp else 22.sp, fontWeight = FontWeight.Bold)
+                Text(" Desk", color = P.muted, fontSize = if (compact) 19.sp else 22.sp, fontWeight = FontWeight.Medium)
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // v13.4: on the Tape tab the Scout line takes this spot while the feed is live.
+            if (subline != null && live) subline() else Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(7.dp).clip(CircleShape).background(if (live) P.up else P.down))
                 Spacer(Modifier.width(6.dp))
                 Text(if (live) "Feed live · $status" else status, color = P.dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -470,10 +475,10 @@ private fun Header(status: String, live: Boolean, mode: String) {
         val pref = ThemeState.pref
         Box(
             Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(14.dp))
+                .size(box)
+                .clip(RoundedCornerShape(12.dp))
                 .background(P.card)
-                .border(1.dp, P.lineStrong, RoundedCornerShape(14.dp))
+                .border(1.dp, P.lineStrong, RoundedCornerShape(12.dp))
                 .clickable { ThemeState.set(context, ThemeState.next(pref)) },
             contentAlignment = Alignment.Center
         ) {
@@ -492,7 +497,7 @@ private fun Header(status: String, live: Boolean, mode: String) {
             fontWeight = FontWeight.ExtraBold,
             fontSize = 12.sp,
             letterSpacing = 1.sp,
-            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (isLive) P.down else P.accent).padding(horizontal = 12.dp, vertical = 8.dp)
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (isLive) P.down else P.accent).padding(horizontal = 12.dp, vertical = if (compact) 6.dp else 8.dp)
         )
     }
 }
@@ -1095,7 +1100,12 @@ private fun TapeScreen(
     onBuy: (String, Double?, Boolean) -> Unit,
     feedSources: List<FeedSource> = emptyList(),
     positionMints: Set<String> = emptySet(),
-    oneTap: OneTapUi? = null
+    oneTap: OneTapUi? = null,
+    initialScoutOpen: Boolean? = null,
+    initialSheetOpen: Boolean = false,
+    headerStatus: String = "Connected",
+    headerLive: Boolean = true,
+    mode: String = "paper"
 ) {
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
@@ -1203,16 +1213,72 @@ private fun TapeScreen(
             tapeState.value = result.state
         }
     }
+    // v13.4: Scout list collapsed to one line by default, remembered on this phone.
+    var scoutOpen by remember { mutableStateOf(initialScoutOpen ?: tapePrefs.getBoolean(com.dirk.nightdesk.TapeToolbar.PREF_SCOUT_OPEN, false)) }
+    var sheetOpen by remember { mutableStateOf(initialSheetOpen) }
+    var sortMenu by remember { mutableStateOf(false) }
+    var filterMenu by remember { mutableStateOf(false) }
+    val coinFilters = listOf("all" to "All", "open" to "Open", "trade" to "Passed", "near" to "Near miss", "killed" to "Killed")
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (tapeView == "coins") "Tape" else "Activity log", color = P.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Segmented(
-                listOf("coins" to "Coins", "log" to "Raw log"),
-                tapeView,
-                icons = mapOf("coins" to "coins", "log" to "list")
-            ) { tapeView = it }
+        // v13.4 compact header: the Scout line (tap to open the full list) sits under the title.
+        Header(headerStatus, headerLive, mode, compact = true) {
+            ScoutLine(feedSources, scoutOpen) {
+                scoutOpen = !scoutOpen
+                tapePrefs.edit().putBoolean(com.dirk.nightdesk.TapeToolbar.PREF_SCOUT_OPEN, scoutOpen).apply()
+            }
         }
-        ScoutStatusCard(feedSources)
+        // v13.4 toolbar, pinned above the list: one-tap chip, sort, filter and the Coins / Raw log toggle in one row.
+        Column(
+            Modifier.fillMaxWidth().background(P.bg).padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            if (scoutOpen) ScoutStatusList(feedSources)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (tapeView == "coins" && oneTap != null) OneTapChip(oneTap, Modifier.weight(1f)) { sheetOpen = true }
+                else Text(if (tapeView == "coins") "Tape" else "Activity log", color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                if (tapeView == "coins") {
+                Spacer(Modifier.width(6.dp))
+                // v13.1 sort: Volume (default), Newest, Score. Saved on this phone only. Now a compact menu.
+                Box {
+                    ToolChip(com.dirk.nightdesk.TapeToolbar.sortChip(tapeSort), on = true) { sortMenu = true }
+                    DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }, containerColor = P.card) {
+                        TapeSort.entries.forEach { mode ->
+                            DropdownMenuItem(
+                                text = { Text((if (tapeSort == mode) "✓ " else "   ") + mode.label, color = P.ink, fontWeight = if (tapeSort == mode) FontWeight.Bold else FontWeight.Normal) },
+                                onClick = {
+                                    tapeSort = mode
+                                    tapePrefs.edit().putString("tape_sort", mode.name).apply()
+                                    sortMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
+                Box {
+                    ToolChip((coinFilters.firstOrNull { it.first == coinFilter }?.second ?: "All") + " ▾", on = coinFilter != "all") { filterMenu = true }
+                    DropdownMenu(expanded = filterMenu, onDismissRequest = { filterMenu = false }, containerColor = P.card) {
+                        coinFilters.forEach { (id, label) ->
+                            DropdownMenuItem(
+                                text = { Text((if (coinFilter == id) "✓ " else "   ") + label, color = P.ink, fontWeight = if (coinFilter == id) FontWeight.Bold else FontWeight.Normal) },
+                                onClick = {
+                                    coinFilter = id
+                                    filterMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+                }
+                Spacer(Modifier.width(6.dp))
+                IconToggle(
+                    listOf("coins" to "Coins", "log" to "Raw log"),
+                    tapeView,
+                    icons = mapOf("coins" to "coins", "log" to "list")
+                ) { tapeView = it }
+            }
+        }
         // v13.1: in Coins view each card has its own Buy, so this bar shows once a coin is picked.
         // The Raw log view always shows it, with Pause/Live for the follow behaviour.
         if (tapeView == "log" || selected != null) Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -1250,49 +1316,16 @@ private fun TapeScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = P.up, contentColor = P.onUp)
             ) { Text("Buy", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold) }
         }
-        if (tapeView == "coins" && oneTap != null) OneTapBar(oneTap, Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         if (tapeView == "coins") {
             val coins = sortCoins(
                 remember(idKey, positionMints) { coinCards(events, positionMints) }
                     .filter { coinFilter == "all" || it.verdict.name.lowercase() == coinFilter || (coinFilter == "trade" && it.verdict == Verdict.BOUGHT) },
                 tapeSort
             )
-            // v13.1 sort: Volume (default), Newest, Score. Saved on this phone only.
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Sort", color = P.dim, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                TapeSort.entries.forEach { mode ->
-                    val on = tapeSort == mode
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .height(42.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(if (on) P.accent else P.card2)
-                            .border(1.dp, if (on) P.accent else P.lineStrong, RoundedCornerShape(50))
-                            .clickable {
-                                tapeSort = mode
-                                tapePrefs.edit().putString("tape_sort", mode.name).apply()
-                            },
-                        contentAlignment = Alignment.Center
-                    ) { Text(mode.label, color = if (on) P.onAccent else P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
-                }
-            }
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf("all" to "All", "open" to "Open", "trade" to "Passed", "near" to "Near miss", "killed" to "Killed").forEach { (id, label) ->
-                    PillChip(label, coinFilter == id) { coinFilter = id }
-                }
-            }
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (coins.isEmpty()) {
                     item { Text("No coins for this filter yet. The Scout adds a card as each new pair lands.", color = P.dim, fontSize = 16.sp) }
@@ -1355,6 +1388,30 @@ private fun TapeScreen(
             }
         }
         }
+    }
+    // v13.4 One Tap sheet: the full size + slippage controls, Sell all and the fine print.
+    if (sheetOpen && oneTap != null) {
+        androidx.activity.compose.BackHandler { sheetOpen = false }
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)).clickable { sheetOpen = false })
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .background(P.bg)
+                .border(1.dp, P.lineStrong, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .clickable(enabled = false) {}
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(Modifier.align(Alignment.CenterHorizontally).width(40.dp).height(4.dp).clip(RoundedCornerShape(2.dp)).background(P.lineStrong))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("One tap", color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).padding(start = 4.dp))
+                TextButton(onClick = { sheetOpen = false }) { Text("Done", color = P.accent, fontWeight = FontWeight.Bold) }
+            }
+            OneTapBar(oneTap)
+        }
+    }
     }
     val buyMint = selected?.mint
     if (askBuy && buyMint != null) {
@@ -1641,9 +1698,51 @@ internal fun shortConnectionError(error: String?, status: String): String {
     return raw.take(90)
 }
 
-/** v12.1 Scout status: each source live, backing off with a countdown, down, or off. */
+/** v13.4 Scout status, collapsed: one line with live count, coins/min and a red count of sources that are down. */
 @Composable
-private fun ScoutStatusCard(sources: List<FeedSource>) {
+private fun ScoutLine(sources: List<FeedSource>, open: Boolean, modifier: Modifier = Modifier, onToggle: () -> Unit) {
+    // Inline under the header title; the whole line is the tap target.
+    val sum = com.dirk.nightdesk.TapeToolbar.scout(sources)
+    val down = sum.down
+    val warn = sum.slow
+    val dot = when {
+        sources.isEmpty() -> Dim
+        down > 0 -> Coral
+        warn > 0 -> Amber
+        else -> Mint
+    }
+    Row(
+        modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onToggle)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (sources.isEmpty()) "Scout" else sum.text,
+            color = P.dim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false)
+        )
+        if (down > 0) {
+            Spacer(Modifier.width(6.dp))
+            Text(sum.badge ?: "", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.clip(RoundedCornerShape(50)).background(Coral).padding(horizontal = 6.dp, vertical = 1.dp))
+        } else if (warn > 0) {
+            Spacer(Modifier.width(6.dp))
+            Text(sum.badge ?: "", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.clip(RoundedCornerShape(50)).background(Amber).padding(horizontal = 6.dp, vertical = 1.dp))
+        }
+        Text(if (open) " ▾" else " ▸", color = Dim, fontSize = 13.sp)
+    }
+}
+
+/** v12.1 Scout status: each source live, backing off with a countdown, down, or off. Shown when the line is tapped open. */
+@Composable
+private fun ScoutStatusList(sources: List<FeedSource>) {
     if (sources.isEmpty()) return
     val counting = sources.any { it.state == "backoff" && it.retryAt != null }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -1653,26 +1752,14 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
             kotlinx.coroutines.delay(1_000)
         }
     }
-    val live = sources.count { it.state == "live" }
-    var open by rememberSaveable { mutableStateOf(false) }
-    // Collapsed still lists any source that is not live, so a problem never hides.
-    val shown = if (open) sources else sources.filter { it.state == "backoff" || it.state == "down" || it.state == "stale" }
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
             .background(P.card, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Row(
-            Modifier.fillMaxWidth().clickable { open = !open }.padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Scout status", color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Text("$live/${sources.size} live · ${sources.sumOf { it.sightingsPerMin }} coins/min", color = Dim, fontSize = 12.sp)
-            Text(if (open) "  ▾" else "  ▸", color = Dim, fontSize = 14.sp)
-        }
-        shown.forEach { src ->
+        Text("Scout status", color = P.ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        sources.forEach { src ->
             val tint = when (src.state) {
                 "live" -> Mint
                 "backoff", "stale" -> Amber
@@ -1682,12 +1769,69 @@ private fun ScoutStatusCard(sources: List<FeedSource>) {
             Row(Modifier.fillMaxWidth().padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.width(8.dp).height(8.dp).background(tint, RoundedCornerShape(4.dp)))
                 Spacer(Modifier.width(8.dp))
-                Text(src.label, color = P.ink, fontSize = 13.sp, modifier = Modifier.width(98.dp), maxLines = 1)
+                Text(src.label, color = P.ink, fontSize = 13.sp, modifier = Modifier.width(112.dp).padding(end = 4.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(feedSourceStateText(src, now), color = tint, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Text(feedSourceRateText(src), color = Dim, fontSize = 11.sp, maxLines = 1)
             }
         }
     }
+}
+
+/** v13.4 slim one-tap chip: size and slippage at a glance; tap opens the One Tap sheet. */
+@Composable
+private fun OneTapChip(ui: OneTapUi, modifier: Modifier = Modifier, onOpen: () -> Unit) {
+    Row(
+        modifier
+            .clip(RoundedCornerShape(50))
+            .background(P.accent.copy(alpha = 0.16f))
+            .border(1.dp, P.accent.copy(alpha = 0.6f), RoundedCornerShape(50))
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(com.dirk.nightdesk.TapeToolbar.oneTapChip(ui.tapUsd, ui.slipPct), color = P.ink, fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Text("  ▴", color = P.accent, fontSize = 12.sp)
+    }
+}
+
+/** v13.4 Coins / Raw log toggle as two icon buttons (labels kept for TalkBack). */
+@Composable
+private fun IconToggle(options: List<Pair<String, String>>, selected: String, icons: Map<String, String>, onSelect: (String) -> Unit) {
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(P.card).border(1.dp, P.line, RoundedCornerShape(50)).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        options.forEach { (id, label) ->
+            val on = id == selected
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (on) P.accent else Color.Transparent)
+                    .clickable(onClickLabel = label) { onSelect(id) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(deskIcon(icons[id] ?: "list"), contentDescription = label, tint = if (on) P.onAccent else P.dim, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolChip(label: String, on: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        color = P.ink,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (on) P.card2 else P.card)
+            .border(1.dp, P.lineStrong, RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+    )
 }
 
 private val clockFmt: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
@@ -1696,7 +1840,7 @@ private fun clock(ts: Long): String = if (ts <= 0) "—" else clockFmt.format(In
 
 /** v13 render harness for screenshot tests: the real screens with a fixed snapshot and no network. */
 @Composable
-internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null) {
+internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null, scoutOpen: Boolean? = null, sheetOpen: Boolean = false) {
     NightTheme {
         Scaffold(
             containerColor = P.bg,
@@ -1722,7 +1866,7 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null)
             }
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
-                Header(status = "Connected", live = true, mode = snap.mode)
+                if (tab != 1) Header(status = "Connected", live = true, mode = snap.mode)
                 when (tab) {
                     0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> }, oneTap)
                     1 -> TapeScreen(
@@ -1732,7 +1876,12 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null)
                         onBuy = { _, _, _ -> },
                         feedSources = snap.feedSources,
                         positionMints = snap.positions.map { it.mint }.toSet(),
-                        oneTap = oneTap
+                        oneTap = oneTap,
+                        initialScoutOpen = scoutOpen,
+                        initialSheetOpen = sheetOpen,
+                        headerStatus = "Connected",
+                        headerLive = true,
+                        mode = snap.mode
                     )
                     else -> SettingsScreen(snap) {}
                 }

@@ -157,7 +157,7 @@ fun VerdictChip(v: Verdict) {
 }
 
 @Composable
-fun Segmented(options: List<Pair<String, String>>, selected: String, icons: Map<String, String> = emptyMap(), modifier: Modifier = Modifier, onSelect: (String) -> Unit) {
+fun Segmented(options: List<Pair<String, String>>, selected: String, icons: Map<String, String> = emptyMap(), modifier: Modifier = Modifier, compact: Boolean = false, onSelect: (String) -> Unit) {
     Row(
         modifier.clip(RoundedCornerShape(50)).background(P.card).border(1.dp, P.line, RoundedCornerShape(50)).padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -169,14 +169,14 @@ fun Segmented(options: List<Pair<String, String>>, selected: String, icons: Map<
                     .clip(RoundedCornerShape(50))
                     .background(if (on) P.accent else Color.Transparent)
                     .clickable { onSelect(id) }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                    .padding(horizontal = if (compact) 10.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 icons[id]?.let {
-                    DeskIcon(it, tint = if (on) P.onAccent else P.dim, size = 16.dp)
-                    Spacer(Modifier.width(6.dp))
+                    DeskIcon(it, tint = if (on) P.onAccent else P.dim, size = if (compact) 14.dp else 16.dp)
+                    Spacer(Modifier.width(if (compact) 4.dp else 6.dp))
                 }
-                Text(label, color = if (on) P.onAccent else P.dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(label, color = if (on) P.onAccent else P.dim, fontSize = if (compact) 12.5.sp else 13.sp, fontWeight = FontWeight.SemiBold)
             }
         }
     }

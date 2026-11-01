@@ -138,3 +138,46 @@ fun dayBase(points: List<EquityPoint>, fallback: Double, midnightMs: Long): Doub
     }
     return before ?: fallback
 }
+
+/** v13.4 Tape toolbar text (pure, unit-tested). */
+object TapeToolbar {
+    const val PREF_SCOUT_OPEN = "tape_scout_open"
+
+    data class ScoutSummary(val live: Int, val total: Int, val perMin: Int, val down: Int, val slow: Int) {
+        val text: String get() = "$live/$total live · $perMin/min"
+        val badge: String? get() = when {
+            down > 0 -> "$down down"
+            slow > 0 -> "$slow slow"
+            else -> null
+        }
+    }
+
+    fun scout(sources: List<FeedSource>): ScoutSummary = ScoutSummary(
+        live = sources.count { it.state == "live" },
+        total = sources.size,
+        perMin = sources.sumOf { it.sightingsPerMin },
+        down = sources.count { it.state == "down" },
+        slow = sources.count { it.state == "backoff" || it.state == "stale" }
+    )
+
+    fun oneTapChip(tapUsd: Double, slipPct: Double): String {
+        val size = if (tapUsd >= 100) "%.0f".format(java.util.Locale.US, tapUsd) else "%.2f".format(java.util.Locale.US, tapUsd)
+        val slip = if (slipPct == kotlin.math.floor(slipPct)) "%.0f".format(java.util.Locale.US, slipPct) else "%.1f".format(java.util.Locale.US, slipPct)
+        return "⚡ $$size · slip $slip%"
+    }
+
+    fun sortChip(sort: TapeSort): String = "↕ " + when (sort) {
+        TapeSort.VOLUME -> "Vol"
+        TapeSort.NEWEST -> "New"
+        TapeSort.SCORE -> "Score"
+    }
+
+    /** Compact card price: 4 significant digits. */
+    fun shortPrice(n: Double): String {
+        if (!n.isFinite() || n < 0) return "—"
+        if (n == 0.0) return "0"
+        if (n >= 1000) return "%.0f".format(java.util.Locale.US, n)
+        if (n >= 1) return "%.3f".format(java.util.Locale.US, n)
+        return java.math.BigDecimal(n).round(java.math.MathContext(4)).stripTrailingZeros().toPlainString()
+    }
+}
