@@ -2,7 +2,7 @@
 export const SHOCK_WINDOW_MS = 10_000;
 export const SHOCK_MOVE = 0.3;
 
-export type PriceFeed = "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing";
+export type PriceFeed = "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing" | "chain";
 
 export interface MarkOrigin {
   feed?: string;

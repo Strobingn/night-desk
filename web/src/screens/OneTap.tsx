@@ -1,3 +1,4 @@
+import { capHint } from "../tickerText";
 import { useEffect, useState } from "react";
 import { usd } from "../format";
 import type { DeskSnapshot } from "../types";
@@ -119,7 +120,7 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
         ) : null}
       </div>
       <p className="fine">
-        {live ? "LIVE: " : ""}One tap = {live ? "LIVE" : "paper"} buy {usd(actions.tapUsd)} now (cut to the {usd(snap.positionCapUsd)} cap and cash). No dialog, but the slippage cap ({slip}%), pool-depth, crash
+        {live ? "LIVE: " : ""}One tap = {live ? "LIVE" : "paper"} buy {usd(actions.tapUsd)} now ({live ? `live size, cut to the ${usd(snap.positionCapUsd)} cap and wallet USDC` : capHint(snap.capWhy, snap.positionCapUsd, actions.tapUsd)}). No dialog, but the slippage cap ({slip}%), pool-depth, crash
         guard, hard kills, cooldown and the −{(snap.rules.stopLossPct * 100).toFixed(0)}% stop all still apply. A stop cannot prevent a gap.
       </p>
     </section>

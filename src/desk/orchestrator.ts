@@ -13,6 +13,7 @@ import { scoreToken } from "../agents/analyst.js";
 import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd, maxSizeForPool, planOrder, quotePaperBuy, quotePaperSell, resolveManualSize, roundUsd, splitPosition } from "../agents/execution-math.js";
 import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
 import { resolveCoinMint } from "../market/coin-lookup.js";
+import { DexSearchClient, matchLocal, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
 import { enrichSighting } from "../market/enrich.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
@@ -26,7 +27,7 @@ import { phraseAdvice } from "./commentary.js";
 import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump, markUnusable, needsShockConfirm, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
-import { ChainMarkReader } from "../market/chain-marks.js";
+import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR } from "../market/chain-marks.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { DeskStore } from "../store/db.js";
@@ -47,6 +48,7 @@ import type {
   ManualBuyResult,
   PipelineCounts,
   Position,
+  CapWhy,
   PositionView,
   WatchItem,
   WalletView,
@@ -179,6 +181,8 @@ export class Desk {
   private readonly scout: Scout;
   private readonly replay: ReplayFeed;
   private readonly pricer: PositionPricer;
+  /** v13.6 on-chain pool/curve reader on the desk's private RPC (SOLANA_RPC_URL), shared by held marks and curve pricing. */
+  private readonly chain: ChainMarkReader | undefined;
   private readonly rugs: LayeredRugRegistry;
   private readonly advisor: AdvisorBook;
   private advice: AdviceNote[] = [];
@@ -217,6 +221,11 @@ export class Desk {
   /** Add-coin lookups by mint. Manual buys of these mints use the lookup's pool and platform tag. */
   private readonly lookups = new Map<string, { at: number; platform: string; token: CandidateToken }>();
   private watchlist: WatchItem[] = [];
+  /** v13.6 ticker search (own spacing, cache and 429 backoff). */
+  private dexSearch: DexSearchClient | null = null;
+  private solUsdCache: { value: number; at: number } | null = null;
+  private readonly curveQueue = new Set<string>();
+  private curveTimer: NodeJS.Timeout | null = null;
   private watchTimer: NodeJS.Timeout | null = null;
   private lastClientCrash: { at: number; version: string; brief: string } | null = null;
   private readonly lookupFetch: typeof fetch;
@@ -381,6 +390,12 @@ export class Desk {
     this.scout.setSources(this.scoutSources);
     this.feed = { ...this.scout.status };
     this.replay = new ReplayFeed(this.scout);
+    // v13.6: held-coin pool reads use the desk's own RPC (.env SOLANA_RPC_URL). The public
+    // mainnet-beta RPC 429'd these every few seconds on Austin, so marks fell back to Jupiter.
+    this.chain =
+      deps.chainFetch || (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch)
+        ? new ChainMarkReader(config.walletRpcUrl || config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
+        : undefined;
     this.pricer = new PositionPricer({
       heldMints: () => [...this.book.positions.values()].filter((pos) => pos.source !== "replay").map((pos) => pos.mint),
       tick: (mint, priceUsd, quote) =>
@@ -394,10 +409,7 @@ export class Desk {
       pollMs: () => this.positionRefreshMs,
       pairFor: (mint) => this.book.positions.get(mint)?.pairAddress,
       live: (mint, priceUsd, origin) => this.liveMark(mint, priceUsd, origin),
-      chain:
-        deps.chainFetch || (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch)
-          ? new ChainMarkReader(config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
-          : undefined,
+      chain: this.chain,
       onStale: (mint, silentMs) => {
         const pos = this.book.positions.get(mint);
         this.log({
@@ -856,13 +868,175 @@ export class Desk {
   }
 
   /**
+   * v13.6 price a coin from its pump.fun bonding curve on-chain (exact SOL reserves × a fresh
+   * SOL/USD). Null + reason when there is no readable, live curve or no fresh SOL/USD.
+   */
+  async curvePrice(mint: string): Promise<{ ok: true; priceUsd: number; liquidityUsd: number; curve: string } | { ok: false; reason: string }> {
+    if (!this.chain) return { ok: false, reason: "on-chain reads are off in this mode" };
+    let read: Awaited<ReturnType<ChainMarkReader["readCurves"]>>;
+    try {
+      read = await this.chain.readCurves([mint]);
+    } catch (err) {
+      return { ok: false, reason: `the RPC read failed (${err instanceof Error ? err.message : String(err)})` };
+    }
+    const q = read.quotes.get(mint);
+    if (!q) return { ok: false, reason: read.missing.get(mint) ?? "no pump.fun bonding curve on-chain for it" };
+    const sol = await this.solUsd();
+    if (!sol) return { ok: false, reason: "no fresh SOL/USD price to convert the curve price" };
+    const priceUsd = q.native * sol;
+    const liquidityUsd = 2 * q.virtualSol * sol;
+    if (!(priceUsd > 0) || !Number.isFinite(priceUsd) || !(liquidityUsd > 0)) return { ok: false, reason: "the bonding curve is empty" };
+    return { ok: true, priceUsd, liquidityUsd, curve: q.curve };
+  }
+
+  /** SOL/USD no older than 2 minutes: the held-mark loop's, else one Jupiter call. */
+  private async solUsd(): Promise<number | null> {
+    const held = this.pricer.quotes.solUsd;
+    if (held && Date.now() - held.at <= 120_000 && held.value > 0) return held.value;
+    if (this.solUsdCache && Date.now() - this.solUsdCache.at <= 60_000) return this.solUsdCache.value;
+    try {
+      const quotes = await fetchJupiterQuotes([SOL_MINT_ADDR], this.lookupFetch);
+      const v = quotes.get(SOL_MINT_ADDR)?.priceUsd;
+      if (v && v > 0 && Number.isFinite(v)) {
+        this.solUsdCache = { value: v, at: Date.now() };
+        return v;
+      }
+    } catch {
+      /* fail closed */
+    }
+    return null;
+  }
+
+  /** v13.6 Tape: pump.fun sightings printed with "Mark 0" get priced from their curve. */
+  private queueCurvePrice(mint: string): void {
+    if (!this.chain || this.curveQueue.size >= 60) return;
+    this.curveQueue.add(mint);
+    if (this.curveTimer) return;
+    this.curveTimer = setTimeout(() => {
+      this.curveTimer = null;
+      const mints = [...this.curveQueue].slice(0, 40);
+      for (const m of mints) this.curveQueue.delete(m);
+      this.track(this.priceCurves(mints));
+    }, 1_000);
+    this.curveTimer.unref?.();
+  }
+
+  private async priceCurves(mints: string[]): Promise<void> {
+    if (!this.chain || !mints.length) return;
+    let read: Awaited<ReturnType<ChainMarkReader["readCurves"]>>;
+    try {
+      read = await this.chain.readCurves(mints);
+    } catch {
+      return;
+    }
+    if (!read.quotes.size) return;
+    const sol = await this.solUsd();
+    if (!sol) return;
+    for (const q of read.quotes.values()) {
+      const seen = this.sightings.get(q.mint);
+      if (!seen || seen.priceUsd > 0) continue;
+      const priceUsd = q.native * sol;
+      const liquidityUsd = 2 * q.virtualSol * sol;
+      if (!(priceUsd > 0) || !Number.isFinite(priceUsd)) continue;
+      this.sightings.set(q.mint, { ...seen, priceUsd, liquidityUsd: seen.liquidityUsd > 0 ? seen.liquidityUsd : liquidityUsd });
+      this.log({
+        stage: "scout",
+        kind: "info",
+        mint: q.mint,
+        symbol: seen.symbol,
+        message: `Scout priced ${seen.symbol} from its pump.fun bonding curve on-chain. Mark ${price(priceUsd)}, 1h volume ${money(seen.volume1hUsd)}, curve depth ${money(liquidityUsd)}.`,
+        detail: seen.source
+      });
+    }
+  }
+
+  /**
+   * v13.6 Add coin by ticker or name ($ optional, any case). Held and traded coins first,
+   * then the Tape, then DexScreener search. One coin → the normal lookup card;
+   * several → code AMBIGUOUS with a pick list (HTTP 200 so old apps still show the text).
+   */
+  async lookupTicker(query: string): Promise<CoinLookup | CoinLookupError> {
+    const heldMints = this.heldMintsAllBooks();
+    const tier1: LocalCoin[] = [];
+    for (const pos of this.book.positions.values()) {
+      tier1.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: true, origin: "position" });
+    }
+    for (const pos of this.otherBookPositions()) {
+      tier1.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: true, origin: "position" });
+    }
+    const trades = this.store.recentClosed(200).reverse();
+    for (const trade of trades) tier1.push({ mint: trade.mint, symbol: trade.symbol, held: heldMints.has(trade.mint), origin: "trade" });
+    const enrich = (rows: TickerCandidate[]): TickerCandidate[] =>
+      rows.map((row) => {
+        const seen = this.sightings.get(row.mint) ?? this.lookups.get(row.mint)?.token;
+        return {
+          ...row,
+          name: row.name || seen?.name || "",
+          liquidityUsd: seen && seen.liquidityUsd > 0 ? seen.liquidityUsd : row.liquidityUsd,
+          volume1hUsd: seen && Number.isFinite(seen.volume1hUsd) ? seen.volume1hUsd : row.volume1hUsd,
+          held: heldMints.has(row.mint)
+        };
+      });
+    const pick = async (rows: TickerCandidate[], where: string): Promise<CoinLookup | CoinLookupError> => {
+      if (rows.length === 1 && rows[0]!.exact) {
+        const found = await this.lookupCoin(rows[0]!.mint);
+        return found.ok ? { ...found, matchedBy: `${query.toUpperCase()} · ${where}` } : found;
+      }
+      return {
+        ok: false,
+        code: "AMBIGUOUS",
+        query,
+        error: `${rows.length} coin${rows.length === 1 ? "" : "s"} match “${query}” (${where}). Tap the one you mean.`,
+        candidates: rows
+      };
+    };
+    const local1 = enrich(matchLocal(query, tier1));
+    if (local1.length) return pick(local1, local1.some((r) => r.held) ? "held / traded" : "traded before");
+    const tier2: LocalCoin[] = [];
+    for (const token of this.sightings.values()) tier2.push({ mint: token.mint, symbol: token.symbol, name: token.name, liquidityUsd: token.liquidityUsd, volume1hUsd: token.volume1hUsd, origin: "tape" });
+    for (const entry of this.lookups.values()) tier2.push({ mint: entry.token.mint, symbol: entry.token.symbol, name: entry.token.name, liquidityUsd: entry.token.liquidityUsd, volume1hUsd: entry.token.volume1hUsd, origin: "tape" });
+    for (const item of this.watchlist) tier2.push({ mint: item.mint, symbol: item.symbol, name: item.name, origin: "tape" });
+    const local2 = enrich(matchLocal(query, tier2)).sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0));
+    if (local2.length) return pick(local2.slice(0, 8), "on the Tape");
+    this.dexSearch ??= new DexSearchClient(this.lookupFetch);
+    const searched = await this.dexSearch.search(query);
+    if (!searched.ok) return { ok: false, error: searched.error, code: "LOOKUP_FAILED" };
+    const ranked = rankDexSearch(query, searched.body, heldMints);
+    if (!ranked.length) {
+      return { ok: false, error: `No Solana coin called “${query}” in your positions, trades, the Tape or DexScreener search. Paste the mint or a link.`, code: "LOOKUP_FAILED" };
+    }
+    if (!ranked.some((r) => r.exact)) return { ok: false, code: "AMBIGUOUS", query, error: `No exact “${query}” on Solana. Close matches below; tap one.`, candidates: ranked };
+    return pick(ranked, "DexScreener search");
+  }
+
+  private heldMintsAllBooks(): Set<string> {
+    const out = new Set<string>(this.book.positions.keys());
+    for (const pos of this.otherBookPositions()) out.add(pos.mint);
+    return out;
+  }
+
+  /** Positions saved in the other mode's book (live when paper, paper when live). Read-only. */
+  private otherBookPositions(): Position[] {
+    try {
+      const other = this.store.loadBook(this.config.mode === "live" ? "book" : "book:live");
+      return Array.isArray(other?.positions) ? other!.positions : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Add coin: parse a mint or link, resolve it to a Solana mint, read price/pool/holders/mint
    * authority the same way Scout does, and run the existing Filter and Analyst as a report.
    * No price from DexScreener means an error and no buy.
    */
   async lookupCoin(q: string): Promise<CoinLookup | CoinLookupError> {
     const parsed = parseCoinInput(q);
-    if (!parsed.ok) return { ok: false, error: parsed.error, code: "LOOKUP_FAILED" };
+    if (!parsed.ok) {
+      const ticker = tickerQuery(q);
+      if (ticker) return this.lookupTicker(ticker);
+      return { ok: false, error: parsed.error, code: "LOOKUP_FAILED" };
+    }
     const resolved = await resolveCoinMint(parsed, this.lookupFetch);
     if (!resolved.ok) return { ok: false, error: resolved.error, code: "LOOKUP_FAILED", platform: parsed.platform };
     const mint = resolved.mint;
@@ -876,7 +1050,8 @@ export class Desk {
       const message = err instanceof Error ? err.message : String(err);
       return { ok: false, error: `Could not read that coin (${message}). Buy is off.`, code: "LOOKUP_FAILED", platform: parsed.platform, mint };
     }
-    let priceSource: "dexscreener" | "jupiter" = "dexscreener";
+    let priceSource: "dexscreener" | "jupiter" | "chain" = "dexscreener";
+    let curveWhy: string | null = null;
     if (token.priceFeed !== "dexscreener" || !(token.liquidityUsd > 0)) {
       // Pump curve coins: DexScreener shows a price but no pool depth. Jupiter (the same feed
       // the desk marks held coins with) gives both. Fail closed when the two disagree.
@@ -888,12 +1063,25 @@ export class Desk {
         priceSource = "jupiter";
       } else if (fallback.error) {
         return { ok: false, error: fallback.error, code: "PRICE_UNAVAILABLE", platform: parsed.platform, mint };
+      } else if (!(token.priceUsd > 0) || !(token.liquidityUsd > 0)) {
+        // v13.6: a brand-new pump.fun coin: price it from its bonding curve on-chain.
+        const curve = await this.curvePrice(mint);
+        if (curve.ok) {
+          token.priceUsd = curve.priceUsd;
+          token.liquidityUsd = curve.liquidityUsd;
+          token.priceFeed = "chain";
+          token.pairAddress = curve.curve;
+          token.dex = "pump.fun curve";
+          priceSource = "chain";
+        } else {
+          curveWhy = curve.reason;
+        }
       }
     }
-    if (!(token.priceUsd > 0) || !Number.isFinite(token.priceUsd) || (token.priceFeed !== "dexscreener" && token.priceFeed !== "jupiter") || !(token.liquidityUsd > 0)) {
+    if (!(token.priceUsd > 0) || !Number.isFinite(token.priceUsd) || (token.priceFeed !== "dexscreener" && token.priceFeed !== "jupiter" && token.priceFeed !== "chain") || !(token.liquidityUsd > 0)) {
       return {
         ok: false,
-        error: `No reliable price for ${token.symbol || mint.slice(0, 6)}. Neither DexScreener nor Jupiter has a priced Solana pool with depth for it, so Buy is off.`,
+        error: `No reliable price for ${token.symbol || mint.slice(0, 6)}. Tried DexScreener (no priced pool with depth), Jupiter (no quote) and the pump.fun bonding curve on-chain (${curveWhy ?? "not readable"}). Buy is off.`,
         code: "PRICE_UNAVAILABLE",
         platform: parsed.platform,
         mint
@@ -1071,17 +1259,30 @@ export class Desk {
     }
     const priceUsd = this.book.price(cleaned, seen.priceUsd);
     const liquidityUsd = this.markLiquidity.get(cleaned) ?? seen.liquidityUsd;
-    const token: CandidateToken = { ...seen, priceUsd, liquidityUsd };
+    let token: CandidateToken = { ...seen, priceUsd, liquidityUsd };
     if (!(token.priceUsd > 0) || !Number.isFinite(token.priceUsd)) {
-      this.log({
-        stage: "executor",
-        kind: "reject",
-        mint: token.mint,
-        symbol: token.symbol,
-        code: "PRICE_UNAVAILABLE",
-        message: `Manual buy refused for ${token.symbol}. No usable price.`
-      });
-      return { ok: false, error: "No usable price. Buy refused.", code: "PRICE_UNAVAILABLE" };
+      // v13.6: brand-new pump.fun coins have no DexScreener pair and no Jupiter quote yet.
+      // Read the bonding curve on-chain; fail closed if it is missing, complete or empty.
+      const tried: string[] = [];
+      const jup = await jupiterLookupQuote(cleaned, 0, this.lookupFetch);
+      if (jup.ok) {
+        token = { ...token, priceUsd: jup.priceUsd, liquidityUsd: jup.liquidityUsd, priceFeed: "jupiter", pairAddress: undefined };
+      } else {
+        tried.push(`Jupiter has no quote${jup.error ? ` (${jup.error})` : ""}`);
+        const curve = await this.curvePrice(cleaned);
+        if (curve.ok) {
+          token = { ...token, priceUsd: curve.priceUsd, liquidityUsd: curve.liquidityUsd, priceFeed: "chain", pairAddress: curve.curve, dex: "pump.fun curve" };
+          this.remember(token);
+          this.log({ stage: "system", kind: "info", mint: cleaned, symbol: token.symbol, code: "MANUAL_BUY", message: `${token.symbol} has no DexScreener or Jupiter price yet. Priced from its pump.fun bonding curve on-chain: ${price(curve.priceUsd)}, curve depth ${money(curve.liquidityUsd)}. Stops follow the same curve.` });
+        } else {
+          tried.push(`pump.fun bonding curve: ${curve.reason}`);
+        }
+      }
+      if (!(token.priceUsd > 0) || !Number.isFinite(token.priceUsd)) {
+        const message = `No price for ${token.symbol} yet, so the buy was refused. Tried: DexScreener (no priced pair yet), ${tried.join(", ")}. The desk never fills without a real price. Try again in a minute, or paste its mint in Add coin.`;
+        this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "PRICE_UNAVAILABLE", message: `Manual buy refused. ${message}` });
+        return { ok: false, error: message, code: "PRICE_UNAVAILABLE" };
+      }
     }
     this.log({
       stage: "system",
@@ -1238,6 +1439,7 @@ export class Desk {
       watchlist: this.watchlist.map((item) => ({ ...item })),
       exposureUsd: roundUsd(this.exposureUsd()),
       manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
+      capWhy: this.capWhy(riskEquityUsd),
       lastClientCrash: this.lastClientCrash,
       markLoop: this.pricer.stats()
     };
@@ -1262,6 +1464,7 @@ export class Desk {
         message: `Scout found ${token.symbol} on ${token.source}. Mark ${price(token.priceUsd)}, 1h volume ${money(token.volume1hUsd)}${scoutExtras(token)}.`,
         detail: token.source
       });
+      if (!(token.priceUsd > 0) && token.source === "pumpfun") this.queueCurvePrice(token.mint);
       const job = this.runFilter(token, prior);
       this.track(job);
     });
@@ -1732,7 +1935,7 @@ export class Desk {
       liquidityUsd: token.liquidityUsd,
       decimals: token.decimals,
       priceFeed: token.priceFeed,
-      pairAddress: token.priceFeed === "dexscreener" ? token.pairAddress : undefined,
+      pairAddress: token.priceFeed === "dexscreener" || token.priceFeed === "chain" ? token.pairAddress : undefined,
       dex: token.dex,
       tradeId: fill.id,
       ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {}),
@@ -2205,6 +2408,11 @@ export class Desk {
     }
     this.livePending.delete(mint);
     this.liveMarks.set(mint, { price: priceUsd, at: origin.at || now, feed: origin.feed });
+    if (pos.priceFeed === "chain" && pos.pairAddress && origin.pairAddress === pos.pairAddress) {
+      // v13.6: the entry itself was priced from this curve/pool, so it is the stop source.
+      this.applyMark(mint, priceUsd, { feed: "chain", pairAddress: origin.pairAddress, dex: origin.kind });
+      return;
+    }
     const risk = this.book.price(mint, pos.entryPrice);
     const seen = assessPosition(pos, risk, this.config.rules, { liveTrailPct: this.liveTrailFor(pos) });
     const stop = pos.live && seen.trailHintPrice != null ? Math.max(seen.stopPrice, seen.trailHintPrice) : seen.stopPrice;
@@ -2328,6 +2536,29 @@ export class Desk {
     const cash = floorUsd(Math.max(0, this.book.cashUsd));
     const room = this.exposureRoomUsd(equityUsd);
     return Math.max(0, Math.min(cap, cash, room == null ? Number.POSITIVE_INFINITY : floorUsd(Math.max(0, room))));
+  }
+
+  /**
+   * v13.6 Which limit sets positionCapUsd, in words. The cap is the smallest of the
+   * per-position % of equity, cash, and the max-exposure room left.
+   */
+  capWhy(equityUsd = this.book.equity(), pct = Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct)): CapWhy {
+    const eq = Math.max(0, equityUsd);
+    const pctCapUsd = floorUsd(eq * pct);
+    const cashUsd = floorUsd(Math.max(0, this.book.cashUsd));
+    const room = this.exposureRoomUsd(equityUsd);
+    const roomUsd = room == null ? null : floorUsd(Math.max(0, room));
+    const capUsd = Math.max(0, Math.min(pctCapUsd, cashUsd, roomUsd ?? Number.POSITIVE_INFINITY));
+    const binding: CapWhy["binding"] = roomUsd != null && roomUsd <= pctCapUsd && roomUsd <= cashUsd ? "exposure" : cashUsd < pctCapUsd ? "cash" : "position";
+    const m = (n: number) => `$${n.toFixed(2)}`;
+    const exposureUsd = roundUsd(this.exposureUsd());
+    const line =
+      binding === "exposure"
+        ? `exposure cap: max exposure ${(this.maxExposurePct * 100).toFixed(0)}% × ${m(eq)} equity = ${m(eq * this.maxExposurePct)}, minus ${m(exposureUsd)} already in open positions = ${m(capUsd)} room`
+        : binding === "cash"
+          ? `cash: only ${m(cashUsd)} cash left (per-position cap ${(pct * 100).toFixed(1)}% would be ${m(pctCapUsd)})`
+          : `per-position cap: ${(pct * 100).toFixed(1)}% × ${m(eq)} equity = ${m(pctCapUsd)}`;
+    return { capUsd, binding, pctCapUsd, cashUsd, exposureRoomUsd: roomUsd, maxExposurePct: this.maxExposurePct, exposureUsd, equityUsd: roundUsd(eq), line };
   }
 
   /** Market value of open positions. */

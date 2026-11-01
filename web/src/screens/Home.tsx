@@ -191,7 +191,11 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
       <header>
         <CoinAvatar symbol={pos.symbol} mint={pos.mint} tone={tone(pos.pnlUsd)} />
         <div className="pos-title">
-          <h3>{pos.symbol}</h3>
+          <h3>
+            <button className="pos-open" type="button" title={`Open the ${pos.symbol} coin card`} onClick={() => actions.openAddCoin(pos.mint)}>
+              {pos.symbol} <span aria-hidden="true">›</span>
+            </button>
+          </h3>
           <p className="sub">
             {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
             {pos.lpUnlocked ? " · LP unlocked" : ""}

@@ -75,7 +75,7 @@ export interface CandidateToken {
   pairAddress?: string;
   dex?: string;
   /** Feed that actually priced this candidate. A later mark from another feed is ignored. */
-  priceFeed?: "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing";
+  priceFeed?: "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing" | "chain";
   priceUsd: number;
   liquidityUsd: number;
   volume1hUsd: number;
@@ -192,7 +192,7 @@ export interface Position {
   liquidityUsd: number;
   decimals?: number | null;
   /** Feed that priced the entry. Stops ignore every other feed. */
-  priceFeed?: "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing";
+  priceFeed?: "dexscreener" | "jupiter" | "gecko" | "scout" | "replay" | "listing" | "chain";
   /** Pool that priced the entry. A different pair cannot mark or stop the position. */
   pairAddress?: string;
   dex?: string;
@@ -464,7 +464,7 @@ export interface CoinLookup {
   dex: string | null;
   dexscreenerUrl: string;
   /** Where the price came from. Pump curve coins price off Jupiter (cross-checked with DexScreener). */
-  priceSource: "dexscreener" | "jupiter";
+  priceSource: "dexscreener" | "jupiter" | "chain";
   checks: Array<{ code: string; pass: boolean; message: string }>;
   filterPass: boolean;
   hardKills: Array<{ code: string; message: string }>;
@@ -479,14 +479,45 @@ export interface CoinLookup {
   watching: boolean;
   canBuy: boolean;
   buyBlockedReason: string | null;
+  /** v13.6 set when a ticker/name resolved to this coin, e.g. "QTFALCN · held / traded". */
+  matchedBy?: string;
+}
+
+/** v13.6 which limit set the buy cap, in words, for the one-tap hint. */
+export interface CapWhy {
+  capUsd: number;
+  binding: "position" | "cash" | "exposure";
+  pctCapUsd: number;
+  cashUsd: number;
+  exposureRoomUsd: number | null;
+  maxExposurePct: number;
+  exposureUsd: number;
+  equityUsd: number;
+  line: string;
+}
+
+/** v13.6 one row of a ticker/name pick list. */
+export interface CoinCandidate {
+  mint: string;
+  symbol: string;
+  name: string;
+  mintShort: string;
+  liquidityUsd: number | null;
+  volume1hUsd: number | null;
+  held: boolean;
+  origin: "position" | "trade" | "tape" | "dexscreener";
+  exact: boolean;
 }
 
 export interface CoinLookupError {
   ok: false;
   error: string;
-  code: "LOOKUP_FAILED" | "PRICE_UNAVAILABLE";
+  /** AMBIGUOUS (v13.6): several coins match a ticker/name; pick one from candidates. */
+  code: "LOOKUP_FAILED" | "PRICE_UNAVAILABLE" | "AMBIGUOUS";
   platform?: string;
   mint?: string;
+  query?: string;
+  candidates?: CoinCandidate[];
 }
 
 /** v12 watchlist row. Persisted in the desk store under data/. */
@@ -572,6 +603,8 @@ export interface DeskSnapshot {
   exposureUsd: number;
   /** v12. Largest single confirmed manual buy right now: min(equity × 100%, cash, exposure room). */
   manualMaxUsd: number;
+  /** v13.6 which limit set positionCapUsd. */
+  capWhy?: CapWhy;
   /** v13.2 held-position price loop: cycle length and each source's last success / cool-off. */
   markLoop?: {
     pollMs: number;

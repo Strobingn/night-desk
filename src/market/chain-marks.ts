@@ -2,8 +2,10 @@
  * v13.2 on-chain marks for held coins. One batched getMultipleAccounts call per cycle reads
  * the reserves of the exact pool the position is anchored to:
  * - pump.fun bonding curve (program 6EF8…): virtual SOL / virtual token reserves.
- * - PumpSwap pool (program pAMM…): quote (WSOL) vault / base vault balances.
- * Anything else (Raydium, Meteora, unknown) is unsupported and simply not read.
+ * - PumpSwap pool (program pAMM…): WSOL vault / token vault balances. v13.6: either side
+ *   may be WSOL (Dirk's QTFALCN pool has base = WSOL, quote = the coin; v13.2 refused it).
+ * - v13.6 Raydium AMM v4 (675k…) and Raydium CPMM (CPMM…): WSOL vault / token vault.
+ * Meteora DLMM (bins) and anything else is unsupported and simply not read.
  *
  * These are SOL-per-token reserve ratios, not USD, and not the same number DexScreener
  * or Jupiter print (PumpSwap reads ~11% under them). The pricer calibrates them, and the
@@ -11,12 +13,15 @@
  * move the stop, the peak, or a fill on their own.
  */
 import { SourceGate } from "./source-gate.js";
+import { pumpReserveAddresses } from "./exclusions.js";
 
 type FetchLike = typeof fetch;
 
 export const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 export const PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+export const RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+export const RAYDIUM_CPMM = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP7C";
 const MAX_ACCOUNTS = 100;
 /** A migrated curve or a missing account is looked at again after this. */
 const RERESOLVE_MS = 60_000;
@@ -61,14 +66,16 @@ function u64(buf: Uint8Array, offset: number): number {
   return Number(new DataView(buf.buffer, buf.byteOffset + offset, 8).getBigUint64(0, true));
 }
 
-export type PoolKind = "curve" | "pumpswap";
+export type PoolKind = "curve" | "pumpswap" | "raydium" | "cpmm";
 
 export interface PoolInfo {
   kind: PoolKind;
   pair: string;
   mint: string;
   decimals: number;
+  /** The coin's vault. */
   baseVault?: string;
+  /** The WSOL vault. */
   quoteVault?: string;
 }
 
@@ -106,6 +113,39 @@ export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMi
   };
 }
 
+/** Raydium AMM v4: base vault @336, quote vault @368, base mint @400, quote mint @432 (752 bytes). */
+export function parseRaydiumV4(data: Uint8Array): { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string } | null {
+  if (data.length < 464) return null;
+  return {
+    baseVault: base58(data.subarray(336, 368)),
+    quoteVault: base58(data.subarray(368, 400)),
+    baseMint: base58(data.subarray(400, 432)),
+    quoteMint: base58(data.subarray(432, 464))
+  };
+}
+
+/** Raydium CPMM: token0 vault @72, token1 vault @104, token0 mint @168, token1 mint @200. */
+export function parseCpmm(data: Uint8Array): { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string } | null {
+  if (data.length < 232) return null;
+  return {
+    baseVault: base58(data.subarray(72, 104)),
+    quoteVault: base58(data.subarray(104, 136)),
+    baseMint: base58(data.subarray(168, 200)),
+    quoteMint: base58(data.subarray(200, 232))
+  };
+}
+
+/** Coin vault and WSOL vault of a two-sided pool, whichever side WSOL is on. Null if it is not coin/WSOL. */
+export function solSides(
+  pool: { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string } | null,
+  mint: string
+): { tokenVault: string; solVault: string } | null {
+  if (!pool) return null;
+  if (pool.baseMint === mint && pool.quoteMint === WSOL_MINT) return { tokenVault: pool.baseVault, solVault: pool.quoteVault };
+  if (pool.baseMint === WSOL_MINT && pool.quoteMint === mint) return { tokenVault: pool.quoteVault, solVault: pool.baseVault };
+  return null;
+}
+
 /** SPL token account (classic or 2022): mint @0, owner @32, amount u64 @64. */
 export function tokenAmount(data: Uint8Array): number {
   return u64(data, 64);
@@ -116,6 +156,25 @@ export function mintDecimals(data: Uint8Array): number | null {
   if (data.length < 45) return null;
   const d = data[44]!;
   return d <= 12 ? d : null;
+}
+
+/** v13.6 one on-demand pump.fun bonding-curve read. */
+export interface CurveQuote {
+  mint: string;
+  /** Bonding-curve PDA (the "pair" a curve-priced position anchors to). */
+  curve: string;
+  /** SOL per whole token. */
+  native: number;
+  /** Virtual SOL reserve, SOL. Constant-product depth of the curve. */
+  virtualSol: number;
+  complete: boolean;
+  decimals: number;
+}
+
+/** The pump.fun bonding-curve PDA for a mint, or null when it cannot be derived. */
+export function pumpCurveAddress(mint: string): string | null {
+  const curve = pumpReserveAddresses(mint)[0];
+  return curve ?? null;
 }
 
 export class ChainMarkReader {
@@ -183,15 +242,65 @@ export class ChainMarkReader {
         this.pools.set(pair, { kind: "curve", pair, mint, decimals });
         return;
       }
-      if (acc.owner === PUMPSWAP_PROGRAM) {
-        const pool = parsePumpSwapPool(data);
-        if (pool && pool.baseMint === mint && pool.quoteMint === WSOL_MINT) {
-          this.pools.set(pair, { kind: "pumpswap", pair, mint, decimals, baseVault: pool.baseVault, quoteVault: pool.quoteVault });
+      const amm: Array<[string, PoolKind, (d: Uint8Array) => ReturnType<typeof parsePumpSwapPool>]> = [
+        [PUMPSWAP_PROGRAM, "pumpswap", parsePumpSwapPool],
+        [RAYDIUM_AMM_V4, "raydium", parseRaydiumV4],
+        [RAYDIUM_CPMM, "cpmm", parseCpmm]
+      ];
+      for (const [owner, kind, parse] of amm) {
+        if (acc.owner !== owner) continue;
+        const sides = solSides(parse(data), mint);
+        if (sides) {
+          this.pools.set(pair, { kind, pair, mint, decimals, baseVault: sides.tokenVault, quoteVault: sides.solVault });
           return;
         }
       }
       this.pools.set(pair, { unsupported: true, at: now });
     });
+  }
+
+  /**
+   * v13.6 on-demand pump.fun curve reads (manual buy with no feed price, Tape cards with
+   * "Mark 0"). One getMultipleAccounts for curves + mints. Missing, non-pump, empty or
+   * unparsable curves are simply absent from the result: callers stay fail-closed.
+   */
+  async readCurves(mints: string[]): Promise<{ quotes: Map<string, CurveQuote>; missing: Map<string, string> }> {
+    const quotes = new Map<string, CurveQuote>();
+    const missing = new Map<string, string>();
+    const rows = mints
+      .filter((m) => isPubkey(m))
+      .map((mint) => ({ mint, curve: pumpCurveAddress(mint) }))
+      .filter((r): r is { mint: string; curve: string } => {
+        if (!r.curve) missing.set(r.mint, "no pump.fun curve address");
+        return !!r.curve;
+      });
+    if (!rows.length) return { quotes, missing };
+    const accounts = await this.rpc([...rows.map((r) => r.curve), ...rows.map((r) => r.mint)]);
+    rows.forEach(({ mint, curve }, i) => {
+      const acc = accounts[i];
+      const mintAcc = accounts[rows.length + i];
+      if (!acc || acc.owner !== PUMP_PROGRAM) {
+        missing.set(mint, "no pump.fun bonding curve on-chain for it");
+        return;
+      }
+      const decimals = mintAcc ? mintDecimals(Buffer.from(mintAcc.data[0], "base64")) : null;
+      if (decimals == null) {
+        missing.set(mint, "its mint account could not be read");
+        return;
+      }
+      const data = Buffer.from(acc.data[0], "base64");
+      const parsed = parseCurve(data, decimals);
+      if (!parsed || !(parsed.native > 0) || !Number.isFinite(parsed.native)) {
+        missing.set(mint, "the bonding curve is empty");
+        return;
+      }
+      if (parsed.complete) {
+        missing.set(mint, "the bonding curve is complete (the coin migrated to a pool)");
+        return;
+      }
+      quotes.set(mint, { mint, curve, native: parsed.native, virtualSol: u64(data, 16) / 1e9, complete: false, decimals });
+    });
+    return { quotes, missing };
   }
 
   /**

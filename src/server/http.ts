@@ -207,7 +207,7 @@ export function startServer(
       if (url.pathname === "/api/lookup" && req.method === "GET") {
         const q = url.searchParams.get("q") ?? "";
         const result = await desk.lookupCoin(q);
-        return json(res, result.ok ? 200 : result.code === "PRICE_UNAVAILABLE" ? 422 : 400, result);
+        return json(res, result.ok || result.code === "AMBIGUOUS" ? 200 : result.code === "PRICE_UNAVAILABLE" ? 422 : 400, result);
       }
       if (url.pathname === "/api/watchlist" && req.method === "GET") {
         return json(res, 200, { ok: true, watchlist: desk.listWatchlist() });

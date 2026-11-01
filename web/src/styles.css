@@ -662,3 +662,20 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .onetap.live { border: 2px solid var(--down); }
 .ot-live { display: flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 .tap-buy.live, .tap-sell.live { box-shadow: 0 0 0 2px var(--down); }
+
+/* v13.6 ticker pick list + tappable held coin */
+.pick-list { display: grid; gap: 6px; margin-top: 10px; }
+.pick-note { margin: 0 0 2px; color: var(--muted); font-size: 13px; }
+.pick-row {
+  display: grid; grid-template-columns: 1fr; gap: 2px; text-align: left; width: 100%;
+  padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: inherit; cursor: pointer;
+}
+.pick-row:hover, .pick-row:focus-visible { border-color: var(--accent); }
+.pick-row.held { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.pick-sym { font-weight: 700; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.pick-name { color: var(--muted); font-size: 13px; }
+.pick-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chip.held-badge { background: var(--pill); color: var(--accent); font-weight: 700; }
+.pos-open { all: unset; cursor: pointer; font: inherit; color: inherit; }
+.pos-open:hover, .pos-open:focus-visible { text-decoration: underline; }
+.pos-open span { color: var(--muted); font-weight: 400; }

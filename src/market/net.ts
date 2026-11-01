@@ -45,6 +45,7 @@ export interface BucketSpec {
  */
 export const BUCKETS: BucketSpec[] = [
   { id: "dexscreener:pairs", source: "dexscreener", limitPerMin: 300, budgetPerMin: 240, burst: 10, cacheMs: 3_000, note: "/tokens/v1, /latest/dex/tokens, /latest/dex/pairs" },
+  { id: "dexscreener:search", source: "dexscreener", limitPerMin: 25, budgetPerMin: 20, burst: 2, cacheMs: 30_000, note: "/latest/dex/search (v13.6 Add coin by ticker). Docs allow 300/min; the desk caps itself at 25 so Scout keeps its pairs budget" },
   { id: "dexscreener:profiles", source: "dexscreener", limitPerMin: 60, budgetPerMin: 48, burst: 3, cacheMs: 3_000, note: "/token-profiles/latest/v1" },
   { id: "dexscreener:boosts-latest", source: "dexscreener", limitPerMin: 60, budgetPerMin: 48, burst: 3, cacheMs: 3_000, note: "/token-boosts/latest/v1" },
   { id: "dexscreener:boosts-top", source: "dexscreener", limitPerMin: 60, budgetPerMin: 48, burst: 3, cacheMs: 3_000, note: "/token-boosts/top/v1" },
@@ -69,6 +70,7 @@ export function bucketFor(url: string): BucketSpec | null {
   const host = u.hostname;
   const path = u.pathname;
   if (host === "api.dexscreener.com") {
+    if (path.startsWith("/latest/dex/search")) return BY_ID.get("dexscreener:search")!;
     if (path.startsWith("/token-profiles/")) return BY_ID.get("dexscreener:profiles")!;
     if (path.startsWith("/token-boosts/top")) return BY_ID.get("dexscreener:boosts-top")!;
     if (path.startsWith("/token-boosts/")) return BY_ID.get("dexscreener:boosts-latest")!;

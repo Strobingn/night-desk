@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { OneTapBar, TapBuyButton } from "./OneTap";
 import { api } from "../api";
 import { age, compactUsd, px, signedPct, usd } from "../format";
-import type { CoinLookup, DeskSnapshot, WatchItem } from "../types";
+import type { CoinCandidate, CoinLookup, CoinLookupError, DeskSnapshot, WatchItem } from "../types";
+import { candidateLine } from "../tickerText";
 import type { DeskActions } from "../App";
 
 const DOLLAR_CHIPS = [10, 25, 50, 100, 250] as const;
@@ -12,6 +13,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
   const [looking, setLooking] = useState(false);
   const [result, setResult] = useState<CoinLookup | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<{ query: string; note: string; rows: CoinCandidate[] } | null>(null);
   const [size, setSize] = useState<number>(0);
   const [confirmSize, setConfirmSize] = useState(false);
   const [watchBusy, setWatchBusy] = useState<string | null>(null);
@@ -19,14 +21,20 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
   async function lookup(raw: string) {
     const q = raw.trim();
     if (!q) {
-      setError("Paste a Solana mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link.");
+      setError("Type a ticker (e.g. QTFALCN) or name, or paste a Solana mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link.");
       return;
     }
     setLooking(true);
     setError(null);
     setResult(null);
+    setCandidates(null);
     const res = await api<CoinLookup>(`/api/lookup?q=${encodeURIComponent(q)}`);
     setLooking(false);
+    const miss = res.body as unknown as CoinLookupError;
+    if (miss.code === "AMBIGUOUS" && Array.isArray(miss.candidates) && miss.candidates.length) {
+      setCandidates({ query: miss.query ?? q, note: miss.error, rows: miss.candidates });
+      return;
+    }
     if (!res.ok || (res.body as { ok?: boolean }).ok === false) {
       setError(res.body.error ?? `Lookup failed (HTTP ${res.status}). No buy without a reliable price.`);
       return;
@@ -82,8 +90,8 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
           }}
         >
           <input
-            aria-label="Mint or link"
-            placeholder="Mint, or a DexScreener / pump.fun / Birdeye / GMGN / Jupiter link"
+            aria-label="Ticker, name, mint or link"
+            placeholder="Ticker (QTFALCN), name, mint or link"
             value={input}
             autoCapitalize="off"
             autoCorrect="off"
@@ -94,8 +102,33 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
             {looking ? "Looking" : "Look up"}
           </button>
         </form>
-        <p className="fine">Works with a Solana mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link. A DexScreener pair resolves to its token.</p>
+        <p className="fine">Ticker, name, mint or link all work. A ticker ($ optional, any case) checks your positions and trades first, then the Tape, then DexScreener search (Solana only). Links: DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan. A DexScreener pair resolves to its token.</p>
         {error ? <div className="banner">{error}</div> : null}
+        {candidates ? (
+          <div className="pick-list" role="list" aria-label={`Coins matching ${candidates.query}`}>
+            <p className="pick-note">{candidates.note}</p>
+            {candidates.rows.map((row) => (
+              <button
+                key={row.mint}
+                role="listitem"
+                type="button"
+                className={`pick-row${row.held ? " held" : ""}`}
+                onClick={() => {
+                  setInput(row.mint);
+                  void lookup(row.mint);
+                }}
+              >
+                <span className="pick-sym">
+                  {row.symbol}
+                  {row.held ? <span className="chip held-badge">HELD</span> : null}
+                  {!row.exact ? <span className="chip">close match</span> : null}
+                </span>
+                <span className="pick-name">{row.name || "—"}</span>
+                <span className="pick-meta">{candidateLine(row)}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       {result ? (
@@ -105,6 +138,8 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
               <h3>{result.symbol}</h3>
               <p className="sub">
                 {result.name} · <span className="chip tag">{result.tag}</span>
+                {result.matchedBy ? <> · <span className="chip">{result.matchedBy}</span></> : null}
+                {result.held ? <> · <span className="chip held-badge">HELD</span></> : null}
                 {result.dex ? ` · ${result.dex}` : ""}
               </p>
             </div>
@@ -116,7 +151,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
             <div>
               <dt>Price</dt>
               <dd>
-                ${px(result.priceUsd)} <small>{result.priceSource === "jupiter" ? "Jupiter" : "DexScreener"}</small>
+                ${px(result.priceUsd)} <small>{result.priceSource === "jupiter" ? "Jupiter" : result.priceSource === "chain" ? "pump.fun curve (on-chain)" : "DexScreener"}</small>
               </dd>
             </div>
             <div>
