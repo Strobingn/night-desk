@@ -54,10 +54,11 @@ function tokenAccount(raw: bigint): Uint8Array {
   u64le(d, 64, raw);
   return d;
 }
-function curveData(vTok: bigint, vSol: bigint, complete = false): Uint8Array {
+function curveData(vTok: bigint, vSol: bigint, complete = false, realSol = 1_000_000_000n): Uint8Array {
   const d = new Uint8Array(150);
   u64le(d, 8, vTok);
   u64le(d, 16, vSol);
+  u64le(d, 32, realSol);
   d[48] = complete ? 1 : 0;
   return d;
 }
@@ -279,16 +280,22 @@ describe("v13.6 on-chain pools: reversed PumpSwap, Raydium v4 / CPMM, and pump.f
   it("reads a live pump.fun curve on demand and refuses a complete or missing one", async () => {
     const curve = pumpCurveAddress(MINT)!;
     let complete = false;
+    let untraded = false;
     const reader = new ChainMarkReader(
       "http://rpc",
       rpcFrom(() => ({
-        [curve]: { owner: PUMP_PROGRAM, data: curveData(1_000_000_000_000_000n, 30_000_000_000n, complete) },
+        [curve]: { owner: PUMP_PROGRAM, data: curveData(1_000_000_000_000_000n, 30_000_000_000n, complete, untraded ? 15n : 1_000_000_000n) },
         [MINT]: { owner: TOKENKEG, data: mintData(6) }
       }))
     );
     const ok = await reader.readCurves([MINT, MINT2]);
     expect(ok.quotes.get(MINT)).toMatchObject({ curve, virtualSol: 30, native: 30 / 1e9 });
     expect(ok.missing.get(MINT2)).toMatch(/no pump.fun bonding curve/);
+    untraded = true;
+    const empty = await reader.readCurves([MINT]);
+    expect(empty.quotes.size).toBe(0);
+    expect(empty.missing.get(MINT)).toMatch(/no SOL has traded/);
+    untraded = false;
     complete = true;
     const done = await reader.readCurves([MINT]);
     expect(done.quotes.size).toBe(0);

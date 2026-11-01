@@ -94,13 +94,19 @@ interface RpcAccount {
 }
 
 /** Pump curve: 8 disc, vTok u64 @8, vSol u64 @16, realTok @24, realSol @32, supply @40, complete @48. */
-export function parseCurve(data: Uint8Array, decimals: number): { native: number; complete: boolean } | null {
+export function parseCurve(data: Uint8Array, decimals: number): { native: number; complete: boolean; realSol: number } | null {
   if (data.length < 49) return null;
   const vTok = u64(data, 8);
   const vSol = u64(data, 16);
   if (!(vTok > 0) || !(vSol > 0)) return null;
-  return { native: vSol / 1e9 / (vTok / 10 ** decimals), complete: data[48] === 1 };
+  return { native: vSol / 1e9 / (vTok / 10 ** decimals), complete: data[48] === 1, realSol: u64(data, 32) / 1e9 };
 }
+
+/**
+ * v13.6: a curve nobody has bought on (real SOL ~0) still carries a virtual price, which can be far
+ * from where the coin actually trades (seen live: PEAR's curve held 15 lamports and quoted 35x Jupiter).
+ */
+export const CURVE_MIN_REAL_SOL = 0.01;
 
 /** PumpSwap pool: 8 disc, bump u8, index u16, creator, base mint @43, quote mint @75, lp @107, base vault @139, quote vault @171. */
 export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string } | null {
@@ -296,6 +302,10 @@ export class ChainMarkReader {
       }
       if (parsed.complete) {
         missing.set(mint, "the bonding curve is complete (the coin migrated to a pool)");
+        return;
+      }
+      if (!(parsed.realSol >= CURVE_MIN_REAL_SOL)) {
+        missing.set(mint, "no SOL has traded on its bonding curve, so the curve price is not real");
         return;
       }
       quotes.set(mint, { mint, curve, native: parsed.native, virtualSol: u64(data, 16) / 1e9, complete: false, decimals });
