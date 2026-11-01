@@ -679,3 +679,6 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .pos-open { all: unset; cursor: pointer; font: inherit; color: inherit; }
 .pos-open:hover, .pos-open:focus-visible { text-decoration: underline; }
 .pos-open span { color: var(--muted); font-weight: 400; }
+/* v13.6 Add coin errors are full sentences (what was tried): wrap them. */
+.add-card .banner { white-space: normal; border-radius: 14px; align-items: flex-start; line-height: 1.4; }
+.add-card .banner::before { margin-top: 4px; }
