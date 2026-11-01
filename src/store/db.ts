@@ -250,10 +250,10 @@ export class DeskStore {
     return rows.map(rowToClosed);
   }
 
-  saveBook(book: PersistedBook): void {
+  saveBook(book: PersistedBook, key = "book"): void {
     this.db
-      .prepare(`INSERT INTO kv (key, value) VALUES ('book', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
-      .run(JSON.stringify(book));
+      .prepare(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(key, JSON.stringify(book));
   }
 
   /**
@@ -292,8 +292,8 @@ export class DeskStore {
       .run(key, JSON.stringify(value));
   }
 
-  loadBook(): PersistedBook | null {
-    const row = this.db.prepare(`SELECT value FROM kv WHERE key = 'book'`).get() as { value: string } | undefined;
+  loadBook(key = "book"): PersistedBook | null {
+    const row = this.db.prepare(`SELECT value FROM kv WHERE key = ?`).get(key) as { value: string } | undefined;
     if (!row) return null;
     try {
       return JSON.parse(row.value) as PersistedBook;

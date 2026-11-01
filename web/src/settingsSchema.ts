@@ -5,9 +5,9 @@
  * sent as fractions (except pnlAlertPct, which the desk takes as whole percent).
  */
 
-export type SettingGroup = "Scout sources" | "Filter / Analyst gates" | "Sizing / risk" | "Exits / stops" | "Alerts";
+export type SettingGroup = "Live wallet" | "Scout sources" | "Filter / Analyst gates" | "Sizing / risk" | "Exits / stops" | "Alerts";
 
-export const SETTING_GROUPS: SettingGroup[] = ["Sizing / risk", "Filter / Analyst gates", "Exits / stops", "Scout sources", "Alerts"];
+export const SETTING_GROUPS: SettingGroup[] = ["Live wallet", "Sizing / risk", "Filter / Analyst gates", "Exits / stops", "Scout sources", "Alerts"];
 
 interface Base {
   key: string;
@@ -46,6 +46,10 @@ const slipPct = { toWire: (d: number) => Math.round(d * 100) / 100, fromState: (
 const pct = { toWire: (d: number) => Math.round(d * 100) / 10_000, fromState: (raw: number) => Math.round(raw * 10_000) / 100 };
 
 export const SETTINGS_FIELDS: SettingField[] = [
+  // v13.5 Live wallet (separate from every paper size; LIVE_TRADING itself is never set from here)
+  { key: "liveTradeUsd", label: "Live $ per trade", group: "Live wallet", kind: "slider", min: 1, max: 250, step: 1, unit: "$", toWire: same, fromState: same, hint: "Every live buy, auto or one-tap, spends exactly this much USDC ($5 default). Paper sizes are never used live." },
+  { key: "liveDailyCapUsd", label: "Live daily cap $", group: "Live wallet", kind: "slider", min: 5, max: 1_000, step: 5, unit: "$", toWire: same, fromState: same, nullable: "No daily cap (default)", nullDefault: 50, hint: "Total USDC live buys may spend per day. Off by default." },
+  { key: "liveTrailPct", label: "Live trailing stop %", group: "Live wallet", kind: "slider", min: 0.5, max: 20, step: 0.5, unit: "%", toWire: same, fromState: (raw: number) => Math.round(raw * 10_000) / 100, hint: "Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first." },
   // Sizing / risk
   { key: "maxPositionPct", label: "Position size % of book", group: "Sizing / risk", kind: "slider", min: 1, max: 50, step: 0.5, unit: "%", ...pct, hint: "Per-position cap for auto buys and unconfirmed manual buys. A confirmed manual buy may go to 100%." },
   { key: "positionSizeUsd", label: "Position size $", group: "Sizing / risk", kind: "slider", min: 1, max: 10_000, step: 1, unit: "$", toWire: same, fromState: same, nullable: "Size from the % cap", hint: "Fixed dollars per auto buy, still cut to the % cap, cash and exposure room." },

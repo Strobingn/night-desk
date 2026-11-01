@@ -32,10 +32,19 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
     if (c !== slipNow) void actions.saveSlippage(c);
   };
   const selling = actions.tapping.has("sell-all");
+  const live = snap.mode === "live";
   return (
-    <section className="onetap card" aria-label="One-tap trading">
+    <section className={`onetap card${live ? " live" : ""}`} aria-label="One-tap trading">
+      {live ? (
+        <div className="ot-live">
+          <span className="live-badge live">LIVE</span>
+          <span>
+            One tap = real buy of {usd(snap.prefs.liveTradeUsd ?? 5)} · trail {(((snap.prefs.liveTrailPct ?? 0.01) * 100)).toFixed(1)}% · stop −{(snap.rules.stopLossPct * 100).toFixed(0)}%. Change the size in Settings → Live wallet.
+          </span>
+        </div>
+      ) : null}
       <div className="ot-row">
-        <label className="ot-field">
+        <label className={`ot-field${live ? " ot-paper-only" : ""}`} hidden={live}>
           <span>One-tap size</span>
           <input
             type="range"
@@ -108,7 +117,7 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
         ) : null}
       </div>
       <p className="fine">
-        One tap = paper buy {usd(actions.tapUsd)} now (cut to the {usd(snap.positionCapUsd)} cap and cash). No dialog, but the slippage cap ({slip}%), pool-depth, crash
+        {live ? "LIVE: " : ""}One tap = {live ? "LIVE" : "paper"} buy {usd(actions.tapUsd)} now (cut to the {usd(snap.positionCapUsd)} cap and cash). No dialog, but the slippage cap ({slip}%), pool-depth, crash
         guard, hard kills, cooldown and the −{(snap.rules.stopLossPct * 100).toFixed(0)}% stop all still apply. A stop cannot prevent a gap.
       </p>
     </section>
@@ -118,19 +127,21 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
 /** The one-tap Buy button for a coin card, watchlist row or looked-up coin. */
 export function TapBuyButton({ mint, symbol, actions, sizeUsd, className = "primary sm tap-buy" }: { mint: string; symbol: string; actions: DeskActions; sizeUsd?: number; className?: string }) {
   const inFlight = actions.tapping.has(`buy:${mint}`);
-  const size = sizeUsd ?? actions.tapUsd;
+  const live = actions.live === true;
+  // v13.5: a LIVE desk always taps the live size.
+  const size = live ? actions.tapUsd : sizeUsd ?? actions.tapUsd;
   return (
     <button
-      className={className}
+      className={`${className}${live ? " live" : ""}`}
       type="button"
       disabled={inFlight}
-      aria-label={`One-tap buy ${symbol} for ${usd(size)}`}
+      aria-label={`One-tap ${live ? "LIVE " : ""}buy ${symbol} for ${usd(size)}`}
       onClick={(event) => {
         event.stopPropagation();
-        void actions.oneTapBuy(mint, symbol, sizeUsd);
+        void actions.oneTapBuy(mint, symbol, live ? undefined : sizeUsd);
       }}
     >
-      {inFlight ? "Buying…" : `⚡ Buy ${usd(size, size >= 100 ? 0 : 2)}`}
+      {inFlight ? "Buying…" : `⚡ Buy ${usd(size, size >= 100 ? 0 : 2)}${live ? " LIVE" : ""}`}
     </button>
   );
 }
@@ -138,18 +149,19 @@ export function TapBuyButton({ mint, symbol, actions, sizeUsd, className = "prim
 /** The one-tap Sell button for an open position (closes 100%, no dialog). */
 export function TapSellButton({ mint, symbol, actions }: { mint: string; symbol: string; actions: DeskActions }) {
   const inFlight = actions.tapping.has(`sell:${mint}`);
+  const live = actions.live === true;
   return (
     <button
-      className="danger tap-sell"
+      className={`danger tap-sell${live ? " live" : ""}`}
       type="button"
       disabled={inFlight}
-      aria-label={`One-tap sell ${symbol}`}
+      aria-label={`One-tap ${live ? "LIVE " : ""}sell ${symbol}`}
       onClick={(event) => {
         event.stopPropagation();
         void actions.oneTapSell(mint, symbol);
       }}
     >
-      {inFlight ? "Selling…" : "⚡ Sell now"}
+      {inFlight ? "Selling…" : live ? "⚡ Sell now LIVE" : "⚡ Sell now"}
     </button>
   );
 }

@@ -16,6 +16,16 @@ export function defaultTapUsd(saved: number | null, defaultBuyUsd: number | null
   return Math.max(1, Math.floor(capUsd * 100) / 100);
 }
 
+/**
+ * v13.5: on a LIVE desk every one-tap buy is the live per-trade size (default $5), never the
+ * phone's paper one-tap amount. The desk enforces the same cut; this keeps the button honest.
+ */
+export function effectiveTapUsd(mode: string | undefined, tapUsd: number, liveTradeUsd: number | null | undefined): number {
+  if (mode !== "live") return tapUsd;
+  const live = liveTradeUsd != null && liveTradeUsd > 0 ? liveTradeUsd : 5;
+  return live;
+}
+
 export interface BuyReply {
   ok?: boolean;
   symbol?: string;
@@ -33,7 +43,8 @@ export function buyToast(symbol: string, r: BuyReply, roundTripMs: number): stri
   if (!r.ok) return `${symbol}: ${r.error ?? "buy refused"}${r.code ? ` (${r.code})` : ""}`;
   const clamp = r.clampedFrom != null ? ` (cut from ${usd(r.clampedFrom)} to the cap)` : "";
   const fill = r.fillPriceUsd ? ` @ ${px(r.fillPriceUsd)}` : "";
-  return `Bought ${r.symbol ?? symbol} ${usd(r.sizeUsd ?? 0)}${fill}${clamp} · ${r.mode ?? "paper"} · ${roundTripMs} ms`;
+  const mode = r.mode === "live" ? "LIVE" : r.mode ?? "paper";
+  return `Bought ${r.symbol ?? symbol} ${usd(r.sizeUsd ?? 0)}${fill}${clamp} · ${mode} · ${roundTripMs} ms`;
 }
 
 export interface SellReply {

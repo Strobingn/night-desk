@@ -641,3 +641,24 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .tape-screen .coin-card .cc-foot .tap-buy { min-width: 0; }
 .tool-select select { field-sizing: content; max-width: 108px; }
 .tool-select { padding-left: 8px; }
+
+/* v13.5 LIVE wallet */
+.live-strip { position: sticky; top: 0; z-index: 30; background: var(--down); color: var(--on-down); font-weight: 800; letter-spacing: 0.06em; font-size: 12px; text-align: center; padding: 6px 10px; }
+.shell.live-desk { box-shadow: inset 0 0 0 3px var(--down); }
+.live-badge { font-size: 11px; font-weight: 800; letter-spacing: 0.1em; border-radius: 999px; padding: 4px 10px; background: var(--card-2); color: var(--muted); }
+.live-badge.live { background: var(--down); color: var(--on-down); }
+.live-badge.armed { background: var(--err-container); color: var(--on-err-container); }
+.wallet-card.live { border: 2px solid var(--down); }
+.wallet-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wallet-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin: 10px 0; }
+.wallet-grid div { min-width: 0; }
+.wallet-grid dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.wallet-grid dd { margin: 2px 0 0; font-weight: 700; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wallet-rules { font-size: 13px; font-weight: 600; margin: 4px 0; }
+.wallet-card ul { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.wallet-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+.setting-group.live-group { border: 1px solid var(--down); }
+.setting-group.live-group .wallet-card { margin: 8px 0 12px; box-shadow: none; }
+.onetap.live { border: 2px solid var(--down); }
+.ot-live { display: flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.tap-buy.live, .tap-sell.live { box-shadow: 0 0 0 2px var(--down); }

@@ -143,8 +143,12 @@ describe("manual buy and live-ready checklist", () => {
       feeUsd: 0.03,
       slippage: 0.01
     });
-    const desk = new Desk(testConfig({ mode: "live", walletKeypairPath: "/tmp/night-desk-not-used.json", liveRequested: true }));
+    const desk = new Desk(testConfig({ mode: "live", walletKeypairPath: "/tmp/night-desk-not-used.json", liveRequested: true }), {
+      walletBalances: async () => ({ sol: 0.5, usdc: 100, at: Date.now(), error: null })
+    });
     try {
+      // v13.5: live buys use the live per-trade size ($5 default). A $25 request is cut to it.
+      desk.updateSettings({ liveTradeUsd: 25 });
       await desk.submitCandidate(quietToken());
       const bought = await desk.manualBuy(mint, 25);
       expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 25 });

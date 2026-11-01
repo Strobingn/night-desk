@@ -44,7 +44,11 @@ export type ReasonCode =
   /** v13.3 pre-buy guard: price fell hard in the last ~60s. */
   | "PRICE_CRASH"
   /** v13.3 pre-buy guard: pool liquidity is being pulled. */
-  | "LIQUIDITY_PULL";
+  | "LIQUIDITY_PULL"
+  /** v13.5 live: the optional live daily spend cap is used up. */
+  | "LIVE_DAILY_CAP"
+  /** v13.5 live: wallet balance unknown, or not enough USDC / SOL for the trade and fees. */
+  | "LIVE_WALLET";
 
 export interface Rejection {
   code: ReasonCode;
@@ -196,6 +200,12 @@ export interface Position {
   closing?: boolean;
   /** v12: "manual" plus the platform the coin was added from, e.g. "manual · DexScreener". */
   tag?: string;
+  /** v13.5: opened with a real on-chain swap. */
+  live?: boolean;
+  /** v13.5 live trail anchor: the mark the buy was sized against. */
+  entryMark?: number;
+  /** v13.5 live trail: highest accepted risk mark since entry. */
+  markPeak?: number;
 }
 
 export interface ClosedTrade {
@@ -429,6 +439,12 @@ export interface DeskPrefs {
   positionRefreshMs?: number;
   /** v13.3 full-exit impact tolerance checked before a buy. null = entry cap + 3%. */
   maxExitSlippage?: number | null;
+  /** v13.5 live per-trade USD (default $5). */
+  liveTradeUsd?: number;
+  /** v13.5 live daily spend cap USD; null = off. */
+  liveDailyCapUsd?: number | null;
+  /** v13.5 live trailing stop, fraction (0.01 = 1%). */
+  liveTrailPct?: number;
 }
 
 /** v12 GET /api/lookup result. */
@@ -495,7 +511,35 @@ export interface MintCooldown {
   minutesLeft: number;
 }
 
+/** v13.5 read-only wallet card. Never carries the secret key or the RPC URL. */
+export interface WalletView {
+  /** A usable key is loaded on the desk host. */
+  keyLoaded: boolean;
+  /** "env" = WALLET_PRIVATE_KEY, "file" = WALLET_KEYPAIR_PATH. */
+  keySource: "env" | "file" | null;
+  /** WALLET_PRIVATE_KEY has a value that is not a Solana private key. */
+  keyInvalid: boolean;
+  publicKey: string | null;
+  solBalance: number | null;
+  usdcBalance: number | null;
+  balanceAt: number | null;
+  balanceError: string | null;
+  /** Desk is placing real swaps (LIVE_TRADING=true and a usable key at boot). */
+  live: boolean;
+  liveRequested: boolean;
+  /** true = the free public Solana RPC (rate limited). */
+  rpcPublic: boolean;
+  /** Live per-trade size, live cap, live trail (also in prefs). */
+  liveTradeUsd: number;
+  liveDailyCapUsd: number | null;
+  liveTrailPct: number;
+  liveSpentTodayUsd: number;
+  minFeeSol: number;
+}
+
 export interface DeskSnapshot {
+  /** v13.5 wallet card. */
+  wallet?: WalletView;
   mode: "paper" | "live";
   liveRequested: boolean;
   armError?: string;

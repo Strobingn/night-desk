@@ -344,3 +344,32 @@ export function resolveRules(env: NodeJS.ProcessEnv = process.env): ResolvedRule
     )
   };
 }
+
+/**
+ * v13.5 live-wallet settings. Separate from every paper size. Live auto-buys and one-tap
+ * buys use liveTradeUsd and never the paper position size. The −6% hard stop is unchanged.
+ */
+export const LIVE_BAND = {
+  tradeUsd: { min: 1, max: 1000, fallback: 5 },
+  /** null = no daily cap (Dirk: "no max per day"). */
+  dailyCapUsd: { min: 1, max: 100_000 },
+  /** Trail as a fraction. 1% default. 0.5%–20%. */
+  trailPct: { min: 0.005, max: 0.2, fallback: 0.01 }
+} as const;
+
+export function clampLiveTradeUsd(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) return LIVE_BAND.tradeUsd.fallback;
+  return Math.round(Math.min(LIVE_BAND.tradeUsd.max, Math.max(LIVE_BAND.tradeUsd.min, raw)) * 100) / 100;
+}
+
+export function clampLiveDailyCapUsd(raw: number | null | undefined): number | null {
+  if (raw == null || !Number.isFinite(raw) || raw <= 0) return null;
+  return Math.round(Math.min(LIVE_BAND.dailyCapUsd.max, Math.max(LIVE_BAND.dailyCapUsd.min, raw)) * 100) / 100;
+}
+
+/** Accepts a percent (1 = 1%) or a fraction (0.01). Values ≥ 0.5 are read as percents. */
+export function liveTrailFromWire(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) return Number.NaN;
+  const fraction = raw >= 0.5 ? raw / 100 : raw;
+  return Math.round(Math.min(LIVE_BAND.trailPct.max, Math.max(LIVE_BAND.trailPct.min, fraction)) * 10_000) / 10_000;
+}

@@ -2,6 +2,7 @@ import path from "node:path";
 import { resolveRules, HARD_RULES, type ResolvedRules } from "./rules.js";
 import { resolveDeskToken } from "./server/auth.js";
 import type { FeedStatus } from "./types.js";
+import { parseSecretKey } from "./market/wallet-key.js";
 
 export interface DeskConfig {
   rules: ResolvedRules;
@@ -24,6 +25,11 @@ export interface DeskConfig {
   rugcheckUrl: string;
   bitqueryKey?: string;
   walletKeypairPath?: string;
+  /**
+   * v13.5 reads WALLET_PRIVATE_KEY at call time. A function so the secret is never a
+   * string field on the config (JSON.stringify drops it; logs show [Function]).
+   */
+  readWalletSecret: () => string | undefined;
   jupiterQuoteUrl: string;
   jupiterSwapUrl: string;
   resetPaper: boolean;
@@ -45,11 +51,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
   const liveRequested = env.LIVE_TRADING === "true";
   const walletKeypairPath = env.WALLET_KEYPAIR_PATH?.trim() || undefined;
   const rpcUrl = env.SOLANA_RPC_URL?.trim() || "https://api.mainnet-beta.solana.com";
+  // v13.5: the secret is read from env only inside this closure. It is never copied onto the config.
+  const readWalletSecret = (): string | undefined => {
+    const raw = env.WALLET_PRIVATE_KEY;
+    return raw && raw.trim() ? raw : undefined;
+  };
+  const envKeyValid = parseSecretKey(readWalletSecret()) != null;
   let mode: "paper" | "live" = "paper";
   let armError: string | undefined;
   if (liveRequested) {
-    if (!walletKeypairPath) {
-      armError = "LIVE_TRADING=true but WALLET_KEYPAIR_PATH is missing. Staying on the paper ledger.";
+    if (readWalletSecret() && !envKeyValid) {
+      armError = "LIVE_TRADING=true but WALLET_PRIVATE_KEY is not a valid Solana private key. Staying on the paper ledger.";
+    } else if (!envKeyValid && !walletKeypairPath) {
+      armError = "LIVE_TRADING=true but WALLET_PRIVATE_KEY is empty (and no WALLET_KEYPAIR_PATH). Staying on the paper ledger.";
     } else if (!rpcUrl) {
       armError = "LIVE_TRADING=true but SOLANA_RPC_URL is missing. Staying on the paper ledger.";
     } else {
@@ -78,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     rugcheckUrl: env.RUGCHECK_API_URL?.trim() || "https://api.rugcheck.xyz/v1",
     bitqueryKey: env.BITQUERY_API_KEY?.trim() || undefined,
     walletKeypairPath,
+    readWalletSecret,
     jupiterQuoteUrl: env.JUPITER_QUOTE_URL?.trim() || "https://lite-api.jup.ag/swap/v1/quote",
     jupiterSwapUrl: env.JUPITER_SWAP_URL?.trim() || "https://lite-api.jup.ag/swap/v1/swap",
     resetPaper: env.PAPER_RESET === "1",

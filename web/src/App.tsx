@@ -11,7 +11,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
-import { TAP_SIZE_KEY, buyToast, defaultTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
+import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
 export const TABS = [
@@ -55,6 +55,8 @@ export interface DeskActions {
   sellAll: () => Promise<void>;
   /** v13.3 one-tap size in dollars (this device). */
   tapUsd: number;
+  /** v13.5 the desk is LIVE: one-tap buttons say so and use the live size. */
+  live?: boolean;
   setTapUsd: (n: number) => void;
   /** v13.3 saves the entry (and optionally exit) slippage percent to the desk. */
   saveSlippage: (entryPct: number, exitPct?: number | null) => Promise<boolean>;
@@ -86,6 +88,8 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   // v13.3 one tap. The ref is the double-tap guard (state updates are async); the set mirrors it for rendering.
   const inflight = useRef(new Set<string>());
+  /** v13.5 current mode for confirm texts inside stable callbacks. */
+  const modeRef = useRef<string>("paper");
   const [tapping, setTapping] = useState<ReadonlySet<string>>(() => new Set());
   const [tapSaved, setTapSaved] = useState<number | null>(() => {
     const raw = Number(localStorage.getItem(TAP_SIZE_KEY));
@@ -228,7 +232,8 @@ export function App() {
 
   const sell = useCallback(async (mint: string, symbol: string, percent: 25 | 50 | 100) => {
     const verb = percent === 100 ? `Close ${symbol} at the mark?` : `Sell ${percent}% of ${symbol} at the mark?`;
-    if (!window.confirm(`${verb} Paper fill against the same pool model as a stop. The hard stop still fires on its own.`)) return;
+    const how = modeRef.current === "live" ? "LIVE: a real on-chain sell from the desk wallet." : "Paper fill against the same pool model as a stop.";
+    if (!window.confirm(`${verb} ${how} The hard stop still fires on its own.`)) return;
     setBusy(`${mint}:${percent}`);
     const res = await api<{ proceedsUsd?: number }>("/api/positions/sell", { body: { mint, percent } });
     setBusy(null);
@@ -239,7 +244,9 @@ export function App() {
     );
   }, []);
 
-  const tapUsd = defaultTapUsd(tapSaved, snap?.prefs.defaultBuyUsd, snap?.positionCapUsd ?? 0);
+  const paperTapUsd = defaultTapUsd(tapSaved, snap?.prefs.defaultBuyUsd, snap?.positionCapUsd ?? 0);
+  // v13.5: a LIVE desk taps the live per-trade size ($5 default), never the paper amount.
+  const tapUsd = effectiveTapUsd(snap?.mode, paperTapUsd, snap?.prefs.liveTradeUsd);
 
   const track = useCallback((key: string, on: boolean) => {
     if (on) inflight.current.add(key);
@@ -307,6 +314,7 @@ export function App() {
   const actions: DeskActions = {
     notify: setNotice,
     oneTapBuy,
+    live: snap?.mode === "live",
     oneTapSell,
     sellAll,
     tapUsd,
@@ -333,9 +341,15 @@ export function App() {
   }
 
   const openPnl = snap.positions.reduce((sum, pos) => sum + pos.pnlUsd, 0);
+  modeRef.current = snap.mode;
 
   return (
-    <div className="shell">
+    <div className={`shell${snap.mode === "live" ? " live-desk" : ""}`}>
+      {snap.mode === "live" ? (
+        <div className="live-strip" role="status">
+          LIVE · real swaps from the desk wallet · {usd(snap.prefs.liveTradeUsd ?? 5)} per trade
+        </div>
+      ) : null}
       <header className={`top${tab === "tape" ? " on-tape" : ""}`}>
         <div className="brand">
           <span className="logo" aria-hidden="true">
@@ -369,7 +383,7 @@ export function App() {
           </button>
         <div className={`lamp ${snap.mode}`} aria-label={`Trading mode ${snap.mode}`}>
           <i />
-          {snap.mode === "live" ? "LIVE" : "PAPER"}
+          {snap.mode === "live" ? "LIVE · REAL $" : "PAPER"}
         </div>
         </div>
         <div className={`metrics${tab === "home" ? " on-home" : ""}${tab === "tape" ? " on-tape" : ""}`}>

@@ -5,6 +5,11 @@ export interface RiskPositionState {
   entryPrice: number;
   peakPrice: number;
   trailArmed: boolean;
+  /** v13.5 live positions only: the mark the buy was sized against. */
+  entryMark?: number;
+  /** v13.5 live positions only: highest accepted risk mark since entry. */
+  markPeak?: number;
+  live?: boolean;
 }
 
 export interface RiskAssessment {
@@ -19,6 +24,8 @@ export interface RiskAssessment {
   stopPrice: number;
   /** Peak × (1 − trail gap) once the hint is armed. Never an order. */
   trailHintPrice: number | null;
+  /** v13.5 live trail: highest accepted mark (entry mark at the start). Undefined for paper. */
+  markPeak?: number;
 }
 
 /**
@@ -29,7 +36,7 @@ export function assessPosition(
   pos: RiskPositionState,
   mark: number,
   rules: ResolvedRules,
-  options?: { trailExits?: boolean }
+  options?: { trailExits?: boolean; liveTrailPct?: number | null }
 ): RiskAssessment {
   const entry = pos.entryPrice;
   const peak = Math.max(pos.peakPrice, mark, entry);
@@ -37,7 +44,14 @@ export function assessPosition(
   const peakPnl = entry > 0 ? (peak - entry) / entry : 0;
   const trailArmed = pos.trailArmed || peakPnl >= rules.trailArmPct;
   const stopPrice = entry * (1 - rules.stopLossPct);
-  const trailHintPrice = trailArmed ? peak * (1 - rules.trailGapPct) : null;
+  let trailHintPrice = trailArmed ? peak * (1 - rules.trailGapPct) : null;
+  // v13.5 live trail. Armed from entry, measured on marks (not the fill), so paying entry slippage
+  // does not trip it on the first tick. Line = highest accepted mark × (1 − trail %). The hard
+  // stop below is checked first and is never loosened by this.
+  const liveTrail = pos.live === true && options?.liveTrailPct != null && options.liveTrailPct > 0 ? options.liveTrailPct : null;
+  const markPeak = liveTrail != null ? Math.max(pos.markPeak ?? 0, pos.entryMark ?? 0, mark) || entry : undefined;
+  const liveTrailPrice = liveTrail != null && markPeak != null ? markPeak * (1 - liveTrail) : null;
+  if (liveTrailPrice != null) trailHintPrice = liveTrailPrice;
 
   if (pnlPct <= -rules.stopLossPct) {
     return {
@@ -48,7 +62,22 @@ export function assessPosition(
       peakPrice: peak,
       trailArmed,
       stopPrice,
-      trailHintPrice
+      trailHintPrice,
+      markPeak
+    };
+  }
+
+  if (liveTrail != null && liveTrailPrice != null && mark <= liveTrailPrice) {
+    return {
+      action: "stop",
+      code: "TRAIL_STOP",
+      message: `Live trail ${(liveTrail * 100).toFixed(1)}%: mark ${mark.toPrecision(4)} fell to the trail line ${liveTrailPrice.toPrecision(4)} (peak ${markPeak!.toPrecision(4)}). ${(pnlPct * 100).toFixed(2)}% from entry.`,
+      pnlPct,
+      peakPrice: peak,
+      trailArmed: true,
+      stopPrice,
+      trailHintPrice,
+      markPeak
     };
   }
 
@@ -61,7 +90,8 @@ export function assessPosition(
       peakPrice: peak,
       trailArmed,
       stopPrice,
-      trailHintPrice
+      trailHintPrice,
+      markPeak
     };
   }
 
@@ -72,9 +102,10 @@ export function assessPosition(
       : `Holding. Hard stop ${stopPrice.toFixed(8)}, unrealized ${(pnlPct * 100).toFixed(2)}%.`,
     pnlPct,
     peakPrice: peak,
-    trailArmed,
+    trailArmed: trailArmed || liveTrail != null,
     stopPrice,
-    trailHintPrice
+    trailHintPrice,
+    markPeak
   };
 }
 

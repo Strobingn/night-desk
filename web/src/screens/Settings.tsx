@@ -6,8 +6,10 @@ import type { DeskSnapshot } from "../types";
 import type { DeskActions } from "../App";
 import { Icon } from "../ui";
 import { THEME_OPTIONS } from "../theme";
+import { WalletCard } from "./Wallet";
 
 const GROUP_META: Record<string, { icon: string; text: string }> = {
+  "Live wallet": { icon: "shield", text: "Real-money settings. Used only when Austin's desk runs with LIVE_TRADING=true." },
   "Sizing / risk": { icon: "shield", text: "How much each buy uses, and the brakes on the whole book." },
   "Filter / Analyst gates": { icon: "filter", text: "What a new pair must clear before the Analyst scores it." },
   "Exits / stops": { icon: "exit", text: "The hard stop, the cooldown after it, and the optional trailing take profit." },
@@ -105,7 +107,7 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
         <small className="fine">System follows the phone or computer setting.</small>
       </section>
       {SETTING_GROUPS.map((group) => (
-        <section className="card setting-group" key={group}>
+        <section className={`card setting-group${group === "Live wallet" ? " live-group" : ""}`} key={group}>
           <header className="group-head">
             <span className="group-icon">
               <Icon name={GROUP_META[group]?.icon ?? "settings"} size={20} />
@@ -115,6 +117,7 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
               <p>{GROUP_META[group]?.text}</p>
             </div>
           </header>
+          {group === "Live wallet" ? <WalletCard snap={snap} /> : null}
           {group === "Sizing / risk" ? (
             <p className="fine">
               Cap now {usd(snap.positionCapUsd)} per auto buy · manual max {usd(snap.manualMaxUsd ?? 0)} with confirm · exposure {usd(snap.exposureUsd ?? 0)}. Slippage, pool depth, cash and the hard stop still apply to every size.

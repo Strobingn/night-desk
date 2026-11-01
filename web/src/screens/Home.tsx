@@ -8,6 +8,7 @@ import { CoinAvatar, PnlChip, Sparkline, StopTrailBar } from "../ui";
 import { dayBase } from "../coins";
 import { exitLabel } from "../../../src/desk/gap";
 import { OneTapBar, TapSellButton } from "./OneTap";
+import { WalletCard } from "./Wallet";
 
 
 
@@ -84,6 +85,8 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
         <EquityChart points={snap.equity} baseline={snap.startingBalanceUsd} />
         {snap.mode === "paper" ? <p className="fine">Reset paper book refills to {usd(snap.prefs.paperResetUsd ?? 100, 0)} (Settings → Sizing / risk).</p> : null}
       </section>
+
+      <WalletCard snap={snap} />
 
       <LiveReadyCard readiness={snap.readiness} busy={readyBusy} onReady={(ready) => void markReady(ready)} />
 
@@ -343,7 +346,7 @@ function LiveReadyCard({ readiness, busy, onReady }: { readiness: LiveReadiness;
         Mark checklist ready
       </label>
       <p className="fine">
-        This note does not enable live trading and does not save a Phantom seed or private key. The trading keypair stays in WALLET_KEYPAIR_PATH on the Austin desk host. Night Desk has no wallet vault.
+        This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY in Austin's .env (or WALLET_KEYPAIR_PATH) on the desk host. Night Desk has no wallet vault.
       </p>
     </section>
   );

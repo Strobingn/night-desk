@@ -6,6 +6,7 @@ export type {
   FeedEvent,
   LiveReadiness,
   PositionView,
-  WatchItem
+  WatchItem,
+  WalletView
 } from "../../src/types";
 export type { CoinLookup, CoinLookupError } from "../../src/types";

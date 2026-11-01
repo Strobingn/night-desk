@@ -151,6 +151,11 @@ export function startServer(
         return json(res, result.ok ? 200 : 400, result);
       }
       if (url.pathname === "/api/live/ready" && req.method === "GET") return json(res, 200, desk.readiness());
+      // v13.5 read-only wallet card: public address, SOL / USDC, key loaded, LIVE on/off. Never the secret.
+      if (url.pathname === "/api/wallet" && req.method === "GET") {
+        await desk.refreshWalletThrottled();
+        return json(res, 200, desk.walletView());
+      }
       if (url.pathname === "/api/live/ready" && req.method === "POST") {
         const body = await readJson(req);
         const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
@@ -355,10 +360,17 @@ const BLOCKED_SETTINGS = new Set([
   "seed",
   "secret",
   "secretKey",
-  "keypair"
+  "keypair",
+  "privateKey",
+  "walletPrivateKey",
+  "WALLET_PRIVATE_KEY",
+  "readWalletSecret"
 ]);
 
 export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
+  "liveTradeUsd",
+  "liveDailyCapUsd",
+  "liveTrailPct",
   "positionRefreshMs",
   "minVolume1hUsd",
   "analystMinScore",

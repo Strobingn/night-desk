@@ -3,7 +3,7 @@ import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
 import { classifyStopExit } from "./gap.js";
 import { MomentumTracker } from "../market/momentum.js";
@@ -27,7 +27,7 @@ import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump,
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader } from "../market/chain-marks.js";
-import { inspectDeskKeypair } from "../market/wallet-status.js";
+import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { DeskStore } from "../store/db.js";
 import type {
@@ -49,6 +49,7 @@ import type {
   Position,
   PositionView,
   WatchItem,
+  WalletView,
   CoinLookup,
   CoinLookupError
 } from "../types.js";
@@ -99,6 +100,10 @@ interface DeskSettings {
   positionSizeUsd?: number | null;
   maxExposurePct?: number;
   paperResetUsd?: number;
+  /** v13.5 live wallet (separate from every paper size). */
+  liveTradeUsd?: number;
+  liveDailyCapUsd?: number | null;
+  liveTrailPct?: number;
 }
 
 interface DeskSettingsView {
@@ -141,6 +146,9 @@ interface DeskSettingsView {
   positionSizeUsd: number | null;
   maxExposurePct: number;
   paperResetUsd: number;
+  liveTradeUsd: number;
+  liveDailyCapUsd: number | null;
+  liveTrailPct: number;
 }
 
 /** Codes that make a manual buy ask for "Buy anyway" first. */
@@ -223,7 +231,17 @@ export class Desk {
   private readonly nearMissCards = new Map<string, Advice>();
   /** Mints already shown as a near miss that have not been entered yet. */
   private readonly surfacedNearMiss = new Set<string>();
-  private readonly walletStatus: { keypairPresent: boolean; walletPublicKey: string | null };
+  private readonly walletStatus: DeskWalletStatus;
+  /** v13.5 live per-trade USD. Live auto-buys and one-tap buys use this, never a paper size. */
+  private liveTradeUsd: number = LIVE_BAND.tradeUsd.fallback;
+  /** v13.5 live daily spend cap. null = off (the default). */
+  private liveDailyCapUsd: number | null = null;
+  /** v13.5 live trailing stop, fraction. Armed from entry. */
+  private liveTrailPct: number = LIVE_BAND.trailPct.fallback;
+  /** v13.5 last read-only wallet balance read. */
+  private walletBalances: WalletBalances | null = null;
+  private walletTimer: NodeJS.Timeout | null = null;
+  private readonly walletReader: () => Promise<WalletBalances>;
   private readonly inflight = new Set<Promise<unknown>>();
   private cooldowns = new Map<string, number>();
   /** First >30% print inside 10s of entry, keyed by mint. The feed has to repeat it. */
@@ -268,7 +286,10 @@ export class Desk {
   readonly momentum = new MomentumTracker();
   private feed: FeedStatus;
 
-  constructor(config: DeskConfig, deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch } = {}) {
+  constructor(
+    config: DeskConfig,
+    deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch; walletBalances?: () => Promise<WalletBalances> } = {}
+  ) {
     this.config = config;
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
@@ -303,13 +324,25 @@ export class Desk {
     if (typeof saved.allowUnlockedLp === "boolean") this.allowUnlockedLp = saved.allowUnlockedLp;
     this.absorbGates(saved);
     this.operatorReady = saved.operatorReady === true;
-    this.walletStatus = inspectDeskKeypair(config.walletKeypairPath);
+    this.walletStatus = inspectDeskWallet({ readEnvSecret: config.readWalletSecret, keypairPath: config.walletKeypairPath });
+    const owner = this.walletStatus.walletPublicKey;
+    this.walletReader =
+      deps.walletBalances ??
+      (async () =>
+        owner
+          ? fetchWalletBalances(this.net.fetchAt(0), config.rpcUrl, owner)
+          : { sol: null, usdc: null, at: Date.now(), error: "No wallet key loaded" });
     this.rugs = new LayeredRugRegistry(new StaticRugRegistry(loadRugWalletMap(config.rugWalletsFile)));
-    const restored = config.resetPaper ? null : this.store.loadBook();
-    const starting =
-      restored && restored.startingBalanceUsd > 0 ? restored.startingBalanceUsd : config.startingBalanceUsd;
+    // v13.5: a live desk keeps its own book. The paper book (and Dirk's paper positions) stay saved
+    // under "book" and are never sent to the chain.
+    const live = config.mode === "live";
+    const restored = live ? this.store.loadBook("book:live") : config.resetPaper ? null : this.store.loadBook();
+    const starting = live
+      ? restored?.startingBalanceUsd ?? 0
+      : restored && restored.startingBalanceUsd > 0 ? restored.startingBalanceUsd : config.startingBalanceUsd;
     this.config.startingBalanceUsd = starting;
     this.book = new PaperBook(restored?.cashUsd ?? starting);
+    if (live && !restored) this.startedAt = Date.now();
     if (restored) {
       this.startedAt = restored.startedAt;
       for (const pos of restored.positions) {
@@ -433,6 +466,11 @@ export class Desk {
       setTimeout(() => void this.refreshWatchlist(), 3_000);
     }
     this.equityTimer = setInterval(() => this.markEquity(), 2_000);
+    // v13.5 read-only wallet balance for the card (and the live cash line). Never signs.
+    if (this.walletStatus.walletPublicKey && this.config.feedMode !== "replay") {
+      this.walletTimer = setInterval(() => void this.refreshWallet(), this.config.mode === "live" ? 20_000 : 60_000);
+      setTimeout(() => void this.refreshWallet(), 2_000);
+    }
     this.commentTimer = setInterval(() => void this.commentOnce(), 60_000);
     setTimeout(() => void this.commentOnce(), 8_000);
     this.heartbeat = setInterval(() => {
@@ -455,6 +493,7 @@ export class Desk {
     if (this.commentTimer) clearInterval(this.commentTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.watchTimer) clearInterval(this.watchTimer);
+    if (this.walletTimer) clearInterval(this.walletTimer);
     this.persist();
     this.advisor.save();
     this.store.close();
@@ -1114,12 +1153,14 @@ export class Desk {
       `Mode ${mode}.`,
       `LIVE_TRADING is ${liveTradingFlag ? "true" : "off"}. The phone cannot turn this flag on.`,
       keypairPresent
-        ? `Keypair file on the Austin desk host is present${walletPublicKey ? `. Public address ${walletPublicKey}` : ""}. The secret stays on that host.`
-        : "Keypair file on the Austin desk host is missing. Point WALLET_KEYPAIR_PATH at a Solana CLI JSON keypair on that machine. Do not paste a Phantom seed into Night Desk.",
+        ? `Wallet key on the Austin desk host is loaded (${this.walletStatus.keySource === "env" ? "WALLET_PRIVATE_KEY" : "WALLET_KEYPAIR_PATH"})${walletPublicKey ? `. Public address ${walletPublicKey}` : ""}. The secret stays on that host.`
+        : this.walletStatus.keyInvalid
+          ? "WALLET_PRIVATE_KEY in Austin's .env is not a valid Solana private key (base58 from Phantom, or a JSON byte array)."
+          : "No wallet key on the Austin desk host. Paste the wallet's private key into WALLET_PRIVATE_KEY= in C:\\Users\\Austin\\ndesk2\\.env on that machine. Never into the phone or a chat.",
       rpcPresent ? "RPC is set on the desk host. The URL is not shown here." : "SOLANA_RPC_URL is missing on the desk host.",
       mode === "live"
-        ? "Live swaps are on. Austin restarted with LIVE_TRADING=true and a keypair path."
-        : "Still paper. Real money starts only after Austin sets LIVE_TRADING=true and WALLET_KEYPAIR_PATH in .env, then restarts the desk.",
+        ? "Live swaps are on. Austin restarted with LIVE_TRADING=true and a wallet key."
+        : "Still paper. Real money starts only after Austin sets LIVE_TRADING=true (with WALLET_PRIVATE_KEY filled) in .env, then restarts the desk.",
       operatorReady
         ? "Operator marked this checklist ready. That mark does not arm live trading and does not store a wallet."
         : "Operator has not marked this checklist ready."
@@ -1161,6 +1202,7 @@ export class Desk {
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
     return {
+      wallet: this.walletView(),
       mode: this.config.mode,
       liveRequested: this.config.liveRequested,
       armError: this.config.armError,
@@ -1388,11 +1430,32 @@ export class Desk {
     extra: { confirmSize?: boolean; tag?: string } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
+    const isLive = this.config.mode === "live";
     // A confirmed manual buy may use up to 100% of the book. Everything else uses the saved cap (≤ 50%).
+    // v13.5 live: the wallet's USDC is the book and the live per-trade size is the limit.
     const capPct =
-      source === "manual" && extra.confirmSize === true
+      isLive || (source === "manual" && extra.confirmSize === true)
         ? SIZING_BAND.manualMaxPct
         : Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
+    if (isLive) {
+      // v13.5: auto and one-tap buys alike use the live size. A larger request (e.g. the phone's
+      // paper one-tap amount) is cut to it. Never the paper position size.
+      requestedUsd = requestedUsd != null && requestedUsd > 0 ? Math.min(requestedUsd, this.liveTradeUsd) : this.liveTradeUsd;
+      const ready = await this.liveBuyReady(requestedUsd);
+      if (!ready.ok) {
+        this.pipeline.executorSkips += 1;
+        this.bus.emit("executor.skip", { token, reason: { code: ready.code, message: ready.error }, score });
+        this.log({
+          stage: "executor",
+          kind: "reject",
+          mint: token.mint,
+          symbol: token.symbol,
+          code: ready.code,
+          message: `Executor skipped live ${token.symbol}. ${ready.error}`
+        });
+        return { ok: false, error: ready.error, code: ready.code };
+      }
+    }
     if (source === "analyst") {
       const gate = autoBuyBlock({
         autoBuy: this.autoBuy,
@@ -1460,7 +1523,7 @@ export class Desk {
       return { ok: false, error: plan.reason.message, code: plan.reason.code };
     }
     const preferred =
-      source === "manual" && requestedUsd == null && this.defaultBuyUsd != null ? Math.min(this.defaultBuyUsd, plan.sizeUsd) : requestedUsd;
+      !isLive && source === "manual" && requestedUsd == null && this.defaultBuyUsd != null ? Math.min(this.defaultBuyUsd, plan.sizeUsd) : requestedUsd;
     const sized = resolveManualSize(plan.sizeUsd, preferred);
     if (!sized.ok) {
       this.pipeline.executorSkips += 1;
@@ -1510,11 +1573,6 @@ export class Desk {
     this.opening.add(token.mint);
     try {
       if (this.config.mode === "live") {
-        if (!this.config.walletKeypairPath) {
-          const message = "Live mode lost its keypair path.";
-          this.skipLive(token, score, message);
-          return { ok: false, error: message, code: "LIVE_NOT_ARMED" };
-        }
         try {
           const { executeLiveSwap } = await import("../market/live-broker.js");
           const live = await executeLiveSwap({
@@ -1523,15 +1581,15 @@ export class Desk {
             sizeUsd: sized.sizeUsd,
             decimals: token.decimals,
             keypairPath: this.config.walletKeypairPath,
+            readEnvSecret: this.config.readWalletSecret,
             rpcUrl: this.config.rpcUrl,
             quoteUrl: this.config.jupiterQuoteUrl,
             swapUrl: this.config.jupiterSwapUrl,
             markPriceUsd: token.priceUsd,
             maxEntrySlippage: this.config.rules.maxEntrySlippage
           });
-          if (epoch !== this.bookEpoch) {
-            return { ok: false, error: "Paper book was reset before the fill. Buy dropped.", code: "BOOK_RESET" };
-          }
+          this.noteLiveSpend(sized.sizeUsd);
+          void this.refreshWallet();
           if (!(live.qty > 0) || !(live.fillPriceUsd > 0) || !Number.isFinite(live.qty)) {
             const message = "Live quote was not a usable fill. Buy refused.";
             this.skipLive(token, score, message);
@@ -1555,7 +1613,7 @@ export class Desk {
               ? sized.clampedFrom != null
                 ? `Manual live buy $${sized.sizeUsd.toFixed(2)} (requested $${sized.clampedFrom.toFixed(2)} cut to the $${plan.capUsd.toFixed(2)} cap).`
                 : `Manual live buy $${sized.sizeUsd.toFixed(2)} of the $${plan.capUsd.toFixed(2)} cap.`
-              : `Live buy sized at ${pctLabel}% cap ($${sized.sizeUsd.toFixed(2)} of $${plan.capUsd.toFixed(2)}).`;
+              : `Live auto-buy at the live size $${sized.sizeUsd.toFixed(2)}.`;
           this.applyBuy(
             {
               id: randomUUID(),
@@ -1677,7 +1735,8 @@ export class Desk {
       pairAddress: token.priceFeed === "dexscreener" ? token.pairAddress : undefined,
       dex: token.dex,
       tradeId: fill.id,
-      ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {})
+      ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {}),
+      ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {})
     };
     this.book.positions.set(token.mint, position);
     const sample = sampleOf(token, score);
@@ -1724,7 +1783,6 @@ export class Desk {
     if (!pos) return;
     try {
       if (this.config.mode === "live") {
-        if (!this.config.walletKeypairPath) throw new Error("LIVE_NOT_ARMED");
         const { executeLiveSwap } = await import("../market/live-broker.js");
         const live = await executeLiveSwap({
           side: "sell",
@@ -1732,10 +1790,14 @@ export class Desk {
           qty: pos.qty,
           decimals: pos.decimals,
           keypairPath: this.config.walletKeypairPath,
+          readEnvSecret: this.config.readWalletSecret,
           rpcUrl: this.config.rpcUrl,
           quoteUrl: this.config.jupiterQuoteUrl,
-          swapUrl: this.config.jupiterSwapUrl
+          swapUrl: this.config.jupiterSwapUrl,
+          maxEntrySlippage: this.config.rules.maxEntrySlippage,
+          maxExitSlippage: this.maxExitSlippage ?? undefined
         });
+        void this.refreshWallet();
         this.applySell(pos, {
           id: randomUUID(),
           mint: pos.mint,
@@ -1885,10 +1947,11 @@ export class Desk {
   private review(mint: string, mark: number): void {
     const pos = this.book.positions.get(mint);
     if (!pos || pos.closing) return;
-    const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit });
-    const peakRose = view.peakPrice > pos.peakPrice;
+    const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit, liveTrailPct: this.liveTrailFor(pos) });
+    const peakRose = view.peakPrice > pos.peakPrice || (view.markPeak != null && view.markPeak > (pos.markPeak ?? 0));
     const armChanged = view.trailArmed !== pos.trailArmed;
     pos.peakPrice = view.peakPrice;
+    if (view.markPeak != null) pos.markPeak = view.markPeak;
     pos.trailArmed = view.trailArmed;
     if (view.action === "hold" || !view.code) {
       if (peakRose || armChanged) this.persist();
@@ -1931,7 +1994,7 @@ export class Desk {
     const marketValueUsd = pos.qty * markPrice;
     const pnlUsd = marketValueUsd - pos.costUsd;
     // The stop and peak shown are the risk book's, never moved by a display-only mark.
-    const assessment = assessPosition(pos, this.book.price(pos.mint, pos.entryPrice), this.config.rules);
+    const assessment = assessPosition(pos, this.book.price(pos.mint, pos.entryPrice), this.config.rules, { liveTrailPct: this.liveTrailFor(pos) });
     return {
       mint: pos.mint,
       symbol: pos.symbol,
@@ -2143,7 +2206,8 @@ export class Desk {
     this.livePending.delete(mint);
     this.liveMarks.set(mint, { price: priceUsd, at: origin.at || now, feed: origin.feed });
     const risk = this.book.price(mint, pos.entryPrice);
-    const stop = assessPosition(pos, risk, this.config.rules).stopPrice;
+    const seen = assessPosition(pos, risk, this.config.rules, { liveTrailPct: this.liveTrailFor(pos) });
+    const stop = pos.live && seen.trailHintPrice != null ? Math.max(seen.stopPrice, seen.trailHintPrice) : seen.stopPrice;
     const drift = risk > 0 ? Math.abs(priceUsd / risk - 1) : 1;
     const lastAsk = this.lastConfirmAt.get(mint) ?? 0;
     if ((priceUsd <= stop && now - lastAsk >= 1_500) || (drift > 0.03 && now - lastAsk >= 5_000)) {
@@ -2335,7 +2399,10 @@ export class Desk {
       pnlAlertPct: this.pnlAlertPct,
       positionSizeUsd: this.positionSizeUsd,
       maxExposurePct: this.maxExposurePct,
-      paperResetUsd: this.paperResetUsd
+      paperResetUsd: this.paperResetUsd,
+      liveTradeUsd: this.liveTradeUsd,
+      liveDailyCapUsd: this.liveDailyCapUsd,
+      liveTrailPct: this.liveTrailPct
     };
   }
 
@@ -2418,6 +2485,27 @@ export class Desk {
       if (!Number.isFinite(raw) || raw <= 0) return { ok: false, error: "Paper reset amount must be $100 to $10,000." };
       next.paperResetUsd = clampResetUsd(raw);
     }
+    if ("liveTradeUsd" in patch) {
+      const raw = num("liveTradeUsd");
+      if (!Number.isFinite(raw) || raw < LIVE_BAND.tradeUsd.min || raw > LIVE_BAND.tradeUsd.max) {
+        return { ok: false, error: `Live trade size must be $${LIVE_BAND.tradeUsd.min} to $${LIVE_BAND.tradeUsd.max}.` };
+      }
+      next.liveTradeUsd = clampLiveTradeUsd(raw);
+    }
+    if ("liveDailyCapUsd" in patch) {
+      const raw = patch.liveDailyCapUsd;
+      if (raw == null || raw === "" || raw === 0) next.liveDailyCapUsd = null;
+      else {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) return { ok: false, error: "Live daily cap must be a dollar amount, or blank for no cap." };
+        next.liveDailyCapUsd = clampLiveDailyCapUsd(n);
+      }
+    }
+    if ("liveTrailPct" in patch) {
+      const fraction = liveTrailFromWire(num("liveTrailPct"));
+      if (!Number.isFinite(fraction)) return { ok: false, error: "Live trailing stop must be a percent from 0.5 to 20." };
+      next.liveTrailPct = fraction;
+    }
     if ("pnlAlertPct" in patch) {
       if (!Number.isFinite(num("pnlAlertPct"))) return { ok: false, error: "PnL alert must be a percent, or 0 to leave it off." };
       next.pnlAlertPct = clampPnlAlertPct(num("pnlAlertPct"));
@@ -2478,6 +2566,12 @@ export class Desk {
     if ("positionSizeUsd" in saved) this.positionSizeUsd = clampPositionUsd(saved.positionSizeUsd ?? null);
     if (typeof saved.maxExposurePct === "number") this.maxExposurePct = clampExposurePct(saved.maxExposurePct);
     if (typeof saved.paperResetUsd === "number") this.paperResetUsd = clampResetUsd(saved.paperResetUsd);
+    if (typeof saved.liveTradeUsd === "number") this.liveTradeUsd = clampLiveTradeUsd(saved.liveTradeUsd);
+    if ("liveDailyCapUsd" in saved) this.liveDailyCapUsd = clampLiveDailyCapUsd(saved.liveDailyCapUsd ?? null);
+    if (typeof saved.liveTrailPct === "number") {
+      const trail = liveTrailFromWire(saved.liveTrailPct);
+      if (Number.isFinite(trail)) this.liveTrailPct = trail;
+    }
   }
 
   private buysInLastHour(): number {
@@ -2531,19 +2625,113 @@ export class Desk {
       maxExposurePct: view.maxExposurePct,
       paperResetUsd: view.paperResetUsd,
       positionRefreshMs: view.positionRefreshMs,
-      maxExitSlippage: view.maxExitSlippage
+      maxExitSlippage: view.maxExitSlippage,
+      liveTradeUsd: view.liveTradeUsd,
+      liveDailyCapUsd: view.liveDailyCapUsd,
+      liveTrailPct: view.liveTrailPct
     };
   }
 
   private persist(): void {
-    this.store.saveBook({
+    this.store.saveBook(
+      {
       cashUsd: this.book.cashUsd,
       startingBalanceUsd: this.config.startingBalanceUsd,
       startedAt: this.startedAt,
       positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
       cooldowns: [...this.cooldowns.entries()],
       lastPrices: [...this.book.lastPrice.entries()]
-    });
+      },
+      this.config.mode === "live" ? "book:live" : "book"
+    );
+  }
+
+  /** v13.5 the live trail applies to live positions only. */
+  private liveTrailFor(pos: Position): number | null {
+    return pos.live === true ? this.liveTrailPct : null;
+  }
+
+  /** v13.5 read-only SOL / USDC balance. In live mode the wallet's USDC is the book's cash. */
+  async refreshWallet(): Promise<WalletBalances | null> {
+    const read = await this.walletReader();
+    this.walletBalances = read;
+    if (this.config.mode === "live" && read.error == null && read.usdc != null) {
+      this.book.cashUsd = roundUsd(read.usdc);
+      if (!(this.config.startingBalanceUsd > 0)) {
+        this.config.startingBalanceUsd = roundUsd(read.usdc + this.exposureUsd());
+      }
+      this.persist();
+    }
+    return read;
+  }
+
+  /** v13.5 the wallet card's refresh button: at most one RPC read per 10 s. */
+  async refreshWalletThrottled(): Promise<void> {
+    if (!this.walletStatus.walletPublicKey && this.config.mode !== "live") return;
+    if (this.walletBalances && Date.now() - this.walletBalances.at < 10_000) return;
+    await this.refreshWallet();
+  }
+
+  /** v13.5 USD spent on live buys today (desk-host local day). */
+  liveSpentTodayUsd(now = Date.now()): number {
+    const saved = this.store.readJson("liveSpend") as { day?: string; usd?: number } | null;
+    return saved && saved.day === localDay(now) && typeof saved.usd === "number" && Number.isFinite(saved.usd) ? saved.usd : 0;
+  }
+
+  private noteLiveSpend(usd: number): void {
+    const day = localDay(Date.now());
+    this.store.writeJson("liveSpend", { day, usd: roundUsd(this.liveSpentTodayUsd() + usd) });
+  }
+
+  /**
+   * v13.5 fail-closed live pre-checks: a fresh wallet read, enough USDC for the trade and SOL for
+   * fees, and the optional live daily cap. Any unknown refuses the buy.
+   */
+  private async liveBuyReady(sizeUsd: number): Promise<{ ok: true } | { ok: false; error: string; code: "LIVE_WALLET" | "LIVE_DAILY_CAP" | "LIVE_NOT_ARMED" }> {
+    if (this.liveDailyCapUsd != null) {
+      const spent = this.liveSpentTodayUsd();
+      if (spent + sizeUsd > this.liveDailyCapUsd + 1e-9) {
+        return {
+          ok: false,
+          error: `Live daily cap ${money(this.liveDailyCapUsd)} reached (${money(spent)} spent today).`,
+          code: "LIVE_DAILY_CAP"
+        };
+      }
+    }
+    const read = await this.refreshWallet();
+    if (!read || read.error != null || read.sol == null || read.usdc == null) {
+      return { ok: false, error: `Wallet balance unknown${read?.error ? ` (${read.error})` : ""}. Live buy refused.`, code: "LIVE_WALLET" };
+    }
+    if (read.sol < MIN_FEE_SOL) {
+      return { ok: false, error: `Wallet has ${read.sol.toFixed(4)} SOL. Keep at least ${MIN_FEE_SOL} SOL for fees.`, code: "LIVE_WALLET" };
+    }
+    if (read.usdc < sizeUsd) {
+      return { ok: false, error: `Wallet has ${money(read.usdc)} USDC. A live buy spends ${money(sizeUsd)} USDC.`, code: "LIVE_WALLET" };
+    }
+    return { ok: true };
+  }
+
+  /** v13.5 wallet card. Public address and balances only. */
+  walletView(): WalletView {
+    const bal = this.walletBalances;
+    return {
+      keyLoaded: this.walletStatus.keypairPresent,
+      keySource: this.walletStatus.keySource,
+      keyInvalid: this.walletStatus.keyInvalid,
+      publicKey: this.walletStatus.walletPublicKey,
+      solBalance: bal?.sol ?? null,
+      usdcBalance: bal?.usdc ?? null,
+      balanceAt: bal?.at ?? null,
+      balanceError: bal?.error ?? null,
+      live: this.config.mode === "live",
+      liveRequested: this.config.liveRequested,
+      rpcPublic: isPublicRpc(this.config.rpcUrl),
+      liveTradeUsd: this.liveTradeUsd,
+      liveDailyCapUsd: this.liveDailyCapUsd,
+      liveTrailPct: this.liveTrailPct,
+      liveSpentTodayUsd: this.liveSpentTodayUsd(),
+      minFeeSol: MIN_FEE_SOL
+    };
   }
 
   private log(event: Omit<FeedEvent, "id" | "ts">, payload?: unknown): void {
@@ -2694,4 +2882,10 @@ export async function jupiterLookupQuote(
     };
   }
   return { ok: true, priceUsd: quote.priceUsd, liquidityUsd: quote.liquidityUsd };
+}
+
+/** v13.5 YYYY-MM-DD on the desk host's clock (Austin is US Eastern). */
+function localDay(at: number): string {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }

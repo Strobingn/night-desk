@@ -73,8 +73,11 @@ describe("entry slippage guard", () => {
       feeUsd: 0.01,
       slippage: 0.5
     });
-    const desk = new Desk(testConfig({ mode: "live", walletKeypairPath: "/tmp/night-desk-not-used.json", liveRequested: true }));
+    const desk = new Desk(testConfig({ mode: "live", walletKeypairPath: "/tmp/night-desk-not-used.json", liveRequested: true }), {
+      walletBalances: async () => ({ sol: 0.5, usdc: 100, at: Date.now(), error: null })
+    });
     try {
+      desk.updateSettings({ liveTradeUsd: 7.84 });
       await desk.submitCandidate(makeToken({ mint, symbol: "url", priceUsd: 0.00000292, liquidityUsd: 180_000 }));
       const bought = await desk.manualBuy(mint, 7.84);
       expect(bought.ok).toBe(false);
