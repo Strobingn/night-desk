@@ -27,7 +27,7 @@ import { phraseAdvice } from "./commentary.js";
 import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump, markUnusable, needsShockConfirm, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
-import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR } from "../market/chain-marks.js";
+import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { DeskStore } from "../store/db.js";
@@ -408,6 +408,8 @@ export class Desk {
       fetchImpl: deps.priceFetch ?? this.net.fetchAt(0),
       pollMs: () => this.positionRefreshMs,
       pairFor: (mint) => this.book.positions.get(mint)?.pairAddress,
+      // v13.6: a held pump.fun coin with no DexScreener pair yet is read from its bonding curve.
+      fallbackPair: (mint) => (mint.endsWith("pump") ? pumpCurveAddress(mint) ?? undefined : undefined),
       live: (mint, priceUsd, origin) => this.liveMark(mint, priceUsd, origin),
       chain: this.chain,
       onStale: (mint, silentMs) => {

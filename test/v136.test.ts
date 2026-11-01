@@ -15,6 +15,7 @@ import {
 } from "../src/market/chain-marks.js";
 import { DexSearchClient, matchLocal, rankDexSearch, shortMint, tickerQuery } from "../src/market/ticker-search.js";
 import { bucketFor } from "../src/market/net.js";
+import { PositionPricer } from "../src/market/position-pricer.js";
 import { testConfig, testDesk } from "./helpers.js";
 
 const MINT = "9dGdEhbke3J8kBNfb3TUmm2qqfVfLZHS7scxxpCNpump";
@@ -369,5 +370,42 @@ describe("v13.6 web helpers", () => {
     expect(
       candidateLine({ mint: MINT2, symbol: "QTFALCN", name: "Qatar Falcon", mintShort: "6Fpq…pump", liquidityUsd: 125_291, volume1hUsd: 34_333, held: true, origin: "position", exact: true })
     ).toBe("6Fpq…pump · liq $125.3K · 1h vol $34.3K · held");
+  });
+});
+
+describe("v13.6 held pump.fun coin with no DexScreener pair yet", () => {
+  it("reads its bonding curve each cycle and pushes a calibrated mark", async () => {
+    const curve = pumpCurveAddress(MINT)!;
+    const calls: string[][] = [];
+    const chain = new ChainMarkReader(
+      "http://rpc",
+      rpcFrom(() => ({
+        [curve]: { owner: PUMP_PROGRAM, data: curveData(1_000_000_000_000_000n, 30_000_000_000n) },
+        [MINT]: { owner: TOKENKEG, data: mintData(6) }
+      }), calls)
+    );
+    const usd = (30 / 1e9) * 150;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("jup.ag")) return Response.json({ [MINT]: { usdPrice: usd } });
+      return Response.json({ pairs: [] });
+    }) as unknown as typeof fetch;
+    let now = 0;
+    const lives: number[] = [];
+    const pricer = new PositionPricer({
+      heldMints: () => [MINT],
+      pairFor: () => undefined,
+      fallbackPair: (m) => pumpCurveAddress(m) ?? undefined,
+      tick: () => {},
+      live: (_m, p) => lives.push(p),
+      onStale: () => {},
+      fetchImpl,
+      now: () => now,
+      chain
+    });
+    for (now = 0; now <= 12_000; now += 1_000) await pricer.poll();
+    expect(calls.some((keys) => keys.includes(curve))).toBe(true);
+    expect(lives.length).toBeGreaterThan(0);
+    expect(lives.at(-1)!).toBeCloseTo(usd, 9);
   });
 });

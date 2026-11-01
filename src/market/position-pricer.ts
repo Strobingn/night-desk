@@ -37,6 +37,8 @@ export interface PositionPricerOptions {
   live?: (mint: string, priceUsd: number, origin: LiveOrigin) => void;
   /** The pool a held mint is anchored to, so the chain read uses that exact pool. */
   pairFor?: (mint: string) => string | undefined;
+  /** v13.6 last resort when no pool is known yet: the pump.fun bonding-curve PDA of a brand-new coin. */
+  fallbackPair?: (mint: string) => string | undefined;
   /** Liquidity of the pool that supplied the price. Optional. */
   onQuote?: (mint: string, liquidityUsd: number) => void;
   onStale: (mint: string, silentMs: number) => void;
@@ -182,7 +184,7 @@ export class PositionPricer {
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     const chain = this.opts.chain;
     const wanted = chain
-      ? held.map((mint) => ({ mint, pair: this.opts.pairFor?.(mint) ?? this.lastPair.get(mint) ?? "" })).filter((w) => w.pair)
+      ? held.map((mint) => ({ mint, pair: this.opts.pairFor?.(mint) ?? this.lastPair.get(mint) ?? this.opts.fallbackPair?.(mint) ?? "" })).filter((w) => w.pair)
       : [];
     const chainDue = chain && wanted.length > 0 && chain.gate.due(now, force);
     if (chainDue) chain!.gate.started(now);
