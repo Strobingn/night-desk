@@ -1,13 +1,15 @@
-import { useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { countNewSince, initialTapeFollow, pausedLabel, stepTapeFollow, type TapeFollowState } from "../../../src/desk/tape-follow";
 import { api } from "../api";
 import { clock } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
 import { OneTapBar, TapBuyButton, TapSellButton } from "./OneTap";
+import { slipText, tapUsdText } from "../tapeToolbar";
 import { ScoutStatus } from "./ScoutStatus";
 import { coinCards, HOT_RANK, parseTapeSort, sortCoins, TAPE_SORT_KEY, TAPE_SORTS, TOP_VOLUME, VERDICT_LABEL, type CoinRow, type TapeSort, type Verdict } from "../coins";
-import { compactUsd, px } from "../format";
+import { compactUsd } from "../format";
+import { shortPx } from "../tapeToolbar";
 import { CoinAvatar, Icon } from "../ui";
 
 const COIN_FILTERS = ["all", "open", "trade", "near", "killed"] as const;
@@ -47,6 +49,16 @@ export function TapeScreen({
     }
   }
   const [stageFilter, setStageFilter] = useState<(typeof LOG_STAGES)[number]>("all");
+  // v13.4: the One Tap controls open in a bottom sheet from the slim chip.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  useEffect(() => {
+    if (!sheetOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSheetOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sheetOpen]);
   const [selected, setSelected] = useState<{ mint: string; symbol: string } | null>(null);
   const [buySize, setBuySize] = useState("");
   const [logError, setLogError] = useState<string | null>(null);
@@ -211,54 +223,79 @@ export function TapeScreen({
 
   return (
     <div className="tape-screen">
-      <div className="tape-head">
-        <h2>{view === "coins" ? "Tape" : "Activity log"}</h2>
-        <div className="segmented" role="tablist" aria-label="Tape view">
-          <button type="button" role="tab" aria-selected={view === "coins"} className={view === "coins" ? "on" : ""} onClick={() => setView("coins")}>
-            <Icon name="coins" size={16} /> Coins
+      {/* v13.4 compact sticky toolbar: Scout line + view toggle, then one-tap chip, sort and filter. The list scrolls under it. */}
+      <div className="tape-toolbar">
+        <div className="tape-head">
+          <ScoutStatus feed={snap.feed} compact />
+          <div className="segmented compact" role="tablist" aria-label="Tape view">
+            <button type="button" role="tab" aria-selected={view === "coins"} aria-label="Coins" title="Coins" className={view === "coins" ? "on" : ""} onClick={() => setView("coins")}>
+              <Icon name="coins" size={16} /> <span className="seg-text">Coins</span>
+            </button>
+            <button type="button" role="tab" aria-selected={view === "log"} aria-label="Raw log" title="Raw log" className={view === "log" ? "on" : ""} onClick={() => setView("log")}>
+              <Icon name="list" size={16} /> <span className="seg-text">Raw log</span>
+            </button>
+          </div>
+          {view === "log" ? (
+          <button className={`live-toggle${tapePaused ? " on" : ""}`} type="button" onClick={() => (tapePaused ? goLiveTape() : pauseTape())}>
+            {tapePaused ? "Live" : "Pause"}
           </button>
-          <button type="button" role="tab" aria-selected={view === "log"} className={view === "log" ? "on" : ""} onClick={() => setView("log")}>
-            <Icon name="list" size={16} /> Raw log
-          </button>
+          ) : null}
         </div>
-        {view === "log" ? (
-        <button className={`live-toggle${tapePaused ? " on" : ""}`} type="button" onClick={() => (tapePaused ? goLiveTape() : pauseTape())}>
-          {tapePaused ? "Live" : "Pause"}
-        </button>
-        ) : null}
-      </div>
-      {view === "coins" ? (
-        <div className="sortbar" role="radiogroup" aria-label="Tape sort">
-          <span className="sort-label">Sort</span>
-          {TAPE_SORTS.map((o) => (
-            <button key={o.id} type="button" role="radio" aria-checked={sort === o.id} className={sort === o.id ? "on" : ""} onClick={() => setSort(o.id)}>
-              {o.label}
+        {view === "coins" ? (
+          <div className="tape-tools">
+            <button type="button" className="onetap-chip" aria-label="One-tap size and slippage" aria-haspopup="dialog" onClick={() => setSheetOpen(true)}>
+              ⚡ {tapUsdText(actions.tapUsd)} · slip {slipText(snap.rules.maxEntrySlippage)}% <span aria-hidden="true">▴</span>
+            </button>
+            <label className="tool-select" title="Sort">
+              <span aria-hidden="true">↕</span>
+              <select aria-label="Tape sort" value={sort} onChange={(event) => setSort(event.target.value as TapeSort)}>
+                {TAPE_SORTS.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="tool-select" title="Filter">
+              <select aria-label="Coin verdict" value={coinFilter} onChange={(event) => setCoinFilter(event.target.value as (typeof COIN_FILTERS)[number])}>
+                {COIN_FILTERS.map((f) => (
+                  <option key={f} value={f}>
+                    {COIN_FILTER_LABEL[f]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : (
+        <div className="filters" role="tablist" aria-label="Log stage">
+          {LOG_STAGES.map((stage) => (
+            <button key={stage} type="button" className={stageFilter === stage ? "on" : ""} onClick={() => setStageFilter(stage)}>
+              {stage}
             </button>
           ))}
+        </div>
+        )}
+      </div>
+      {logError ? <div className="banner">{logError}</div> : null}
+      {sheetOpen && view === "coins" ? (
+        <div className="sheet-backdrop" onClick={() => setSheetOpen(false)}>
+          <section className="sheet" role="dialog" aria-modal="true" aria-label="One tap settings" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-handle" aria-hidden="true" />
+            <header>
+              <h3>One tap</h3>
+              <button type="button" className="ghost" onClick={() => setSheetOpen(false)}>
+                Done
+              </button>
+            </header>
+            <OneTapBar snap={snap} actions={actions} />
+            <p className="fine">
+              Tap ⚡ Buy to paper-buy now at your one-tap size, or Buy… to pick a size first (cap{capText ? ` $${capText}` : ""}). No add while a mint is open.
+            </p>
+          </section>
         </div>
       ) : null}
-      {view === "coins" ? (
-        <div className="filters" role="tablist" aria-label="Coin verdict">
-          {COIN_FILTERS.map((f) => (
-            <button key={f} type="button" className={coinFilter === f ? "on" : ""} onClick={() => setCoinFilter(f)}>
-              {COIN_FILTER_LABEL[f]}
-            </button>
-          ))}
-        </div>
-      ) : (
-      <div className="filters" role="tablist" aria-label="Log stage">
-        {LOG_STAGES.map((stage) => (
-          <button key={stage} type="button" className={stageFilter === stage ? "on" : ""} onClick={() => setStageFilter(stage)}>
-            {stage}
-          </button>
-        ))}
-      </div>
-      )}
-      {logError ? <div className="banner">{logError}</div> : null}
-      <ScoutStatus feed={snap.feed} />
-      {view === "coins" ? <OneTapBar snap={snap} actions={actions} /> : null}
       <form
-        className="buybar"
+        className={`buybar${view === "coins" && !selected ? " hidden" : ""}`}
         onSubmit={(event) => {
           event.preventDefault();
           buySelected();
@@ -288,9 +325,7 @@ export function TapeScreen({
           </>
         ) : (
           <p className="empty">
-            {view === "coins"
-              ? `Tap ⚡ Buy to paper-buy now at your one-tap size, or Buy… to pick a size first (cap${capText ? ` $${capText}` : ""}). No add while a mint is open.`
-              : `Select a mint on the tape to buy. The size starts at the current cap${capText ? ` ($${capText})` : ""}. A larger request is filled at the cap. No add while that mint is open.`}
+            {`Select a mint on the tape to buy. The size starts at the current cap${capText ? ` ($${capText})` : ""}. A larger request is filled at the cap. No add while that mint is open.`}
           </p>
         )}
       </form>
@@ -361,44 +396,47 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy }: { coin: Co
   const chTone = ch == null || !Number.isFinite(ch) ? "flat" : ch > 0 ? "up" : ch < 0 ? "down" : "flat";
   return (
     <article className={`coin-card v-${coin.verdict}${selected ? " selected" : ""}${top ? " top-vol" : ""}${hot ? " hot" : ""}`} onClick={onSelect} data-mint={coin.mint}>
+      {/* v13.4 compact card: same facts and buttons, three rows. */}
       <div className="cc-top">
-        <CoinAvatar symbol={coin.symbol} mint={coin.mint} tone={tone[coin.verdict]} size={44} />
+        <CoinAvatar symbol={coin.symbol} mint={coin.mint} tone={tone[coin.verdict]} size={36} />
         <div className="cc-name">
-          <b>{coin.symbol}</b>
-          <div className="cc-chips">
-            <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
-            {hot ? <span className="vol-badge hot" title={`#${rank} by 1h volume`}>HOT #{rank}</span> : top ? <span className="vol-badge" title={`#${rank} by 1h volume`}>VOL #{rank}</span> : null}
+          <div className="cc-title-row">
+            <b>{coin.symbol}</b>
+            <span className="cc-chips">
+              <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
+              {hot ? <span className="vol-badge hot" title={`#${rank} by 1h volume`}>HOT #{rank}</span> : top ? <span className="vol-badge" title={`#${rank} by 1h volume`}>VOL #{rank}</span> : null}
+            </span>
           </div>
-        </div>
-        {coin.score != null ? (
-          <span className={`score-badge${coin.verdict === "trade" || coin.verdict === "bought" || coin.verdict === "open" ? " pass" : ""}`} title="Analyst score">
-            {coin.score.toFixed(2)}
+          <span className="cc-meta">
+            {coin.source ?? "scout"} · {clock(coin.lastTs || Date.now())}
+            {coin.score != null ? (
+              <span className={`score-inline${coin.verdict === "trade" || coin.verdict === "bought" || coin.verdict === "open" ? " pass" : ""}`} title="Analyst score">
+                {" "}· score {coin.score.toFixed(2)}
+              </span>
+            ) : null}
           </span>
-        ) : null}
+        </div>
+        <div className={`cc-chgbox ${chTone}`} title="1h price change">
+          <b>{ch == null || !Number.isFinite(ch) ? "—" : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}</b>
+          <span className="k">1h chg</span>
+        </div>
       </div>
-      <div className="cc-stats">
+      <div className="cc-stats inline">
         <div className="cc-stat vol">
-          <span className="k">1h volume</span>
+          <span className="k">1h vol</span>
           <b>{coin.vol1h != null ? compactUsd(coin.vol1h) : "—"}</b>
         </div>
-        <div className={`cc-stat chg ${chTone}`} title="1h price change">
-          <span className="k">1h change</span>
-          <b>{ch == null || !Number.isFinite(ch) ? "—" : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}</b>
-        </div>
         <div className="cc-stat">
-          <span className="k">5m volume</span>
+          <span className="k">5m vol</span>
           <b>{coin.vol5m != null ? compactUsd(coin.vol5m) : "—"}</b>
         </div>
         <div className="cc-stat">
           <span className="k">Price</span>
-          <b>{coin.mark ? px(coin.mark) : "—"}</b>
+          <b>{coin.mark ? shortPx(coin.mark) : "—"}</b>
         </div>
       </div>
-      {coin.reason ? <span className="cc-reason">{coin.codes.length ? <code>{coin.codes[0]}</code> : null} {coin.reason}</span> : null}
       <div className="cc-foot">
-        <span className="cc-meta">
-          {coin.source ?? "scout"} · {clock(coin.lastTs || Date.now())}
-        </span>
+        <span className="cc-reason">{coin.codes.length ? <code>{coin.codes[0]}</code> : null} {coin.reason ?? ""}</span>
         {coin.verdict !== "open" ? (
           <span className="cc-buys">
             <TapBuyButton mint={coin.mint} symbol={coin.symbol} actions={actions} />

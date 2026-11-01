@@ -336,7 +336,7 @@ export function App() {
 
   return (
     <div className="shell">
-      <header className="top">
+      <header className={`top${tab === "tape" ? " on-tape" : ""}`}>
         <div className="brand">
           <span className="logo" aria-hidden="true">
             <Icon name="moon" size={20} />
@@ -372,7 +372,7 @@ export function App() {
           {snap.mode === "live" ? "LIVE" : "PAPER"}
         </div>
         </div>
-        <div className={`metrics${tab === "home" ? " on-home" : ""}`}>
+        <div className={`metrics${tab === "home" ? " on-home" : ""}${tab === "tape" ? " on-tape" : ""}`}>
           <Metric label={snap.mode === "live" ? "Live cash" : "Paper cash"} value={usd(snap.cashUsd)} hint={`book ${usd(snap.startingBalanceUsd)}`} />
           <Metric label="Marked equity" value={usd(snap.equityUsd)} hint="cash + marks" />
           <Metric label="Session P&L" value={signedUsd(snap.sessionPnlUsd)} hint={signedPct(snap.sessionPnlPct)} tone={tone(snap.sessionPnlUsd)} />
