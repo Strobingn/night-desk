@@ -15,6 +15,33 @@ object OneTap {
         else -> kotlin.math.max(1.0, kotlin.math.floor(capUsd * 100.0) / 100.0)
     }
 
+    /** v13.5: a LIVE desk always taps the live per-trade size ($5 default), never this phone's paper amount. */
+    fun effectiveTapUsd(mode: String?, tapUsd: Double, liveTradeUsd: Double?): Double =
+        if (mode == "live") (liveTradeUsd?.takeIf { it > 0 && it.isFinite() } ?: 5.0) else tapUsd
+
+    /** v13.5 wallet card: first 4 … last 4 of the public address. */
+    fun shortAddress(address: String?): String = when {
+        address.isNullOrBlank() -> "—"
+        address.length > 12 -> address.take(4) + "…" + address.takeLast(4)
+        else -> address
+    }
+
+    /** v13.5 wallet card lines. Same wording as web/src/screens/Wallet.tsx. Never a secret. */
+    fun walletLines(w: WalletInfo?, mode: String): List<String> {
+        if (w == null) return listOf("Wallet status not reported by this desk build.")
+        val lines = mutableListOf<String>()
+        lines += when {
+            w.keyLoaded -> "Key loaded: yes (" + (if (w.keySource == "env") "WALLET_PRIVATE_KEY" else "keypair file") + ")."
+            w.keyInvalid -> "Key loaded: no. WALLET_PRIVATE_KEY is set but is not a Solana private key."
+            else -> "Key loaded: no. Fill WALLET_PRIVATE_KEY= in Austin's .env."
+        }
+        if (w.balanceError != null) lines += "Balance: unavailable (${w.balanceError})."
+        lines += if (w.live) "LIVE is ON. One-tap and auto-buys send real swaps." else
+            "LIVE is OFF. " + (if (w.liveRequested) "LIVE_TRADING=true but the desk could not arm." else "LIVE_TRADING is not true.")
+        if (w.rpcPublic) lines += "RPC: free public Solana RPC (rate limited)."
+        return lines
+    }
+
     fun buyText(symbol: String, json: JSONObject?, ok: Boolean, ms: Long): String {
         if (json == null) return "$symbol: buy refused"
         if (!ok) {
@@ -26,7 +53,7 @@ object OneTap {
         val size = json.optFinite("sizeUsd", 0.0)
         val fill = json.optFinite("fillPriceUsd", Double.NaN).takeIf { it.isFinite() && it > 0 }
         val clamped = json.optFinite("clampedFrom", Double.NaN).takeIf { it.isFinite() }
-        val mode = json.optText("mode").ifBlank { "paper" }
+        val mode = json.optText("mode").ifBlank { "paper" }.let { if (it == "live") "LIVE" else it }
         return "Bought $sym ${formatUsd(size)}" + (if (fill != null) " @ ${priceText(fill)}" else "") +
             (if (clamped != null) " (cut from ${formatUsd(clamped)} to the cap)" else "") + " · $mode · $ms ms"
     }

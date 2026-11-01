@@ -283,8 +283,10 @@ fun NightDeskApp(desk: DeskRepository) {
     val tapping by desk.tapping.collectAsState()
     val tapSaved by desk.tapUsd.collectAsState()
     val oneTap = snap?.let { s ->
+        // v13.5: a LIVE desk taps the live per-trade size ($5 default), never this phone's paper amount.
+        val tapNow = com.dirk.nightdesk.OneTap.effectiveTapUsd(s.mode, com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd), s.liveTradeUsd)
         OneTapUi(
-            tapUsd = com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd),
+            tapUsd = tapNow,
             capUsd = s.positionCapUsd,
             maxUsd = kotlin.math.max(s.positionCapUsd, s.cashUsd),
             slipPct = kotlin.math.round(s.maxEntrySlippage * 10_000.0) / 100.0,
@@ -293,8 +295,7 @@ fun NightDeskApp(desk: DeskRepository) {
             openCount = s.positions.size,
             onBuy = { mint, symbol ->
                 haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
-                val size = com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd)
-                scope.launch { desk.oneTapBuy(mint, symbol, size) }
+                scope.launch { desk.oneTapBuy(mint, symbol, tapNow) }
             },
             onSell = { mint, symbol ->
                 haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
@@ -305,7 +306,9 @@ fun NightDeskApp(desk: DeskRepository) {
                 scope.launch { desk.sellAll() }
             },
             onTapUsd = { desk.setTapUsd(it) },
-            onSlip = { pct -> scope.launch { desk.saveSettings(mapOf("maxEntrySlippage" to pct)) } }
+            onSlip = { pct -> scope.launch { desk.saveSettings(mapOf("maxEntrySlippage" to pct)) } },
+            live = s.mode == "live",
+            liveTrailPct = s.liveTrailPct
         )
     }
 
@@ -492,7 +495,7 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
         Spacer(Modifier.width(8.dp))
         val isLive = mode == "live"
         Text(
-            mode.uppercase(),
+            if (isLive) "LIVE · REAL $" else mode.uppercase(),
             color = if (isLive) P.onDown else P.onAccent,
             fontWeight = FontWeight.ExtraBold,
             fontSize = 12.sp,
@@ -546,6 +549,7 @@ private fun BookScreen(
                 OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap)
             }
         }
+        item { WalletCard(snap) }
         item { LiveReadyCard(snap?.readiness, onReady) }
         item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
         if (snap?.mode != "live") {
@@ -690,7 +694,7 @@ private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit)
             )
         }
         Text(
-            "This note does not enable live trading and does not save a Phantom seed. The trading keypair stays on the Austin desk host. Night Desk has no wallet vault.",
+            "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY in Austin's .env on the desk host. Night Desk has no wallet vault.",
             color = Dim,
             fontSize = 12.sp
         )
@@ -1004,7 +1008,7 @@ private fun OpenPositionCard(
         if (oneTap != null) {
             val inFlight = oneTap.selling(pos.mint)
             BigButton(
-                if (inFlight) "Selling…" else "⚡ Sell now",
+                if (inFlight) "Selling…" else oneTap.sellLabel,
                 P.down,
                 P.onDown,
                 Modifier.fillMaxWidth().padding(top = 12.dp),
@@ -1783,13 +1787,13 @@ private fun OneTapChip(ui: OneTapUi, modifier: Modifier = Modifier, onOpen: () -
     Row(
         modifier
             .clip(RoundedCornerShape(50))
-            .background(P.accent.copy(alpha = 0.16f))
-            .border(1.dp, P.accent.copy(alpha = 0.6f), RoundedCornerShape(50))
+            .background(if (ui.live) P.down.copy(alpha = 0.18f) else P.accent.copy(alpha = 0.16f))
+            .border(if (ui.live) 2.dp else 1.dp, if (ui.live) P.down else P.accent.copy(alpha = 0.6f), RoundedCornerShape(50))
             .clickable(onClick = onOpen)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(com.dirk.nightdesk.TapeToolbar.oneTapChip(ui.tapUsd, ui.slipPct), color = P.ink, fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Text((if (ui.live) "LIVE " else "") + com.dirk.nightdesk.TapeToolbar.oneTapChip(ui.tapUsd, ui.slipPct), color = P.ink, fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         Text("  ▴", color = P.accent, fontSize = 12.sp)
     }
 }

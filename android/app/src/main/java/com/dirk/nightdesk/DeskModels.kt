@@ -68,6 +68,24 @@ data class LiveReadiness(
     val lines: List<String>
 )
 
+/** v13.5 read-only wallet card. Never carries the private key or the RPC URL. */
+data class WalletInfo(
+    val keyLoaded: Boolean,
+    /** "env" = WALLET_PRIVATE_KEY, "file" = WALLET_KEYPAIR_PATH. */
+    val keySource: String?,
+    val keyInvalid: Boolean,
+    val publicKey: String?,
+    val solBalance: Double?,
+    val usdcBalance: Double?,
+    val balanceAt: Long?,
+    val balanceError: String?,
+    val live: Boolean,
+    val liveRequested: Boolean,
+    val rpcPublic: Boolean,
+    val liveSpentTodayUsd: Double,
+    val minFeeSol: Double
+)
+
 data class DeskNotice(val ok: Boolean, val text: String)
 
 data class ClosedTradeRow(
@@ -282,6 +300,11 @@ data class DeskSnapshot(
     val feedSources: List<FeedSource> = emptyList(),
     /** v12.1: set only once a source has failed for 2+ minutes straight. */
     val feedBanner: String? = null,
+    /** v13.5 live wallet settings (separate from every paper size). */
+    val liveTradeUsd: Double = 5.0,
+    val liveDailyCapUsd: Double? = null,
+    val liveTrailPct: Double = 0.01,
+    val wallet: WalletInfo? = null,
     /** v13 hero card. */
     val startingBalanceUsd: Double = 100.0,
     val sessionPnlPct: Double = 0.0,
@@ -608,6 +631,10 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         }
     }
     return DeskSnapshot(
+        liveTradeUsd = (prefs?.optFinite("liveTradeUsd", 5.0) ?: 5.0).takeIf { it > 0 } ?: 5.0,
+        liveDailyCapUsd = prefs?.let { row -> if (!row.has("liveDailyCapUsd") || row.isNull("liveDailyCapUsd")) null else row.optFinite("liveDailyCapUsd", Double.NaN).takeIf { it.isFinite() && it > 0 } },
+        liveTrailPct = (prefs?.optFinite("liveTrailPct", 0.01) ?: 0.01).let { if (it >= 0.5) it / 100 else it }.coerceIn(0.005, 0.2),
+        wallet = parseWallet(data.optJSONObject("wallet")),
         startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
         sessionPnlPct = data.optFinite("sessionPnlPct"),
         equityPoints = equitySeries,
@@ -693,5 +720,26 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         exposureUsd = data.optFinite("exposureUsd"),
         watchlist = parseWatchRows(data.optJSONArray("watchlist")),
         lastClientCrash = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("brief").ifBlank { null } }
+    )
+}
+
+/** v13.5 wallet card from /api/state `wallet`. Null on a desk older than v13.5. */
+internal fun parseWallet(row: JSONObject?): WalletInfo? {
+    if (row == null) return null
+    fun optNum(key: String): Double? = if (!row.has(key) || row.isNull(key)) null else row.optFinite(key, Double.NaN).takeIf { it.isFinite() }
+    return WalletInfo(
+        keyLoaded = row.optBoolean("keyLoaded"),
+        keySource = row.optText("keySource").ifBlank { null }?.takeIf { it != "null" },
+        keyInvalid = row.optBoolean("keyInvalid"),
+        publicKey = row.optText("publicKey").ifBlank { null }?.takeIf { it != "null" },
+        solBalance = optNum("solBalance"),
+        usdcBalance = optNum("usdcBalance"),
+        balanceAt = optNum("balanceAt")?.toLong(),
+        balanceError = row.optText("balanceError").ifBlank { null }?.takeIf { it != "null" },
+        live = row.optBoolean("live"),
+        liveRequested = row.optBoolean("liveRequested"),
+        rpcPublic = row.optBoolean("rpcPublic"),
+        liveSpentTodayUsd = optNum("liveSpentTodayUsd") ?: 0.0,
+        minFeeSol = optNum("minFeeSol") ?: 0.005
     )
 }

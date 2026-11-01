@@ -81,7 +81,12 @@ private data class Draft(
     val exposure: Float,
     val resetUsd: Float,
     /** v13.2 Position price refresh, seconds 1–10. */
-    val refresh: Float
+    val refresh: Float,
+    /** v13.5 live wallet: $ per trade, optional daily cap, trailing stop %. */
+    val liveUsd: Float = 5f,
+    val liveCap: Float = 50f,
+    val useLiveCap: Boolean = false,
+    val liveTrail: Float = 1f
 )
 
 private fun draftOf(snap: DeskSnapshot?): Draft {
@@ -127,7 +132,11 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         useSizeUsd = snap?.positionSizeUsd != null,
         exposure = ((snap?.maxExposurePct ?: 1.0) * 100.0).toFloat().coerceIn(10f, 100f),
         resetUsd = (snap?.paperResetUsd ?: 100.0).toFloat().coerceIn(100f, 10_000f),
-        refresh = ((snap?.positionRefreshMs ?: 1_500L) / 1_000.0).toFloat().coerceIn(1f, 10f)
+        refresh = ((snap?.positionRefreshMs ?: 1_500L) / 1_000.0).toFloat().coerceIn(1f, 10f),
+        liveUsd = (snap?.liveTradeUsd ?: 5.0).toFloat().coerceIn(1f, 1_000f),
+        liveCap = (snap?.liveDailyCapUsd ?: 50.0).toFloat().coerceIn(5f, 100_000f),
+        useLiveCap = snap?.liveDailyCapUsd != null,
+        liveTrail = ((snap?.liveTrailPct ?: 0.01) * 100.0).toFloat().coerceIn(0.5f, 20f)
     )
 }
 
@@ -157,6 +166,18 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
             )
         }
         AppearanceGroup()
+        Group("Live wallet") {
+            WalletCard(snap)
+            ExactSlider("Live $ per trade", draft.liveUsd, 1f..250f, 1f, { "%.0f".format(it) }) { draft = draft.copy(liveUsd = it) }
+            Text("Every live buy, auto or one-tap, spends exactly this much USDC (\$5 default). Paper sizes are never used live.", color = Dim, fontSize = 12.sp)
+            ToggleRow("Live daily cap", draft.useLiveCap) { draft = draft.copy(useLiveCap = it) }
+            if (draft.useLiveCap) {
+                ExactSlider("Live daily cap $", draft.liveCap, 5f..1_000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(liveCap = it) }
+            }
+            Text("Off by default: no max per day.", color = Dim, fontSize = 12.sp)
+            ExactSlider("Live trailing stop %", draft.liveTrail, 0.5f..20f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(liveTrail = it) }
+            Text("Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first.", color = Dim, fontSize = 12.sp)
+        }
         Group("Entry / Filter") {
             ExactSlider("1h volume $", draft.volume, 1_000f..500_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(volume = it) }
             ExactSlider("Trade line", draft.score, 0.10f..0.95f, 0.01f, { "%.2f".format(it) }) { draft = draft.copy(score = it) }
@@ -282,11 +303,15 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "positionSizeUsd" to if (draft.useSizeUsd) draft.sizeUsd.toDouble() else null,
     "maxExposurePct" to draft.exposure.toDouble(),
     "paperResetUsd" to draft.resetUsd.toDouble(),
-    "positionRefreshMs" to Math.round(draft.refresh.toDouble() * 1_000.0)
+    "positionRefreshMs" to Math.round(draft.refresh.toDouble() * 1_000.0),
+    "liveTradeUsd" to draft.liveUsd.toDouble(),
+    "liveDailyCapUsd" to if (draft.useLiveCap) draft.liveCap.toDouble() else null,
+    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0
 )
 
 /** v13 group icons and one-line descriptions, same as the web. */
 private val GROUP_META = mapOf(
+    Pair("Live wallet", Pair("shield", "Real-money settings. Used only when Austin's desk runs with LIVE_TRADING=true.")),
     Pair("Entry / Filter", Pair("filter", "What a new coin must pass, and how the Analyst scores it.")),
     Pair("Risk / Exits", Pair("shield", "Hard stop, cooldown, daily loss and the trailing take-profit.")),
     Pair("Sizing", Pair("coins", "How much each buy spends and how much can be open at once.")),

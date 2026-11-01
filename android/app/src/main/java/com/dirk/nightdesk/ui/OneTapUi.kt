@@ -47,12 +47,16 @@ class OneTapUi(
     val onSell: (mint: String, symbol: String) -> Unit,
     val onSellAll: () -> Unit,
     val onTapUsd: (Double) -> Unit,
-    val onSlip: (Double) -> Unit
+    val onSlip: (Double) -> Unit,
+    /** v13.5 the desk is LIVE: buttons say so, the size is the live per-trade size. */
+    val live: Boolean = false,
+    val liveTrailPct: Double = 0.01
 ) {
     fun buying(mint: String) = tapping.contains("buy:$mint")
     fun selling(mint: String) = tapping.contains("sell:$mint")
     val sellingAll get() = tapping.contains("sell-all")
-    val buyLabel: String get() = "⚡ Buy " + if (tapUsd >= 100) "$" + "%.0f".format(Locale.US, tapUsd) else "$" + "%.2f".format(Locale.US, tapUsd)
+    val buyLabel: String get() = "⚡ Buy " + (if (tapUsd >= 100) "$" + "%.0f".format(Locale.US, tapUsd) else "$" + "%.2f".format(Locale.US, tapUsd)) + (if (live) " LIVE" else "")
+    val sellLabel: String get() = if (live) "⚡ Sell now LIVE" else "⚡ Sell now"
 }
 
 /** One-tap size and max slippage, right by the Buy buttons, plus Sell all. Slider + number box each. */
@@ -80,12 +84,23 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
         modifier
             .fillMaxWidth()
             .background(P.card, RoundedCornerShape(18.dp))
-            .border(1.dp, P.accent.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
+            .border(if (ui.live) 2.dp else 1.dp, if (ui.live) P.down else P.accent.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("ONE TAP", color = P.accent, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp, modifier = Modifier.weight(1f))
+            if (ui.live) {
+                Text(
+                    "LIVE",
+                    color = P.onDown,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 1.2.sp,
+                    modifier = Modifier.background(P.down, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+                Text(" ", fontSize = 11.sp)
+            }
+            Text(if (ui.live) "ONE TAP · REAL $" else "ONE TAP", color = if (ui.live) P.down else P.accent, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp, modifier = Modifier.weight(1f))
             if (showSellAll && ui.openCount > 0) {
                 BigButton(
                     if (ui.sellingAll) "Selling all…" else if (armed) "Tap again · sell ${ui.openCount}" else "Sell all (${ui.openCount})",
@@ -102,7 +117,14 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
                 }
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        if (ui.live) {
+            Text(
+                "Live size ${fmtUsd(ui.tapUsd)} per trade · trail ${fmt(ui.liveTrailPct * 100)}% · stop −${"%.0f".format(Locale.US, ui.stopPct * 100)}%. Change it in Settings → Live wallet.",
+                color = P.ink,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        } else Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Size $", color = P.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(62.dp))
             Slider(
                 value = ui.tapUsd.toFloat().coerceIn(1f, maxSize),
@@ -147,7 +169,7 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
             )
         }
         Text(
-            "One tap buys ${fmtUsd(ui.tapUsd)} now (cut to the ${fmtUsd(ui.capUsd)} cap). No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
+            (if (ui.live) "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC." else "One tap buys ${fmtUsd(ui.tapUsd)} now (cut to the ${fmtUsd(ui.capUsd)} cap).") + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
             color = P.dim,
             fontSize = 11.5.sp,
             lineHeight = 15.sp
