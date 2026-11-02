@@ -428,7 +428,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     oneTap = oneTap,
                     headerStatus = status,
                     headerLive = live,
-                    mode = snap?.mode ?: "paper"
+                    mode = snap?.mode ?: "paper",
+                    liveScope = snap?.liveScope
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -508,8 +509,8 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
         val isLive = mode == "live"
         Text(
             when {
-                isLive && liveScope == "manual" -> "LIVE YOU · AI PAPER"
-                isLive && liveScope == "all" -> "LIVE · AI + YOU"
+                isLive && liveScope == "manual" -> "LIVE · YOU"
+                isLive && liveScope == "all" -> "LIVE · AI+YOU"
                 isLive -> "LIVE · REAL $"
                 else -> mode.uppercase()
             },
@@ -552,8 +553,8 @@ private fun BookScreen(
         if (liveBook != null) {
             item {
                 SectionTitle(
-                    "LIVE positions · real $",
-                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · USDC ${money(liveBook.cashUsd)} · equity ${money(liveBook.equityUsd)}",
+                    "LIVE",
+                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · USDC ${money(liveBook.cashUsd)}",
                     P.down
                 )
             }
@@ -576,7 +577,7 @@ private fun BookScreen(
         }
         item {
             SectionTitle(
-                if (liveBook != null) "Paper positions · AI" else "Open positions",
+                if (liveBook != null) "Paper · AI" else "Open positions",
                 "${signed(openPnl)} · ${snap?.positions?.size ?: 0} open · exposure ${money(snap?.exposureUsd ?: 0.0)}",
                 if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
             )
@@ -1175,7 +1176,8 @@ private fun TapeScreen(
     initialSheetOpen: Boolean = false,
     headerStatus: String = "Connected",
     headerLive: Boolean = true,
-    mode: String = "paper"
+    mode: String = "paper",
+    liveScope: String? = null
 ) {
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
@@ -1292,7 +1294,7 @@ private fun TapeScreen(
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
         // v13.4 compact header: the Scout line (tap to open the full list) sits under the title.
-        Header(headerStatus, headerLive, mode, compact = true) {
+        Header(headerStatus, headerLive, mode, compact = true, liveScope = liveScope) {
             ScoutLine(feedSources, scoutOpen) {
                 scoutOpen = !scoutOpen
                 tapePrefs.edit().putBoolean(com.dirk.nightdesk.TapeToolbar.PREF_SCOUT_OPEN, scoutOpen).apply()
@@ -1936,7 +1938,7 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
             }
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
-                if (tab != 1) Header(status = "Connected", live = true, mode = snap.mode)
+                if (tab != 1) Header(status = "Connected", live = true, mode = snap.mode, liveScope = snap.liveScope)
                 when (tab) {
                     0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> }, oneTap)
                     1 -> TapeScreen(
@@ -1951,7 +1953,8 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                         initialSheetOpen = sheetOpen,
                         headerStatus = "Connected",
                         headerLive = true,
-                        mode = snap.mode
+                        mode = snap.mode,
+                        liveScope = snap.liveScope
                     )
                     2 -> if (addPreview != null) {
                         AddCoinScreen(com.dirk.nightdesk.DeskRepository.get(LocalContext.current), snap, null, oneTap, preview = addPreview)

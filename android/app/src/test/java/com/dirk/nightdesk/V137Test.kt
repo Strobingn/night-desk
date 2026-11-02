@@ -71,8 +71,8 @@ class V137Test {
         assertTrue(settings.contains("Live daily cap"))
         assertTrue(settings.contains("Live trailing stop %"))
         val app = File("src/main/java/com/dirk/nightdesk/ui/NightDeskApp.kt").readText()
-        assertTrue(app.contains("LIVE YOU · AI PAPER"))
+        assertTrue(app.contains("LIVE · YOU"))
         assertTrue(app.contains("Sell 100% LIVE"))
-        assertNotNull(app.indexOf("Paper positions · AI").takeIf { it > 0 })
+        assertNotNull(app.indexOf("\"Paper · AI\"").takeIf { it > 0 })
     }
 }
