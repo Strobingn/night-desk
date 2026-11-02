@@ -1655,13 +1655,7 @@ private fun LastCrashCard() {
     }
 }
 
-private fun px(n: Double): String {
-    if (!n.isFinite() || n < 0) return "—"
-    if (n == 0.0) return "0"
-    if (n >= 1) return "%.4f".format(Locale.US, n)
-    if (n >= 0.01) return "%.6f".format(Locale.US, n)
-    return "%.8f".format(Locale.US, n)
-}
+private fun px(n: Double): String = com.dirk.nightdesk.PriceText.px(n)
 
 private fun signed(n: Double): String {
     if (!n.isFinite()) return money(0.0)
@@ -1681,7 +1675,8 @@ internal fun MarkUpdated(pos: PositionRow) {
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(pos.mint) {
         while (true) {
-            kotlinx.coroutines.delay(1_000)
+            // v13.8: 4 Hz so a streamed on-chain mark reads "0.3s".
+            kotlinx.coroutines.delay(250)
             now = System.currentTimeMillis()
         }
     }
@@ -1692,12 +1687,11 @@ internal fun MarkUpdated(pos: PositionRow) {
         MarkFreshness.AMBER -> P.amber
         MarkFreshness.RED -> P.down
     }
-    val feed = feedLabel(pos.markFeed)
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp).semantics { contentDescription = "Mark ${updatedLabel(age)}" }) {
         Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(color))
         Spacer(Modifier.width(5.dp))
         Text(
-            updatedLabel(age) + (if (feed.isNotEmpty()) " · $feed" else "") + (if (fresh == MarkFreshness.RED) " · stale" else ""),
+            com.dirk.nightdesk.sourceAgeLabel(pos.markFeed, age) + (if (fresh == MarkFreshness.RED) " · stale" else ""),
             color = if (fresh == MarkFreshness.FRESH) P.muted else color,
             fontSize = 13.sp,
             fontWeight = if (fresh == MarkFreshness.FRESH) FontWeight.Normal else FontWeight.SemiBold,
@@ -1707,12 +1701,7 @@ internal fun MarkUpdated(pos: PositionRow) {
     }
 }
 
-private fun fmtPx(n: Double): String = when {
-    !n.isFinite() -> "—"
-    n >= 1 -> "%.4f".format(Locale.US, n)
-    n >= 0.01 -> "%.6f".format(Locale.US, n)
-    else -> "%.8f".format(Locale.US, n)
-}
+private fun fmtPx(n: Double): String = com.dirk.nightdesk.PriceText.px(n)
 
 /** v12.3 compact connection pill: short text plus one-tap fixes instead of a big red error. */
 @Composable

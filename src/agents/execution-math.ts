@@ -172,6 +172,11 @@ export interface EntrySlipRefusal {
 }
 
 export function entrySlippageMessage(slippage: number, cap: number, fillPrice: number, mark: number): string {
+  if (!Number.isFinite(slippage)) {
+    return mark > 0 && Number.isFinite(mark)
+      ? "Can't measure the entry cost: no readable pool depth yet. Buy refused for safety."
+      : "No usable price for it right now. Buy refused for safety.";
+  }
   const slipText = Number.isFinite(slippage) ? `${(slippage * 100).toFixed(2)}%` : "unknown";
   const fillText = fillPrice > 0 && Number.isFinite(fillPrice) ? fillPrice.toPrecision(6) : "unusable";
   const markText = mark > 0 && Number.isFinite(mark) ? mark.toPrecision(6) : "unusable";
@@ -229,6 +234,7 @@ export interface ExitImpactRefusal {
 }
 
 export function exitImpactMessage(slippage: number, cap: number, exitCap?: number | null): string {
+  if (!Number.isFinite(slippage)) return "Can't measure what a full sell would cost: no readable pool depth yet. Buy refused for safety.";
   const slipText = Number.isFinite(slippage) ? `${(slippage * 100).toFixed(2)}%` : "unknown";
   if (exitCap != null) {
     return `A full exit would cost ${slipText}, more than your ${(exitCap * 100).toFixed(2)}% exit slippage setting. Buy refused.`;

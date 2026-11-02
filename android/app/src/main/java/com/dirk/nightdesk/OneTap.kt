@@ -100,6 +100,6 @@ object OneTap {
     private fun pct(f: Double): String = (if (f > 0) "+" else if (f < 0) "−" else "") + "%.2f".format(java.util.Locale.US, kotlin.math.abs(f * 100)) + "%"
     private fun priceText(p: Double): String = when {
         p >= 1 -> "$" + "%.4f".format(java.util.Locale.US, p)
-        else -> "$" + java.math.BigDecimal(p).round(java.math.MathContext(4)).stripTrailingZeros().toPlainString()
+        else -> "$" + PriceText.px(p)
     }
 }

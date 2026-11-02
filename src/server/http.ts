@@ -31,8 +31,8 @@ export function readPublicUrl(dbPath: string, now = Date.now()): string | null {
 export const WS_PUSH_MS = 200;
 /** v13.2: a full snapshot (~80 KB) goes out at most once per second. */
 export const WS_SNAPSHOT_MIN_MS = 1_000;
-/** v13.2: position-mark deltas (a few hundred bytes) are coalesced to one per 250 ms. */
-export const WS_MARKS_MS = 250;
+/** v13.2: position-mark deltas (a few hundred bytes) are coalesced to one per 100 ms (v13.8, was 250). */
+export const WS_MARKS_MS = 100;
 /** A socket with more than this still queued is behind; it skips snapshots until it drains. */
 export const WS_BACKLOG_MAX = 256 * 1024;
 export const WS_HEARTBEAT_MS = 25_000;

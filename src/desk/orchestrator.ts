@@ -1,3 +1,4 @@
+import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
@@ -28,6 +29,7 @@ import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump,
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
+import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { DeskStore } from "../store/db.js";
@@ -194,6 +196,8 @@ export class Desk {
   private readonly pricer: PositionPricer;
   /** v13.6 on-chain pool/curve reader on the desk's private RPC (SOLANA_RPC_URL), shared by held marks and curve pricing. */
   private readonly chain: ChainMarkReader | undefined;
+  /** v13.8 websocket account stream on held pools. */
+  private readonly stream: ChainStream | undefined;
   private readonly rugs: LayeredRugRegistry;
   private readonly advisor: AdvisorBook;
   private advice: AdviceNote[] = [];
@@ -240,6 +244,7 @@ export class Desk {
   private watchTimer: NodeJS.Timeout | null = null;
   private lastClientCrash: { at: number; version: string; brief: string } | null = null;
   private readonly lookupFetch: typeof fetch;
+  private readonly depthFetch: typeof fetch | undefined;
   /** v12.1: one shared request budget for Scout, enrichment, held marks, Add coin and the watchlist. */
   readonly net = new NetLimiter();
   private readonly watchFetch: typeof fetch;
@@ -317,9 +322,11 @@ export class Desk {
 
   constructor(
     config: DeskConfig,
-    deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch; walletBalances?: () => Promise<WalletBalances> } = {}
+    deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch; walletBalances?: () => Promise<WalletBalances>; depthFetch?: typeof fetch } = {}
   ) {
     this.config = config;
+    // v13.8: re-read pool depth before a buy when the sighting has none. Live feeds only (tests inject).
+    this.depthFetch = deps.depthFetch ?? (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch ? deps.lookupFetch ?? this.net.fetchAt(0) : undefined);
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
@@ -427,6 +434,9 @@ export class Desk {
       deps.chainFetch || (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch)
         ? new ChainMarkReader(config.walletRpcUrl || config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
         : undefined;
+    // v13.8: the same RPC's websocket endpoint pushes every held pool change. Poll stays as fallback.
+    const wsUrl = this.chain && !deps.chainFetch ? wsUrlFor(config.walletRpcUrl || config.rpcUrl) : null;
+    this.stream = wsUrl ? new ChainStream(wsUrl, (key, data, at) => this.pricer.onStreamAccount(key, data, at)) : undefined;
     this.pricer = new PositionPricer({
       heldMints: () => [
         ...new Set([...this.book.positions.values(), ...(this.liveBook?.positions.values() ?? [])].filter((pos) => pos.source !== "replay").map((pos) => pos.mint))
@@ -445,6 +455,7 @@ export class Desk {
       fallbackPair: (mint) => (mint.endsWith("pump") ? pumpCurveAddress(mint) ?? undefined : undefined),
       live: (mint, priceUsd, origin) => this.liveMark(mint, priceUsd, origin),
       chain: this.chain,
+      stream: this.stream,
       onStale: (mint, silentMs) => {
         const pos = this.book.positions.get(mint) ?? this.liveBook?.positions.get(mint);
         this.log({
@@ -539,6 +550,7 @@ export class Desk {
     this.replay.stop();
     this.scout.stop();
     this.pricer.stop();
+    this.stream?.stop();
     if (this.equityTimer) clearInterval(this.equityTimer);
     if (this.commentTimer) clearInterval(this.commentTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
@@ -759,7 +771,7 @@ export class Desk {
     this.log({
       stage: "system",
       kind: "info",
-      message: `Settings saved. Volume ${money(view.minVolume1hUsd)}, trade line ${view.analystMinScore.toFixed(2)}, volume boost ${(view.volumeBoost * 100).toFixed(0)}%, top 10 ${(view.maxTop10Pct * 100).toFixed(0)}%, position ${(view.maxPositionPct * 100).toFixed(0)}%, entry slip ${(view.maxEntrySlippage * 100).toFixed(2)}%, exit slip ${view.maxExitSlippage == null ? "entry+3%" : `${(view.maxExitSlippage * 100).toFixed(2)}%`}, buy ${view.defaultBuyUsd == null ? "cap" : money(view.defaultBuyUsd)}, open ${view.maxOpenPositions}, unlocked LP ${view.allowUnlockedLp ? "allowed" : "blocked"}. Hard stop stays −${(HARD_RULES.stopLossPct * 100).toFixed(0)}%.`
+      message: `Settings saved. Volume ${money(view.minVolume1hUsd)}, trade line ${view.analystMinScore.toFixed(2)}, volume boost ${(view.volumeBoost * 100).toFixed(0)}%, top 10 ${(view.maxTop10Pct * 100).toFixed(0)}%, position ${(view.maxPositionPct * 100).toFixed(0)}%, entry slip ${(view.maxEntrySlippage * 100).toFixed(2)}%, exit slip ${view.maxExitSlippage == null ? "entry+3%" : `${(view.maxExitSlippage * 100).toFixed(2)}%`}, buy ${view.defaultBuyUsd == null ? "cap" : money(view.defaultBuyUsd)}, open ${view.maxOpenPositions}, unlocked LP ${view.allowUnlockedLp ? "allowed" : "blocked"}. ${this.config.rules.stopLossPct < HARD_RULES.stopLossPct - 1e-9 ? `Hard stop −${(this.config.rules.stopLossPct * 100).toFixed(1)}% (your setting, tighter than the −${(HARD_RULES.stopLossPct * 100).toFixed(0)}% default).` : `Hard stop stays −${(HARD_RULES.stopLossPct * 100).toFixed(0)}%.`}`
     });
     return { ok: true, settings: view };
   }
@@ -911,6 +923,46 @@ export class Desk {
     this.markEquity(true);
     this.publishAdvice(this.buildAdvice());
     return { ok: true, soldFraction: split.fraction, proceedsUsd };
+  }
+
+  /**
+   * v13.8 a sighting with a price but no readable pool depth (DexScreener lists a pump.fun /
+   * Meteora DBC bonding-curve pair with no liquidity) cannot be sized against the exit check.
+   * Re-read depth: DexScreener's deepest pair, the pump.fun curve on-chain, then Jupiter.
+   * Price and depth always come from the same source. Nothing found = token unchanged + reason.
+   */
+  private async ensureDepth(token: CandidateToken): Promise<{ token: CandidateToken; tried: string[] }> {
+    if (token.liquidityUsd > 0 && Number.isFinite(token.liquidityUsd)) return { token, tried: [] };
+    const tried: string[] = [];
+    const fetchImpl = this.depthFetch;
+    if (!fetchImpl) return { token, tried: ["no depth reads in this mode"] };
+    try {
+      const q = (await fetchDexQuotes([token.mint], fetchImpl)).get(token.mint);
+      if (q && q.liquidityUsd > 0 && q.priceUsd > 0) {
+        const next: CandidateToken = { ...token, priceUsd: q.priceUsd, liquidityUsd: q.liquidityUsd, priceFeed: "dexscreener", pairAddress: q.pairAddress ?? token.pairAddress, dex: q.dex ?? token.dex };
+        this.remember(next);
+        return { token: next, tried };
+      }
+      tried.push("DexScreener lists no pair with liquidity");
+    } catch {
+      tried.push("DexScreener did not answer");
+    }
+    if (token.mint.endsWith("pump")) {
+      const curve = await this.curvePrice(token.mint);
+      if (curve.ok) {
+        const next: CandidateToken = { ...token, priceUsd: curve.priceUsd, liquidityUsd: curve.liquidityUsd, priceFeed: "chain", pairAddress: curve.curve, dex: "pump.fun curve" };
+        this.remember(next);
+        return { token: next, tried };
+      }
+      tried.push(`pump.fun curve: ${curve.reason}`);
+    }
+    const jup = await jupiterLookupQuote(token.mint, token.priceUsd, fetchImpl);
+    if (jup.ok) {
+      const next: CandidateToken = { ...token, priceUsd: jup.priceUsd, liquidityUsd: jup.liquidityUsd, priceFeed: "jupiter" };
+      return { token: next, tried };
+    }
+    tried.push(jup.error ? `Jupiter: ${jup.error}` : "Jupiter has no liquidity for it");
+    return { token, tried };
   }
 
   /**
@@ -1498,7 +1550,7 @@ export class Desk {
       manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
       capWhy: this.capWhy(riskEquityUsd),
       lastClientCrash: this.lastClientCrash,
-      markLoop: this.pricer.stats()
+      markLoop: this.markLoopView()
     };
   }
 
@@ -1765,6 +1817,12 @@ export class Desk {
       });
       return { ok: false, error: reason.message, code: reason.code };
     }
+    let depthTried: string[] = [];
+    if (!(token.liquidityUsd > 0) || !Number.isFinite(token.liquidityUsd)) {
+      const depth = await this.ensureDepth(token);
+      token = depth.token;
+      depthTried = depth.tried;
+    }
     const plan = planOrder({
       equityUsd: book.equity(),
       cashUsd: book.cashUsd,
@@ -1827,6 +1885,13 @@ export class Desk {
       return { ok: false, error: crash.message, code: crash.code };
     }
     const exitGate = exitImpactAllowed(sized.sizeUsd, token.liquidityUsd, this.config.rules.maxEntrySlippage, this.maxExitSlippage);
+    if (!exitGate.ok && !Number.isFinite(exitGate.slippage)) {
+      // v13.8: no readable pool depth. Still fail closed, in plain words (never "cost unknown, more than").
+      exitGate.message =
+        `Can't measure what selling ${token.symbol} would cost: no readable pool depth yet` +
+        (depthTried.length ? ` (${depthTried.join("; ")})` : "") +
+        ". Buy refused for safety.";
+    }
     if (!exitGate.ok) {
       this.pipeline.executorSkips += 1;
       this.bus.emit("executor.skip", { token, reason: { code: "EXIT_IMPACT", message: exitGate.message }, score });
@@ -2486,6 +2551,12 @@ export class Desk {
     const key = bookKey(kind, mint);
     const pos = book.positions.get(mint);
     if (!pos || pos.closing || markUnusable(priceUsd)) return;
+    // v13.8: a migrated pool's successor is shown only while it agrees with the risk mark (±25%).
+    // A drained successor pool (PEPPER: 0.0001 SOL left) can print any price.
+    if (origin.pairAddress && pos.pairAddress && origin.pairAddress !== pos.pairAddress) {
+      const riskNow = book.price(mint, pos.entryPrice);
+      if (!(riskNow > 0) || Math.abs(priceUsd / riskNow - 1) > 0.25) return;
+    }
     const now = Date.now();
     const prev = this.liveMarks.get(key);
     const last = prev?.price ?? book.lastPrice.get(mint);
@@ -2597,6 +2668,27 @@ export class Desk {
     let total = book.cashUsd;
     for (const pos of book.positions.values()) total += pos.qty * this.displayMark(pos, kind).price;
     return total;
+  }
+
+  /** v13.8 mark loop + websocket stream + per-coin on-chain read status. */
+  private markLoopView(): NonNullable<DeskSnapshot["markLoop"]> {
+    const held = [...this.book.positions.values(), ...(this.liveBook?.positions.values() ?? [])];
+    const seen = new Set<string>();
+    const chain = held
+      .filter((pos) => (seen.has(pos.mint) ? false : (seen.add(pos.mint), true)))
+      .map((pos) => {
+        const anchored = pos.pairAddress ?? (pos.mint.endsWith("pump") ? pumpCurveAddress(pos.mint) ?? "" : "");
+        const target = anchored && this.chain ? this.chain.target(anchored) : anchored;
+        const info = target && this.chain ? this.chain.info(target) : null;
+        return {
+          mint: pos.mint,
+          symbol: pos.symbol,
+          pool: info ? info.pair : null,
+          kind: info ? info.kind : null,
+          reason: info ? null : !this.chain ? "on-chain reads are off" : !anchored ? "no pool known yet" : this.chain.reason(pos.mint) ?? "not resolved yet"
+        };
+      });
+    return { ...this.pricer.stats(), stream: this.stream?.stats() ?? null, chain };
   }
 
   /** v13.2 fast-loop health for the feed panel. */
@@ -2814,6 +2906,16 @@ export class Desk {
         return { ok: false, error: "Hard stop cannot be loosened past 6%. Tighter is allowed." };
       }
       next.stopLossPct = clampStopLossPct(fraction);
+      // v13.8 audit line: a stop change is always logged with old → new (it can only tighten).
+      const before = this.config.rules.stopLossPct;
+      if (Math.abs(next.stopLossPct - before) > 1e-9) {
+        this.log({
+          stage: "system",
+          kind: "info",
+          code: "SETTINGS",
+          message: `Hard stop set to −${(next.stopLossPct * 100).toFixed(1)}% (was −${(before * 100).toFixed(1)}%; the −6% default can only be tightened). Applies to every position, paper and live.`
+        });
+      }
     }
     if ("trailArmPct" in patch) {
       const raw = num("trailArmPct");
@@ -3246,7 +3348,7 @@ function price(n: number): string {
   if (n === 0) return "0";
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(6);
-  return n.toFixed(8);
+  return tinyPx(n);
 }
 
 function downsample<T>(rows: T[], max: number): T[] {

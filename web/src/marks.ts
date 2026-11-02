@@ -41,6 +41,15 @@ export function feedLabel(feed: string | undefined): string {
   }
 }
 
+/** v13.8 card line: source first, then a precise age ("on-chain · 0.3s", "DexScreener · 12s"). */
+export function sourceAgeLabel(feed: string | undefined, ageMs: number): string {
+  const src = feed === "chain" ? "on-chain" : feedLabel(feed) || "mark";
+  if (!Number.isFinite(ageMs)) return `${src} · no mark yet`;
+  const ms = Math.max(0, ageMs);
+  const age = ms < 10_000 ? `${(ms / 1_000).toFixed(1)}s` : ms < 60_000 ? `${Math.floor(ms / 1_000)}s` : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 3_600_000)}h`;
+  return `${src} · ${age}`;
+}
+
 /** Age right now, from the local time the mark was taken. No server clock is needed. */
 export function liveAgeMs(pos: PositionView, nowMs: number): number {
   if (typeof pos.markLocalAt === "number" && pos.markLocalAt > 0) return Math.max(0, nowMs - pos.markLocalAt);

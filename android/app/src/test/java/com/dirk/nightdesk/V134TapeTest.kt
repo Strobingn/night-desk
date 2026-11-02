@@ -28,7 +28,7 @@ class V134TapeTest {
     }
 
     @Test fun shortPriceKeepsFourSignificantDigits() {
-        assertEquals("0.000003705", TapeToolbar.shortPrice(0.0000037051234))
+        assertEquals("0.0₅3705", TapeToolbar.shortPrice(0.0000037051234))
         assertEquals("1.235", TapeToolbar.shortPrice(1.23456))
         assertEquals("—", TapeToolbar.shortPrice(Double.NaN))
     }

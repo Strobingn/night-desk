@@ -61,6 +61,19 @@ fun feedLabel(feed: String): String = when (feed) {
     else -> feed
 }
 
+/** v13.8 card line: source first, then a precise age ("on-chain · 0.3s", "DexScreener · 12s"). */
+fun sourceAgeLabel(feed: String, ageMs: Long): String {
+    val src = if (feed == "chain") "on-chain" else feedLabel(feed).ifEmpty { "mark" }
+    val ms = ageMs.coerceAtLeast(0L)
+    val age = when {
+        ms < 10_000 -> "%.1fs".format(java.util.Locale.US, ms / 1_000.0)
+        ms < 60_000 -> "${ms / 1_000}s"
+        ms < 3_600_000 -> "${ms / 60_000}m"
+        else -> "${ms / 3_600_000}h"
+    }
+    return "$src · $age"
+}
+
 /** Age right now, from the local time the mark was taken (no server clock needed). */
 fun liveAgeMs(row: PositionRow, nowMs: Long): Long =
     if (row.markLocalAt > 0L) (nowMs - row.markLocalAt).coerceAtLeast(0L) else row.markAgeMs

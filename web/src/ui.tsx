@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode } from "react";
-import { signedPct, signedUsd } from "./format";
+import { signedPct, signedUsd, stopLabel } from "./format";
 
 /** v13 redesign primitives (FieldOps style: gray chrome, green/red for status only). */
 
@@ -122,6 +122,7 @@ export function StopTrailBar({ stop, entry, mark, peak, armPct, trailOn }: { sto
   const at = (p: number) => (span > 0 ? Math.min(100, Math.max(0, ((p - lo) / span) * 100)) : 50);
   const fill = at(mark);
   const toStop = mark > 0 ? stop / mark - 1 : null;
+  const fromEntry = entry > 0 && stop > 0 ? stop / entry - 1 : null;
   const danger = fill < 25;
   return (
     <div className="stopbar" aria-label="Stop to trail progress">
@@ -131,7 +132,7 @@ export function StopTrailBar({ stop, entry, mark, peak, armPct, trailOn }: { sto
         <b className="stopbar-mark" style={{ left: `${fill}%` }} />
       </div>
       <div className="stopbar-labels">
-        <span className="down">Stop {toStop != null ? signedPct(toStop) : "—"}</span>
+        <span className="down">{stopLabel(fromEntry, toStop)}</span>
         <span>entry</span>
         <span>{trailOn ? (peak >= arm ? "Trailing" : `Trail arms +${Math.round(armPct * 100)}%`) : `Trail off · +${Math.round(armPct * 100)}%`}</span>
       </div>

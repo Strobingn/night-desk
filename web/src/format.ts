@@ -24,10 +24,31 @@ export function signedPct(n: number | null | undefined): string {
 }
 
 export function px(n: number | null | undefined): string {
-  if (n == null || !(n > 0)) return "—";
+  if (n == null || !(n > 0) || !Number.isFinite(n)) return "—";
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(6);
-  return n.toPrecision(4);
+  return tinyPx(n);
+}
+
+const SUB = "₀₁₂₃₄₅₆₇₈₉";
+
+/**
+ * v13.8 a sub-cent price with 4 significant digits. Four or more zeros after the point are
+ * folded into a subscript count: 0.00000000004143 → "0.0₁₀4143" (never "0.00000000").
+ */
+export function tinyPx(n: number): string {
+  if (!(n > 0) || !Number.isFinite(n)) return "—";
+  let exp = Math.floor(Math.log10(n));
+  let digits = Math.round(n / 10 ** (exp - 3));
+  if (digits >= 10_000) {
+    digits = Math.round(digits / 10);
+    exp += 1;
+  }
+  const zeros = -exp - 1;
+  if (zeros < 0) return n.toPrecision(4);
+  if (zeros < 4) return n.toFixed(zeros + 4);
+  const sub = String(zeros).split("").map((d) => SUB[Number(d)]).join("");
+  return `0.0${sub}${String(digits).replace(/0+$/, "") || "0"}`;
 }
 
 export function markAge(ms: number | undefined): string {
@@ -56,4 +77,11 @@ export function chartLinks(mint: string): { label: string; href: string }[] {
     { label: "Birdeye", href: `https://birdeye.so/solana/token/${mint}` },
     { label: "Jupiter", href: `https://jup.ag/tokens/${mint}` }
   ];
+}
+
+/** v13.8 "Stop −3.0% · 1.8% away": the stop level from entry, then the mark's distance to it. */
+export function stopLabel(fromEntry: number | null, toStop: number | null): string {
+  const level = fromEntry != null && Number.isFinite(fromEntry) ? `${fromEntry > 0 ? "+" : fromEntry < 0 ? "−" : ""}${Math.abs(fromEntry * 100).toFixed(1)}%` : "—";
+  const away = toStop == null || !Number.isFinite(toStop) ? "" : toStop < 0 ? ` · ${Math.abs(toStop * 100).toFixed(1)}% away` : " · at the stop";
+  return `Stop ${level}${away}`;
 }

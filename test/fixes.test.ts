@@ -132,7 +132,7 @@ describe("paper fill model is constant-product", () => {
     expect(slippageFor(800, Number.NaN, "buy")).toBe(Number.POSITIVE_INFINITY);
     const refused = quotePaperBuy(0.00000292, 7.84, 0);
     expect(refused.ok).toBe(false);
-    if (!refused.ok) expect(refused.message).toContain("Buy refused.");
+    if (!refused.ok) expect(refused.message).toContain("Buy refused");
   });
 
   it("fills a $800 buy in a $100k pool at 1.0175x with a $0.80 fee", () => {

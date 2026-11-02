@@ -1,4 +1,4 @@
-import { ChainMarkReader, type ChainRead, type PoolKind } from "./chain-marks.js";
+import { ChainMarkReader, EXACT_KINDS, type ChainRead, type PoolKind } from "./chain-marks.js";
 import { HeldQuoteBook, mergeResults, type DexQuote, type QuoteSource } from "./dex-prices.js";
 
 /**
@@ -51,7 +51,14 @@ export interface PositionPricerOptions {
   now?: () => number;
   fetchImpl?: FetchLike;
   chain?: ChainMarkReader;
+  /** v13.8 websocket account stream on held pools (the poll stays as fallback). */
+  stream?: { setKeys(keys: Iterable<string>): void; connected(): boolean };
 }
+
+/** v13.8 a websocket copy this fresh replaces the poll's RPC read for that pool. */
+export const STREAM_FRESH_MS = 3_000;
+/** v13.8 at most one streamed mark per mint this often (pump coins can change many times a second). */
+export const STREAM_EMIT_MS = 150;
 
 interface CalSample {
   ratio: number;
@@ -88,6 +95,9 @@ export class PositionPricer {
   private readonly cal = new Map<string, CalSample[]>();
   private lastBustAt = Number.NEGATIVE_INFINITY;
   private lastCycleAt: number | null = null;
+  private subKey = new Map<string, string>();
+  private heldNow = new Set<string>();
+  private readonly lastStreamEmit = new Map<string, number>();
 
   constructor(private readonly opts: PositionPricerOptions) {
     this.now = opts.now ?? (() => Date.now());
@@ -186,13 +196,15 @@ export class PositionPricer {
     const wanted = chain
       ? held.map((mint) => ({ mint, pair: this.opts.pairFor?.(mint) ?? this.lastPair.get(mint) ?? this.opts.fallbackPair?.(mint) ?? "" })).filter((w) => w.pair)
       : [];
+    this.heldNow = new Set(held);
     const chainDue = chain && wanted.length > 0 && chain.gate.due(now, force);
     if (chainDue) chain!.gate.started(now);
+    const skipFresh = this.opts.stream?.connected() ? STREAM_FRESH_MS : 0;
 
     const [results, chainResult] = await Promise.all([
       sources.length ? this.quotes.fetchSources(held, sources, fetchImpl, now, bust ? { bust } : {}) : Promise.resolve([]),
       chainDue
-        ? chain!.read(wanted, now).then(
+        ? chain!.read(wanted, now, skipFresh).then(
             (reads) => {
               chain!.gate.ok(now);
               return { reads } as { reads?: Map<string, ChainRead>; error?: string };
@@ -233,6 +245,10 @@ export class PositionPricer {
       }
     }
 
+    if (chain && this.opts.stream) {
+      this.subKey = chain.subscriptions(wanted.map((w) => w.pair));
+      this.opts.stream.setKeys(this.subKey.keys());
+    }
     const reads = chainResult?.reads;
     if (!reads || !this.opts.live) return;
     for (const [mint, read] of reads) {
@@ -242,6 +258,27 @@ export class PositionPricer {
       const usd = read.native * factor;
       if (usd > 0 && Number.isFinite(usd)) this.opts.live(mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at });
     }
+  }
+
+  /** v13.8 a websocket account update: decode that pool now and push a live mark. */
+  onStreamAccount(key: string, data: Uint8Array, at: number): void {
+    const chain = this.opts.chain;
+    if (!chain) return;
+    chain.noteAccount(key, data, at);
+    const pair = this.subKey.get(key);
+    if (!pair || !this.opts.live) return;
+    const cached = chain.decodeCached(pair);
+    if (!cached) return;
+    const { read } = cached;
+    if (!this.heldNow.has(read.mint)) return;
+    const now = this.now();
+    if (now - (this.lastStreamEmit.get(read.mint) ?? Number.NEGATIVE_INFINITY) < STREAM_EMIT_MS) return;
+    const factor = this.factor(read.mint, read.kind, now);
+    if (factor == null) return;
+    const usd = read.native * factor;
+    if (!(usd > 0) || !Number.isFinite(usd)) return;
+    this.lastStreamEmit.set(read.mint, now);
+    this.opts.live(read.mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at });
   }
 
   /** USD per SOL-native unit for this pool, learned from the same cycle's quotes. */
@@ -265,8 +302,11 @@ export class PositionPricer {
   factor(mint: string, kind: PoolKind, now: number): number | null {
     const list = (this.cal.get(mint) ?? []).filter((s) => now - s.at <= CAL_MAX_AGE_MS);
     const sol = this.quotes.solUsd;
-    if (kind === "curve" && sol && now - sol.at <= SOL_USD_MAX_AGE_MS && sol.value > 0) {
+    const exact = EXACT_KINDS.has(kind);
+    if ((kind === "curve" || exact) && sol && now - sol.at <= SOL_USD_MAX_AGE_MS && sol.value > 0) {
       const last = list[list.length - 1];
+      // v13.8 sqrt / bin / vault-share pools are exact in SOL too, but need one agreeing feed sample first.
+      if (exact && !last) return null;
       if (last && Math.abs(last.ratio / sol.value - 1) > 0.15) return null;
       return sol.value;
     }

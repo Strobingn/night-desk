@@ -646,6 +646,10 @@ export interface DeskSnapshot {
     pollMs: number;
     lastCycleAt: number | null;
     sources: Record<string, { lastOkAt: number | null; coolUntil: number; lastError: string | null; count429: number }>;
+    /** v13.8 websocket account stream on held pools. Null when the RPC has no ws endpoint. */
+    stream?: { connected: boolean; subscriptions: number; wanted: number; updates: number; lastUpdateAt: number | null; reconnects: number; lastError: string | null } | null;
+    /** v13.8 per held coin: the pool kind read on-chain, or why it cannot be. */
+    chain?: Array<{ mint: string; symbol: string; pool: string | null; kind: string | null; reason: string | null }>;
   };
   /** v12. Last crash the phone reported (POST /api/client-crash). */
   lastClientCrash: { at: number; version: string; brief: string } | null;

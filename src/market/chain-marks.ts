@@ -5,7 +5,10 @@
  * - PumpSwap pool (program pAMM…): WSOL vault / token vault balances. v13.6: either side
  *   may be WSOL (Dirk's QTFALCN pool has base = WSOL, quote = the coin; v13.2 refused it).
  * - v13.6 Raydium AMM v4 (675k…) and Raydium CPMM (CPMM…): WSOL vault / token vault.
- * Meteora DLMM (bins) and anything else is unsupported and simply not read.
+ * - v13.8 Meteora DBC (virtual pool sqrt price), Meteora DAMM v2 (sqrt price), Meteora DAMM v1
+ *   (vault shares), Meteora DLMM (active bin), Raydium CLMM and Orca Whirlpool (sqrt price).
+ *   A migrated DBC pool / complete pump curve is followed to its new pool (one getProgramAccounts
+ *   per mint, at most every 10 minutes). Anything else is unsupported and simply not read.
  *
  * These are SOL-per-token reserve ratios, not USD, and not the same number DexScreener
  * or Jupiter print (PumpSwap reads ~11% under them). The pricer calibrates them, and the
@@ -22,6 +25,14 @@ export const PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 export const RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 export const RAYDIUM_CPMM = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP7C";
+export const METEORA_DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
+export const METEORA_DAMM_V2 = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG";
+export const METEORA_DAMM_V1 = "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB";
+export const METEORA_DLMM = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+export const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+export const ORCA_WHIRLPOOL = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
+/** A migrated pool is searched for its successor at most this often per mint. */
+const DISCOVER_MS = 10 * 60_000;
 const MAX_ACCOUNTS = 100;
 /** A migrated curve or a missing account is looked at again after this. */
 const RERESOLVE_MS = 60_000;
@@ -66,7 +77,10 @@ function u64(buf: Uint8Array, offset: number): number {
   return Number(new DataView(buf.buffer, buf.byteOffset + offset, 8).getBigUint64(0, true));
 }
 
-export type PoolKind = "curve" | "pumpswap" | "raydium" | "cpmm";
+export type PoolKind = "curve" | "pumpswap" | "raydium" | "cpmm" | "dbc" | "dammv2" | "dammv1" | "dlmm" | "clmm" | "whirlpool";
+
+/** v13.8 kinds whose price is an exact on-chain SOL ratio from a sqrt price / bin / vault shares. */
+export const EXACT_KINDS: ReadonlySet<PoolKind> = new Set(["dbc", "dammv2", "dammv1", "dlmm", "clmm", "whirlpool"]);
 
 export interface PoolInfo {
   kind: PoolKind;
@@ -77,6 +91,87 @@ export interface PoolInfo {
   baseVault?: string;
   /** The WSOL vault. */
   quoteVault?: string;
+  /** v13.8 accounts read each cycle (and websocket-subscribed), in decode order. */
+  keys: string[];
+  /** v13.8 sqrt / bin pools: the coin is token A (x, 0). */
+  coinIsA?: boolean;
+}
+
+/** v13.8 one sqrt-price (Q64.64) pool: A-in-B price → SOL per coin. */
+export function sqrtNative(data: Uint8Array, offset: number, coinIsA: boolean, coinDecimals: number): number {
+  if (data.length < offset + 16) return Number.NaN;
+  const view = new DataView(data.buffer, data.byteOffset + offset, 16);
+  const raw = Number(view.getBigUint64(0, true)) + Number(view.getBigUint64(8, true)) * 2 ** 64;
+  const f = raw / 2 ** 64;
+  const decA = coinIsA ? coinDecimals : 9;
+  const decB = coinIsA ? 9 : coinDecimals;
+  const aInB = f * f * 10 ** (decA - decB);
+  if (!(aInB > 0) || !Number.isFinite(aInB)) return Number.NaN;
+  return coinIsA ? aInB : 1 / aInB;
+}
+
+/** v13.8 Meteora DLMM: price of X in Y = (1 + binStep/10_000)^activeId, decimal-adjusted. */
+export function dlmmNative(data: Uint8Array, coinIsA: boolean, coinDecimals: number): number {
+  if (data.length < 82) return Number.NaN;
+  const view = new DataView(data.buffer, data.byteOffset);
+  const active = view.getInt32(76, true);
+  const step = view.getUint16(80, true);
+  const decX = coinIsA ? coinDecimals : 9;
+  const decY = coinIsA ? 9 : coinDecimals;
+  const xInY = Math.pow(1 + step / 10_000, active) * 10 ** (decX - decY);
+  if (!(xInY > 0) || !Number.isFinite(xInY)) return Number.NaN;
+  return coinIsA ? xInY : 1 / xInY;
+}
+
+/**
+ * v13.8 decode one pool's cycle accounts (same order as PoolInfo.keys) into SOL per coin.
+ * "gone" = migrated / complete: look for the successor pool. NaN = unreadable this time.
+ */
+export function decodePool(p: PoolInfo, datas: Array<Uint8Array | null>): number | "gone" {
+  const d0 = datas[0];
+  switch (p.kind) {
+    case "curve": {
+      const parsed = d0 ? parseCurve(d0, p.decimals) : null;
+      if (!parsed || parsed.complete) return "gone";
+      return parsed.native;
+    }
+    case "pumpswap":
+    case "raydium":
+    case "cpmm": {
+      const base = datas[0];
+      const quote = datas[1];
+      if (!base || !quote) return Number.NaN;
+      const baseAmt = tokenAmount(base) / 10 ** p.decimals;
+      const quoteAmt = tokenAmount(quote) / 1e9;
+      return baseAmt > 0 && quoteAmt > 0 ? quoteAmt / baseAmt : Number.NaN;
+    }
+    case "dbc":
+      if (!d0 || d0.length < 306) return Number.NaN;
+      if (d0[305] !== 0) return "gone";
+      return sqrtNative(d0, 280, true, p.decimals);
+    case "dammv2":
+      return d0 ? sqrtNative(d0, 456, p.coinIsA === true, p.decimals) : Number.NaN;
+    case "whirlpool":
+      return d0 ? sqrtNative(d0, 65, p.coinIsA === true, p.decimals) : Number.NaN;
+    case "clmm":
+      return d0 ? sqrtNative(d0, 253, p.coinIsA === true, p.decimals) : Number.NaN;
+    case "dlmm":
+      return d0 ? dlmmNative(d0, p.coinIsA === true, p.decimals) : Number.NaN;
+    case "dammv1": {
+      // keys: aVault, bVault, aVaultLp, bVaultLp, aLpMint, bLpMint. Pool share = vault total × lp held / lp supply.
+      if (datas.some((x) => !x)) return Number.NaN;
+      const [va, vb, la, lb, ma, mb] = datas as Uint8Array[];
+      const supA = u64(ma!, 36);
+      const supB = u64(mb!, 36);
+      if (!(supA > 0) || !(supB > 0)) return Number.NaN;
+      const amtA = (u64(va!, 11) * tokenAmount(la!)) / supA;
+      const amtB = (u64(vb!, 11) * tokenAmount(lb!)) / supB;
+      const coin = (p.coinIsA ? amtA : amtB) / 10 ** p.decimals;
+      const sol = (p.coinIsA ? amtB : amtA) / 1e9;
+      return coin > 0 && sol > 0 ? sol / coin : Number.NaN;
+    }
+  }
+  return Number.NaN;
 }
 
 export interface ChainRead {
@@ -187,6 +282,13 @@ export class ChainMarkReader {
   readonly gate: SourceGate;
   private readonly pools = new Map<string, PoolInfo | { unsupported: true; at: number }>();
   private id = 0;
+  /** v13.8 anchored pair → the pool actually read (a migrated pool's successor). */
+  private readonly alias = new Map<string, string>();
+  private readonly migrated = new Set<string>();
+  private readonly discoveredAt = new Map<string, number>();
+  private readonly why = new Map<string, string>();
+  /** v13.8 latest websocket copy per account. */
+  private readonly cache = new Map<string, { data: Uint8Array; at: number }>();
 
   constructor(
     private readonly rpcUrl: string,
@@ -235,17 +337,20 @@ export class ChainMarkReader {
     });
     if (!todo.length) return;
     const accounts = await this.rpc([...todo.map((t) => t.pair), ...todo.map((t) => t.mint)]);
+    // v13.8 DBC needs its quote vault's mint; DAMM v1 needs its vaults' LP mints. One extra call.
+    const second: Array<{ mint: string; pair: string; decimals: number; kind: "dbc" | "dammv1"; data: Uint8Array }> = [];
     todo.forEach(({ mint, pair }, i) => {
       const acc = accounts[i];
       const mintAcc = accounts[todo.length + i];
       const decimals = mintAcc ? mintDecimals(Buffer.from(mintAcc.data[0], "base64")) : null;
       if (!acc || decimals == null) {
         this.pools.set(pair, { unsupported: true, at: now });
+        this.why.set(mint, !acc ? "pool account not found" : "mint account unreadable");
         return;
       }
       const data = Buffer.from(acc.data[0], "base64");
       if (acc.owner === PUMP_PROGRAM && parseCurve(data, decimals)) {
-        this.pools.set(pair, { kind: "curve", pair, mint, decimals });
+        this.pools.set(pair, { kind: "curve", pair, mint, decimals, keys: [pair] });
         return;
       }
       const amm: Array<[string, PoolKind, (d: Uint8Array) => ReturnType<typeof parsePumpSwapPool>]> = [
@@ -257,12 +362,177 @@ export class ChainMarkReader {
         if (acc.owner !== owner) continue;
         const sides = solSides(parse(data), mint);
         if (sides) {
-          this.pools.set(pair, { kind, pair, mint, decimals, baseVault: sides.tokenVault, quoteVault: sides.solVault });
+          this.pools.set(pair, { kind, pair, mint, decimals, baseVault: sides.tokenVault, quoteVault: sides.solVault, keys: [sides.tokenVault, sides.solVault] });
+          return;
+        }
+      }
+      const pk = (o: number) => (data.length >= o + 32 ? base58(data.subarray(o, o + 32)) : "");
+      // Sqrt-price / bin pools: [owner, kind, mintA offset, mintB offset].
+      const sqrtPools: Array<[string, PoolKind, number, number]> = [
+        [METEORA_DAMM_V2, "dammv2", 168, 200],
+        [ORCA_WHIRLPOOL, "whirlpool", 101, 181],
+        [RAYDIUM_CLMM, "clmm", 73, 105],
+        [METEORA_DLMM, "dlmm", 88, 120]
+      ];
+      for (const [owner, kind, oa, ob] of sqrtPools) {
+        if (acc.owner !== owner) continue;
+        const ma = pk(oa);
+        const mb = pk(ob);
+        if ((ma === mint && mb === WSOL_MINT) || (ma === WSOL_MINT && mb === mint)) {
+          this.pools.set(pair, { kind, pair, mint, decimals, coinIsA: ma === mint, keys: [pair] });
+          return;
+        }
+      }
+      if (acc.owner === METEORA_DBC && pk(136) === mint) {
+        if (data[305] !== 0) {
+          this.pools.set(pair, { unsupported: true, at: now });
+          this.why.set(mint, "its Meteora DBC pool migrated");
+          this.migrated.add(pair);
+          return;
+        }
+        second.push({ mint, pair, decimals, kind: "dbc", data });
+        return;
+      }
+      if (acc.owner === METEORA_DAMM_V1) {
+        const ma = pk(40);
+        const mb = pk(72);
+        if ((ma === mint && mb === WSOL_MINT) || (ma === WSOL_MINT && mb === mint)) {
+          second.push({ mint, pair, decimals, kind: "dammv1", data });
           return;
         }
       }
       this.pools.set(pair, { unsupported: true, at: now });
+      this.why.set(mint, acc.owner === METEORA_DBC || acc.owner === METEORA_DAMM_V1 || sqrtPools.some(([o]) => o === acc.owner) || amm.some(([o]) => o === acc.owner)
+        ? "its pool is not paired with SOL"
+        : `unsupported pool program ${acc.owner.slice(0, 6)}…`);
     });
+    if (!second.length) return;
+    const extra: string[] = [];
+    for (const row of second) {
+      if (row.kind === "dbc") extra.push(base58(row.data.subarray(200, 232)));
+      else extra.push(base58(row.data.subarray(104, 136)), base58(row.data.subarray(136, 168)));
+    }
+    const got = await this.rpc(extra);
+    let k = 0;
+    for (const row of second) {
+      if (row.kind === "dbc") {
+        const qv = got[k++];
+        const qmint = qv ? base58(Buffer.from(qv.data[0], "base64").subarray(0, 32)) : "";
+        if (qmint === WSOL_MINT) this.pools.set(row.pair, { kind: "dbc", pair: row.pair, mint: row.mint, decimals: row.decimals, coinIsA: true, keys: [row.pair] });
+        else {
+          this.pools.set(row.pair, { unsupported: true, at: now });
+          this.why.set(row.mint, "its Meteora DBC pool is not quoted in SOL");
+        }
+      } else {
+        const va = got[k++];
+        const vb = got[k++];
+        if (!va || !vb) {
+          this.pools.set(row.pair, { unsupported: true, at: now });
+          continue;
+        }
+        const lpA = base58(Buffer.from(va.data[0], "base64").subarray(115, 147));
+        const lpB = base58(Buffer.from(vb.data[0], "base64").subarray(115, 147));
+        const d = row.data;
+        this.pools.set(row.pair, {
+          kind: "dammv1",
+          pair: row.pair,
+          mint: row.mint,
+          decimals: row.decimals,
+          coinIsA: base58(d.subarray(40, 72)) === row.mint,
+          keys: [base58(d.subarray(104, 136)), base58(d.subarray(136, 168)), base58(d.subarray(168, 200)), base58(d.subarray(200, 232)), lpA, lpB]
+        });
+      }
+    }
+  }
+
+  /** v13.8 why a held coin has no on-chain read (for the report / card). */
+  reason(mint: string): string | undefined {
+    return this.why.get(mint);
+  }
+
+  /** v13.8 the pool actually read for an anchored pair (a migrated pool's successor). */
+  target(pair: string): string {
+    return this.alias.get(pair) ?? pair;
+  }
+
+  /**
+   * v13.8 a migrated DBC pool / complete pump curve: find its successor (DAMM v2 / v1 for DBC,
+   * PumpSwap for pump). getProgramAccounts with a mint filter; at most once per mint per 10 min.
+   */
+  async discover(mint: string, pair: string, now: number): Promise<string | null> {
+    const last = this.discoveredAt.get(mint) ?? Number.NEGATIVE_INFINITY;
+    if (now - last < DISCOVER_MS) return this.alias.get(pair) ?? null;
+    this.discoveredAt.set(mint, now);
+    const searches: Array<[string, Array<Record<string, unknown>>]> = [
+      [METEORA_DAMM_V2, [{ dataSize: 1112 }, { memcmp: { offset: 168, bytes: mint } }, { memcmp: { offset: 200, bytes: WSOL_MINT } }]],
+      [METEORA_DAMM_V2, [{ dataSize: 1112 }, { memcmp: { offset: 168, bytes: WSOL_MINT } }, { memcmp: { offset: 200, bytes: mint } }]],
+      [METEORA_DAMM_V1, [{ dataSize: 944 }, { memcmp: { offset: 40, bytes: mint } }, { memcmp: { offset: 72, bytes: WSOL_MINT } }]],
+      [PUMPSWAP_PROGRAM, [{ memcmp: { offset: 43, bytes: mint } }, { memcmp: { offset: 75, bytes: WSOL_MINT } }]]
+    ];
+    const fromCurve = this.why.get(mint) === "its pump.fun curve completed";
+    for (const [program, filters] of searches) {
+      if ((program === PUMPSWAP_PROGRAM) !== fromCurve) continue;
+      try {
+        const res = await this.fetchImpl(this.rpcUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method: "getProgramAccounts", params: [program, { encoding: "base64", dataSlice: { offset: 0, length: 0 }, filters }] }),
+          signal: AbortSignal.timeout(6_000)
+        });
+        if (!res.ok) continue;
+        const body = (await res.json()) as { result?: Array<{ pubkey?: string }> };
+        const hit = Array.isArray(body.result) ? body.result.find((r) => typeof r.pubkey === "string")?.pubkey : undefined;
+        if (hit) {
+          this.alias.set(pair, hit);
+          return hit;
+        }
+      } catch {
+        /* next search; never invent a pool */
+      }
+    }
+    return null;
+  }
+
+  /** v13.8 decode the latest websocket copies of one pool's accounts (null when any is missing). */
+  decodeCached(pair: string): { read: ChainRead } | null {
+    const p = this.info(pair);
+    if (!p) return null;
+    const datas = p.keys.map((k) => this.cache.get(k)?.data ?? null);
+    if (datas.some((d) => !d)) return null;
+    const at = Math.max(...p.keys.map((k) => this.cache.get(k)!.at));
+    const native = decodePool(p, datas);
+    if (native === "gone" || !(native > 0) || !Number.isFinite(native)) return null;
+    return { read: { mint: p.mint, pair: p.pair, kind: p.kind, native, at } };
+  }
+
+  /** v13.8 a websocket account update. */
+  noteAccount(key: string, data: Uint8Array, at: number): void {
+    this.cache.set(key, { data, at });
+  }
+
+  /** v13.8 every account to subscribe for these anchored pairs: key → pair. */
+  subscriptions(pairs: string[]): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const anchored of pairs) {
+      const pair = this.target(anchored);
+      const p = this.info(pair);
+      if (!p) continue;
+      for (const k of p.keys) out.set(k, pair);
+    }
+    return out;
+  }
+
+  /** v13.8 the newest websocket copy of every key of a pool is at most this old. */
+  cachedAge(pair: string, now: number): number {
+    const p = this.info(pair);
+    if (!p) return Number.POSITIVE_INFINITY;
+    let oldest = Number.NEGATIVE_INFINITY;
+    for (const k of p.keys) {
+      const c = this.cache.get(k);
+      if (!c) return Number.POSITIVE_INFINITY;
+      oldest = Math.max(oldest, now - c.at);
+    }
+    return oldest;
   }
 
   /**
@@ -316,39 +586,59 @@ export class ChainMarkReader {
   /**
    * Reads every supported pool in one call. Unsupported pools are skipped.
    * Throws on transport errors so the gate can back off; never invents a price.
+   * v13.8: a pool whose websocket copy is fresher than `skipFreshMs` is decoded from that copy
+   * instead of being polled (fewer RPC calls); a migrated pool is followed to its successor.
    */
-  async read(wanted: Array<{ mint: string; pair: string }>, now: number): Promise<Map<string, ChainRead>> {
+  async read(wanted: Array<{ mint: string; pair: string }>, now: number, skipFreshMs = 0): Promise<Map<string, ChainRead>> {
     const out = new Map<string, ChainRead>();
     if (!wanted.length) return out;
-    await this.resolve(wanted, now);
-    const pools = wanted.map((w) => this.info(w.pair)).filter((p): p is PoolInfo => p != null && p.mint === wanted.find((w) => w.pair === p.pair)?.mint);
+    const mapped = wanted.map((w) => ({ mint: w.mint, pair: this.target(w.pair), anchored: w.pair }));
+    await this.resolve(mapped, now);
+    for (const m of mapped) {
+      if (!this.info(m.pair) && (this.migrated.has(m.pair) || this.why.get(m.mint) === "its pump.fun curve completed")) {
+        const next = await this.discover(m.mint, m.anchored, now);
+        if (next && next !== m.pair) {
+          m.pair = next;
+          await this.resolve([{ mint: m.mint, pair: next }], now);
+        }
+      }
+    }
+    const pools: PoolInfo[] = [];
+    for (const m of mapped) {
+      const p = this.info(m.pair);
+      if (!p || p.mint !== m.mint) continue;
+      if (skipFreshMs > 0 && this.cachedAge(p.pair, now) <= skipFreshMs) {
+        const cached = this.decodeCached(p.pair);
+        if (cached) {
+          out.set(p.mint, cached.read);
+          continue;
+        }
+      }
+      pools.push(p);
+    }
     if (!pools.length) return out;
     const keys: string[] = [];
-    for (const p of pools) {
-      if (p.kind === "curve") keys.push(p.pair);
-      else keys.push(p.baseVault!, p.quoteVault!);
-    }
+    for (const p of pools) keys.push(...p.keys);
     const accounts = await this.rpc(keys);
     let k = 0;
     for (const p of pools) {
-      if (p.kind === "curve") {
+      const datas = p.keys.map(() => {
         const acc = accounts[k++];
-        const parsed = acc && acc.owner === PUMP_PROGRAM ? parseCurve(Buffer.from(acc.data[0], "base64"), p.decimals) : null;
-        if (!parsed || parsed.complete) {
-          // Migrated or gone: look at the pair again later instead of quoting a dead curve.
-          this.pools.set(p.pair, { unsupported: true, at: now });
-          continue;
-        }
-        if (parsed.native > 0 && Number.isFinite(parsed.native)) out.set(p.mint, { mint: p.mint, pair: p.pair, kind: p.kind, native: parsed.native, at: now });
-      } else {
-        const base = accounts[k++];
-        const quote = accounts[k++];
-        if (!base || !quote) continue;
-        const baseAmt = tokenAmount(Buffer.from(base.data[0], "base64")) / 10 ** p.decimals;
-        const quoteAmt = tokenAmount(Buffer.from(quote.data[0], "base64")) / 1e9;
-        const native = quoteAmt / baseAmt;
-        if (baseAmt > 0 && quoteAmt > 0 && Number.isFinite(native)) out.set(p.mint, { mint: p.mint, pair: p.pair, kind: p.kind, native, at: now });
+        return acc ? (Buffer.from(acc.data[0], "base64") as Uint8Array) : null;
+      });
+      if (p.kind === "curve") {
+        const acc = accounts[k - 1];
+        if (!acc || acc.owner !== PUMP_PROGRAM) datas[0] = null;
       }
+      const native = decodePool(p, datas);
+      if (native === "gone") {
+        // Migrated or gone: look for the successor instead of quoting a dead pool.
+        this.pools.set(p.pair, { unsupported: true, at: now });
+        this.migrated.add(p.pair);
+        this.why.set(p.mint, p.kind === "curve" ? "its pump.fun curve completed" : "its Meteora DBC pool migrated");
+        continue;
+      }
+      if (native > 0 && Number.isFinite(native)) out.set(p.mint, { mint: p.mint, pair: p.pair, kind: p.kind, native, at: now });
     }
     return out;
   }

@@ -178,6 +178,7 @@ object TapeToolbar {
         if (n == 0.0) return "0"
         if (n >= 1000) return "%.0f".format(java.util.Locale.US, n)
         if (n >= 1) return "%.3f".format(java.util.Locale.US, n)
-        return java.math.BigDecimal(n).round(java.math.MathContext(4)).stripTrailingZeros().toPlainString()
+        if (n >= 0.0001) return java.math.BigDecimal(n).round(java.math.MathContext(4)).stripTrailingZeros().toPlainString()
+        return PriceText.tiny(n)
     }
 }

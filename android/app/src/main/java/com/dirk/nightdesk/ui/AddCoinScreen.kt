@@ -362,12 +362,7 @@ private fun addFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedLabelColor = Dim
 )
 
-internal fun priceText(n: Double): String = when {
-    !n.isFinite() || n <= 0 -> "—"
-    n >= 1 -> "%.4f".format(Locale.US, n)
-    n >= 0.01 -> "%.6f".format(Locale.US, n)
-    else -> "%.4g".format(Locale.US, n)
-}
+internal fun priceText(n: Double): String = if (!n.isFinite() || n <= 0) "—" else com.dirk.nightdesk.PriceText.px(n)
 
 internal fun compact(n: Double): String = when {
     !n.isFinite() -> "—"

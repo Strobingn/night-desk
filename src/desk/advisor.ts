@@ -1,3 +1,4 @@
+import { tinyPx } from "../price-text.js";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -284,5 +285,5 @@ function signedPct(n: number): string {
 function fmtPx(n: number): string {
   if (!(n > 0)) return "—";
   if (n >= 1) return n.toFixed(4);
-  return n.toFixed(8);
+  return tinyPx(n);
 }

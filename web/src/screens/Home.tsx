@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { feedLabel, liveAgeMs, markFreshness, updatedLabel } from "../marks";
+import { liveAgeMs, markFreshness, sourceAgeLabel, updatedLabel } from "../marks";
 import { api } from "../api";
 import { chartLinks, clock, px, signedPct, signedUsd, usd } from "../format";
 import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../types";
@@ -168,17 +168,16 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
 export function MarkUpdated({ pos }: { pos: PositionView }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    // v13.8: 4 Hz so a streamed on-chain mark reads "0.3s", not "just now".
+    const id = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(id);
   }, []);
   const age = liveAgeMs(pos, now);
   const fresh = markFreshness(age);
-  const feed = feedLabel(pos.markFeed);
   return (
     <p className={`mark-updated is-${fresh}`} aria-label={`Mark ${updatedLabel(age)}`}>
       <i className="dot" />
-      {updatedLabel(age)}
-      {feed ? ` · ${feed}` : ""}
+      {sourceAgeLabel(pos.markFeed, age)}
       {fresh === "red" ? " · stale" : ""}
     </p>
   );

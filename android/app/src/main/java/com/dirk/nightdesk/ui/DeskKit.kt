@@ -265,7 +265,20 @@ fun Sparkline(values: List<Double>, baseline: Double, modifier: Modifier = Modif
 
 /* ---------- Stop → trail bar ---------- */
 
-data class StopBarModel(val fill: Float, val entryAt: Float, val nearStop: Boolean, val stopPct: Double?, val right: String)
+data class StopBarModel(val fill: Float, val entryAt: Float, val nearStop: Boolean, val stopPct: Double?, val right: String, val stopFromEntry: Double? = null) {
+    /** v13.8 "Stop −3.0% · 1.8% away": the stop level from entry, then how far the mark is above it. */
+    val label: String get() {
+        val level = stopFromEntry?.let { signedPct1(it) } ?: "—"
+        val away = stopPct?.let { if (it < 0) "%.1f%% away".format(java.util.Locale.US, -it * 100) else "at the stop" }
+        return "Stop $level" + (away?.let { " · $it" } ?: "")
+    }
+}
+
+private fun signedPct1(n: Double): String {
+    if (!n.isFinite()) return "—"
+    val sign = if (n > 0) "+" else if (n < 0) "−" else ""
+    return sign + "%.1f".format(java.util.Locale.US, kotlin.math.abs(n) * 100) + "%"
+}
 
 fun stopBarModel(stop: Double, entry: Double, mark: Double, peak: Double, armPct: Double, trailOn: Boolean): StopBarModel {
     val arm = entry * (1 + armPct)
@@ -276,7 +289,8 @@ fun stopBarModel(stop: Double, entry: Double, mark: Double, peak: Double, armPct
     val toStop = if (mark > 0) stop / mark - 1 else null
     val armTxt = "+${Math.round(armPct * 100)}%"
     val right = if (trailOn) (if (peak >= arm && peak > 0) "Trailing" else "Trail arms $armTxt") else "Trail off · $armTxt"
-    return StopBarModel(fill, at(entry), fill < 0.25f, toStop, right)
+    val fromEntry = if (entry > 0 && stop > 0) stop / entry - 1 else null
+    return StopBarModel(fill, at(entry), fill < 0.25f, toStop, right, fromEntry)
 }
 
 @Composable
@@ -304,7 +318,7 @@ fun StopTrailBar(model: StopBarModel) {
             drawCircle(ink, radius = 5.dp.toPx(), center = Offset(w.coerceIn(7.dp.toPx(), size.width - 7.dp.toPx()), size.height / 2))
         }
         Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-            Text("Stop " + (model.stopPct?.let { signedPct(it) } ?: "—"), color = P.down, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            Text(model.label, color = P.down, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1)
             Text("entry", color = P.muted, fontSize = 11.sp)
             Text(model.right, color = P.muted, fontSize = 11.sp, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
         }
