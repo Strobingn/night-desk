@@ -52,10 +52,17 @@ class OneTapUi(
     val live: Boolean = false,
     val liveTrailPct: Double = 0.01,
     /** v13.6 the sentence naming which cap limits the size. */
-    val capLine: String? = null
+    val capLine: String? = null,
+    /** v13.7 armed desk with a separate live book (AI on paper unless liveAutoBuy). */
+    val split: Boolean = false,
+    val aiLive: Boolean = false,
+    val onSellLive: (mint: String, symbol: String) -> Unit = { _, _ -> }
 ) {
     fun buying(mint: String) = tapping.contains("buy:$mint")
     fun selling(mint: String) = tapping.contains("sell:$mint")
+    fun sellingLive(mint: String) = tapping.contains("sell:live:$mint")
+    /** v13.7 one-tap sell label for a paper-book position on an armed desk (paper, not live). */
+    val paperSellLabel: String get() = "⚡ Sell now"
     val sellingAll get() = tapping.contains("sell-all")
     val buyLabel: String get() = "⚡ Buy " + (if (tapUsd >= 100) "$" + "%.0f".format(Locale.US, tapUsd) else "$" + "%.2f".format(Locale.US, tapUsd)) + (if (live) " LIVE" else "")
     val sellLabel: String get() = if (live) "⚡ Sell now LIVE" else "⚡ Sell now"
@@ -105,7 +112,7 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
             Text(if (ui.live) "ONE TAP · REAL $" else "ONE TAP", color = if (ui.live) P.down else P.accent, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp, modifier = Modifier.weight(1f))
             if (showSellAll && ui.openCount > 0) {
                 BigButton(
-                    if (ui.sellingAll) "Selling all…" else if (armed) "Tap again · sell ${ui.openCount}" else "Sell all (${ui.openCount})",
+                    if (ui.sellingAll) "Selling all…" else if (armed) "Tap again · sell ${ui.openCount}" + (if (ui.split) " paper" else "") else "Sell all" + (if (ui.split) " paper" else "") + " (${ui.openCount})",
                     if (armed) P.down else P.down.copy(alpha = 0.85f),
                     P.onDown,
                     Modifier.width(if (armed) 170.dp else 130.dp),
@@ -121,7 +128,8 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
         }
         if (ui.live) {
             Text(
-                "Live size ${fmtUsd(ui.tapUsd)} per trade · trail ${fmt(ui.liveTrailPct * 100)}% · stop −${"%.0f".format(Locale.US, ui.stopPct * 100)}%. Change it in Settings → Live wallet.",
+                "Live size ${fmtUsd(ui.tapUsd)} per trade · trail ${fmt(ui.liveTrailPct * 100)}% · stop −${"%.0f".format(Locale.US, ui.stopPct * 100)}%. Change it in Settings → Live wallet." +
+                    (if (ui.split && !ui.aiLive) " AI: paper." else ""),
                 color = P.ink,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold

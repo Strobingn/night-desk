@@ -143,7 +143,9 @@ export function startServer(
           .manualBuy(mint, sizeUsd, {
             ignoreCooldown,
             confirmHardKill: record.confirmHardKill === true,
-            confirmSize: record.confirmSize === true
+            confirmSize: record.confirmSize === true,
+            // v13.7: armed desk → manual buys are live unless the client asks for the paper book.
+            ...(parseBook(record, url) ? { book: parseBook(record, url) } : {})
           })
           .then((result) => ({ ...result, ms: Date.now() - started }));
         idem.remember("buy", record.idemKey, job, (r) => (r.ok ? 200 : 400));
@@ -184,7 +186,7 @@ export function startServer(
           return json(res, first.status, { ...first.body, replayed: true });
         }
         const started = Date.now();
-        const job = desk.closePosition(mint.trim(), fraction).then((result) => ({ ...result, ms: Date.now() - started }));
+        const job = desk.closePosition(mint.trim(), fraction, parseBook(record, url)).then((result) => ({ ...result, ms: Date.now() - started }));
         const statusOf = (r: Awaited<typeof job>) => (r.ok ? 200 : r.error.startsWith("No open position") ? 404 : 400);
         idem.remember("sell", record.idemKey, job, statusOf);
         const result = await job;
@@ -200,7 +202,7 @@ export function startServer(
           return json(res, first.status, { ...first.body, replayed: true });
         }
         const started = Date.now();
-        const job = desk.closeAllPositions().then((result) => ({ ...result, ms: Date.now() - started }));
+        const job = desk.closeAllPositions(parseBook(record, url)).then((result) => ({ ...result, ms: Date.now() - started }));
         idem.remember("sell-all", record.idemKey, job, () => 200);
         return json(res, 200, await job);
       }
@@ -371,6 +373,7 @@ export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "liveTradeUsd",
   "liveDailyCapUsd",
   "liveTrailPct",
+  "liveAutoBuy",
   "positionRefreshMs",
   "minVolume1hUsd",
   "analystMinScore",
@@ -479,4 +482,10 @@ function contentType(file: string): string {
   if (file.endsWith(".woff2")) return "font/woff2";
   if (file.endsWith(".json")) return "application/json";
   return "application/octet-stream";
+}
+
+/** v13.7 `book: "live" | "paper"` in the body (or ?book=). Anything else = not given. */
+function parseBook(record: Record<string, unknown>, url: URL): "live" | "paper" | undefined {
+  const raw = typeof record.book === "string" ? record.book : url.searchParams.get("book");
+  return raw === "live" || raw === "paper" ? raw : undefined;
 }

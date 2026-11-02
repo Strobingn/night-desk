@@ -47,7 +47,7 @@ object OneTap {
             else -> "Key loaded: no. Fill WALLET_PRIVATE_KEY= in Austin's .env."
         }
         if (w.balanceError != null) lines += "Balance: unavailable (${w.balanceError})."
-        lines += if (w.live) "LIVE is ON. One-tap and auto-buys send real swaps." else
+        lines += if (w.live) "LIVE is ON. " + (w.liveScopeLine ?: "One-tap and auto-buys send real swaps.") else
             "LIVE is OFF. " + (if (w.liveRequested) "LIVE_TRADING=true but the desk could not arm." else "LIVE_TRADING is not true.")
         if (w.rpcPublic) lines += "RPC: free public Solana RPC (rate limited)."
         return lines

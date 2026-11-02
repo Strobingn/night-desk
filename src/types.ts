@@ -162,7 +162,29 @@ export interface Fill {
 }
 
 /** Risk → Executor. The only sell path. */
+/** v13.7 which book a position or order belongs to. */
+export type BookKind = "paper" | "live";
+
+/** v13.7 armed desk: real-money positions, separate from the paper book the AI trades. */
+export interface LiveBookView {
+  /** "manual" = only Dirk's buys go live (AI on paper). "all" = the AI buys live too. */
+  scope: "manual" | "all";
+  line: string;
+  /** Wallet USDC (refreshed every 20 s and before each live buy). */
+  cashUsd: number;
+  equityUsd: number;
+  startingUsd: number;
+  pnlUsd: number;
+  openPnlUsd: number;
+  positions: PositionView[];
+  tradeUsd: number;
+  trailPct: number;
+  dailyCapUsd: number | null;
+}
+
 export interface ExitOrder {
+  /** v13.7 absent = the paper book. */
+  book?: "live";
   mint: string;
   symbol: string;
   qty: number;
@@ -249,6 +271,8 @@ export interface EquityPoint {
 }
 
 export interface PositionView {
+  /** v13.7 present only on live-book positions. */
+  book?: "live";
   mint: string;
   symbol: string;
   name: string;
@@ -378,6 +402,8 @@ export interface LiveReadiness {
   rpcPresent: boolean;
   /** Operator note. Does not change mode and does not store a wallet. */
   operatorReady: boolean;
+  /** v13.7 null when not armed. */
+  liveScope?: "manual" | "all" | null;
   lines: string[];
 }
 
@@ -445,6 +471,8 @@ export interface DeskPrefs {
   liveDailyCapUsd?: number | null;
   /** v13.5 live trailing stop, fraction (0.01 = 1%). */
   liveTrailPct?: number;
+  /** v13.7 AI auto-buys go live too (default false). */
+  liveAutoBuy?: boolean;
 }
 
 /** v12 GET /api/lookup result. */
@@ -557,6 +585,10 @@ export interface WalletView {
   balanceError: string | null;
   /** Desk is placing real swaps (LIVE_TRADING=true and a usable key at boot). */
   live: boolean;
+  /** v13.7 "manual" = only Dirk's buys are live, the AI stays on paper. null = not armed. */
+  liveScope?: "manual" | "all" | null;
+  liveScopeLine?: string;
+  liveAutoBuy?: boolean;
   liveRequested: boolean;
   /** true = the free public Solana RPC (rate limited). */
   rpcPublic: boolean;
@@ -569,6 +601,10 @@ export interface WalletView {
 }
 
 export interface DeskSnapshot {
+  /** v13.7 armed desk: who trades live. `mode` stays "live" when armed (old apps then show LIVE). */
+  liveScope?: "manual" | "all" | null;
+  /** v13.7 the live book. Top-level cash/equity/positions are the paper book on an armed desk. */
+  liveBook?: LiveBookView | null;
   /** v13.5 wallet card. */
   wallet?: WalletView;
   mode: "paper" | "live";
@@ -620,7 +656,10 @@ export interface MarksDelta {
   now: number;
   cashUsd: number;
   equityUsd: number;
+  /** v13.7 live book marks (armed desk only). */
+  live?: { cashUsd: number; equityUsd: number; positions: MarksDelta["positions"] };
   positions: Array<{
+    book?: "live";
     mint: string;
     markPrice: number;
     marketValueUsd: number;

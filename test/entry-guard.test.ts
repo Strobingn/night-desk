@@ -82,7 +82,7 @@ describe("entry slippage guard", () => {
       const bought = await desk.manualBuy(mint, 7.84);
       expect(bought.ok).toBe(false);
       if (!bought.ok) expect(formatBuyNotice(bought)).toContain("Buy refused.");
-      expect(desk.book.positions.has(mint)).toBe(false);
+      expect(desk.liveBook!.positions.has(mint)).toBe(false);
     } finally {
       desk.stop();
     }

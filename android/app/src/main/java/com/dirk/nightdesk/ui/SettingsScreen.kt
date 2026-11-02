@@ -86,7 +86,9 @@ private data class Draft(
     val liveUsd: Float = 5f,
     val liveCap: Float = 50f,
     val useLiveCap: Boolean = false,
-    val liveTrail: Float = 1f
+    val liveTrail: Float = 1f,
+    /** v13.7 AI auto-buys go live too. Off = Live: manual only · AI: paper. */
+    val liveAutoBuy: Boolean = false
 )
 
 private fun draftOf(snap: DeskSnapshot?): Draft {
@@ -136,7 +138,8 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         liveUsd = (snap?.liveTradeUsd ?: 5.0).toFloat().coerceIn(1f, 100f),
         liveCap = (snap?.liveDailyCapUsd ?: 50.0).toFloat().coerceIn(5f, 100_000f),
         useLiveCap = snap?.liveDailyCapUsd != null,
-        liveTrail = ((snap?.liveTrailPct ?: 0.01) * 100.0).toFloat().coerceIn(0.5f, 20f)
+        liveTrail = ((snap?.liveTrailPct ?: 0.01) * 100.0).toFloat().coerceIn(0.5f, 20f),
+        liveAutoBuy = snap?.liveAutoBuy == true
     )
 }
 
@@ -168,8 +171,16 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         AppearanceGroup()
         Group("Live wallet") {
             WalletCard(snap)
+            ToggleRow("AI buys live too", draft.liveAutoBuy) { draft = draft.copy(liveAutoBuy = it) }
+            Text(
+                if (draft.liveAutoBuy) "Live: manual + AI. The desk's auto-buys also send real swaps."
+                else "Live: manual only · AI: paper. Only your one-tap, Add coin and Advisor buys are real; the AI keeps trading the paper book.",
+                color = if (draft.liveAutoBuy) P.down else P.ink,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold
+            )
             ExactSlider("Live $ per trade", draft.liveUsd, 1f..100f, 1f, { "%.0f".format(it) }) { draft = draft.copy(liveUsd = it) }
-            Text("Up to \$100. Every live buy, auto or one-tap, spends exactly this much USDC (\$5 default). Paper sizes are never used live.", color = Dim, fontSize = 12.sp)
+            Text("Up to \$100. Every live buy spends exactly this much USDC (\$5 default). Paper sizes are never used live.", color = Dim, fontSize = 12.sp)
             ToggleRow("Live daily cap", draft.useLiveCap) { draft = draft.copy(useLiveCap = it) }
             if (draft.useLiveCap) {
                 ExactSlider("Live daily cap $", draft.liveCap, 5f..1_000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(liveCap = it) }
@@ -306,7 +317,8 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "positionRefreshMs" to Math.round(draft.refresh.toDouble() * 1_000.0),
     "liveTradeUsd" to draft.liveUsd.toDouble(),
     "liveDailyCapUsd" to if (draft.useLiveCap) draft.liveCap.toDouble() else null,
-    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0
+    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0,
+    "liveAutoBuy" to draft.liveAutoBuy
 )
 
 /** v13 group icons and one-line descriptions, same as the web. */

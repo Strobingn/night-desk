@@ -154,7 +154,7 @@ describe("manual buy and live-ready checklist", () => {
       expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 25 });
       expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
       expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint, sizeUsd: 25 });
-      expect(desk.book.positions.get(mint)?.entryPrice).toBe(1.02);
+      expect(desk.liveBook!.positions.get(mint)?.entryPrice).toBe(1.02);
       expect(desk.snapshot().mode).toBe("live");
     } finally {
       desk.stop();

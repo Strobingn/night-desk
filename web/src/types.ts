@@ -9,4 +9,4 @@ export type {
   WatchItem,
   WalletView
 } from "../../src/types";
-export type { CapWhy, CoinCandidate, CoinLookup, CoinLookupError } from "../../src/types";
+export type { CapWhy, CoinCandidate, CoinLookup, CoinLookupError, LiveBookView } from "../../src/types";

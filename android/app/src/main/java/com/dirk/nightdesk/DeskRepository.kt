@@ -419,10 +419,12 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** v12 partial sell. percent is 25, 50 or 100. 100 is the same as Close. */
-    suspend fun sellPosition(mint: String, percent: Int): DeskNotice = withContext(Dispatchers.IO) {
+    suspend fun sellPosition(mint: String, percent: Int, live: Boolean = false): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL")
+        // v13.7: a live-book position must name its book; no book = the paper book.
         val body = JSONObject().put("mint", mint).put("percent", percent)
+        if (live) body.put("book", "live")
         val notice = post("$base/api/positions/sell", body.toString()).fold(
             onSuccess = { raw ->
                 val proceeds = runCatching { JSONObject(raw).optFinite("proceedsUsd", Double.NaN) }.getOrNull()
@@ -549,13 +551,14 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** v13.3 one-tap sell: closes 100% now. No dialog. Null = already in flight. */
-    suspend fun oneTapSell(mint: String, symbol: String): DeskNotice? = withContext(Dispatchers.IO) {
-        val key = "sell:$mint"
+    suspend fun oneTapSell(mint: String, symbol: String, live: Boolean = false): DeskNotice? = withContext(Dispatchers.IO) {
+        val key = if (live) "sell:live:$mint" else "sell:$mint"
         if (!claimTap(key)) return@withContext null
         try {
             val base = link.baseUrl
             if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
             val body = JSONObject().put("mint", mint).put("percent", 100).put("idemKey", OneTap.newIdemKey())
+            if (live) body.put("book", "live")
             val started = System.nanoTime()
             val notice = sendRaw("$base/api/positions/sell", body.toString()).fold(
                 onSuccess = { (code, raw) ->
@@ -636,10 +639,13 @@ class DeskRepository private constructor(private val context: Context) {
             .also { refresh() }
     }
 
-    suspend fun closePosition(mint: String): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun closePosition(mint: String, live: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) return@withContext Result.failure(IllegalStateException("No desk URL"))
-        post("$base/api/positions/close", JSONObject().put("mint", mint).toString()).map { }
+        // v13.7: a live-book position names its book; no book = the paper book.
+        val body = JSONObject().put("mint", mint)
+        if (live) body.put("book", "live")
+        post("$base/api/positions/close", body.toString()).map { }
             .also { refresh() }
     }
 

@@ -19,7 +19,15 @@ data class MarkDelta(
     val markFeed: String
 )
 
-data class MarksMessage(val cashUsd: Double, val equityUsd: Double, val positions: List<MarkDelta>)
+data class MarksMessage(
+    val cashUsd: Double,
+    val equityUsd: Double,
+    val positions: List<MarkDelta>,
+    /** v13.7 live book marks (armed desk only). */
+    val livePositions: List<MarkDelta> = emptyList(),
+    val liveCashUsd: Double = Double.NaN,
+    val liveEquityUsd: Double = Double.NaN
+)
 
 /** Amber past 10 s, red past 30 s. */
 const val MARK_AMBER_MS = 10_000L
@@ -62,7 +70,20 @@ fun parseMarksMessage(raw: String): MarksMessage? = runCatching {
     if (root.optString("type") != "marks") return null
     val data = root.optJSONObject("data") ?: return null
     val rows = data.optJSONArray("positions") ?: return null
-    val list = buildList {
+    val live = data.optJSONObject("live")
+    MarksMessage(
+        cashUsd = data.optDouble("cashUsd", Double.NaN),
+        equityUsd = data.optDouble("equityUsd", Double.NaN),
+        positions = parseMarkRows(rows),
+        livePositions = parseMarkRows(live?.optJSONArray("positions")),
+        liveCashUsd = live?.optDouble("cashUsd", Double.NaN) ?: Double.NaN,
+        liveEquityUsd = live?.optDouble("equityUsd", Double.NaN) ?: Double.NaN
+    )
+}.getOrNull()
+
+private fun parseMarkRows(rows: org.json.JSONArray?): List<MarkDelta> {
+    if (rows == null) return emptyList()
+    return buildList {
         for (i in 0 until rows.length()) {
             val row = rows.optJSONObject(i) ?: continue
             val mint = row.optString("mint")
@@ -84,20 +105,35 @@ fun parseMarksMessage(raw: String): MarksMessage? = runCatching {
             )
         }
     }
-    MarksMessage(
-        cashUsd = data.optDouble("cashUsd", Double.NaN),
-        equityUsd = data.optDouble("equityUsd", Double.NaN),
-        positions = list
-    )
-}.getOrNull()
+}
 
 private fun Double.or(fallback: Double): Double = if (isFinite()) this else fallback
 
 /** Merges a marks message into the last snapshot. Unknown mints are ignored; nothing is removed. */
 fun DeskSnapshot.withMarks(msg: MarksMessage, receivedAt: Long = System.currentTimeMillis()): DeskSnapshot {
-    val byMint = msg.positions.associateBy { it.mint }
+    val (merged, touched) = mergeMarkRows(positions, msg.positions, receivedAt)
+    val lb = liveBook
+    val (liveMerged, liveTouched) = if (lb != null) mergeMarkRows(lb.positions, msg.livePositions, receivedAt) else Pair(emptyList<PositionRow>(), false)
+    if (!touched && !liveTouched) return this
+    return copy(
+        positions = merged,
+        cashUsd = if (touched) msg.cashUsd.or(cashUsd) else cashUsd,
+        equityUsd = if (touched) msg.equityUsd.or(equityUsd) else equityUsd,
+        liveBook = if (lb != null && liveTouched) {
+            lb.copy(
+                positions = liveMerged,
+                cashUsd = msg.liveCashUsd.or(lb.cashUsd),
+                equityUsd = msg.liveEquityUsd.or(lb.equityUsd),
+                openPnlUsd = liveMerged.sumOf { it.pnlUsd }
+            )
+        } else lb
+    )
+}
+
+private fun mergeMarkRows(rows: List<PositionRow>, deltas: List<MarkDelta>, receivedAt: Long): Pair<List<PositionRow>, Boolean> {
+    val byMint = deltas.associateBy { it.mint }
     var touched = false
-    val merged = positions.map { row ->
+    val merged = rows.map { row ->
         val d = byMint[row.mint] ?: return@map row
         touched = true
         row.copy(
@@ -112,12 +148,7 @@ fun DeskSnapshot.withMarks(msg: MarksMessage, receivedAt: Long = System.currentT
             markFeed = d.markFeed.ifBlank { row.markFeed }
         )
     }
-    if (!touched) return this
-    return copy(
-        positions = merged,
-        cashUsd = msg.cashUsd.or(cashUsd),
-        equityUsd = msg.equityUsd.or(equityUsd)
-    )
+    return Pair(merged, touched)
 }
 
 /** Look-only feeds. Opening one does not send a desk order. v13.2: Birdeye moved to /solana/token/<mint>. */

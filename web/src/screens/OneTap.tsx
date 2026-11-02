@@ -34,13 +34,15 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
   };
   const selling = actions.tapping.has("sell-all");
   const live = snap.mode === "live";
+  // v13.7: armed desk with the AI on paper — one-tap is live, Sell all here covers the paper book.
+  const split = snap.liveBook != null;
   return (
     <section className={`onetap card${live ? " live" : ""}`} aria-label="One-tap trading">
       {live ? (
         <div className="ot-live">
           <span className="live-badge live">LIVE</span>
           <span>
-            One tap = real buy of {usd(snap.prefs.liveTradeUsd ?? 5)} · trail {(((snap.prefs.liveTrailPct ?? 0.01) * 100)).toFixed(1)}% · stop −{(snap.rules.stopLossPct * 100).toFixed(0)}%. Change the size in Settings → Live wallet.
+            One tap = real buy of {usd(snap.prefs.liveTradeUsd ?? 5)} · trail {(((snap.prefs.liveTrailPct ?? 0.01) * 100)).toFixed(1)}% · stop −{(snap.rules.stopLossPct * 100).toFixed(0)}%. Change the size in Settings → Live wallet.{split && snap.liveScope !== "all" ? " AI: paper." : ""}
           </span>
         </div>
       ) : null}
@@ -115,7 +117,7 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
               void actions.sellAll();
             }}
           >
-            {selling ? "Selling all" : armed ? `Tap again: sell all ${snap.positions.length}` : `Sell all (${snap.positions.length})`}
+            {selling ? "Selling all" : armed ? `Tap again: sell all ${snap.positions.length}${split ? " paper" : ""}` : `Sell all${split ? " paper" : ""} (${snap.positions.length})`}
           </button>
         ) : null}
       </div>
@@ -150,9 +152,10 @@ export function TapBuyButton({ mint, symbol, actions, sizeUsd, className = "prim
 }
 
 /** The one-tap Sell button for an open position (closes 100%, no dialog). */
-export function TapSellButton({ mint, symbol, actions }: { mint: string; symbol: string; actions: DeskActions }) {
-  const inFlight = actions.tapping.has(`sell:${mint}`);
-  const live = actions.live === true;
+export function TapSellButton({ mint, symbol, actions, book }: { mint: string; symbol: string; actions: DeskActions; book?: "live" }) {
+  const inFlight = actions.tapping.has(`sell:${book ?? "paper"}:${mint}`);
+  // v13.7: on an armed desk only live-book positions sell for real; the AI's paper positions stay paper.
+  const live = book === "live" || (actions.live === true && actions.split !== true);
   return (
     <button
       className={`danger tap-sell${live ? " live" : ""}`}
@@ -161,7 +164,7 @@ export function TapSellButton({ mint, symbol, actions }: { mint: string; symbol:
       aria-label={`One-tap ${live ? "LIVE " : ""}sell ${symbol}`}
       onClick={(event) => {
         event.stopPropagation();
-        void actions.oneTapSell(mint, symbol);
+        void actions.oneTapSell(mint, symbol, book);
       }}
     >
       {inFlight ? "Selling…" : live ? "⚡ Sell now LIVE" : "⚡ Sell now"}

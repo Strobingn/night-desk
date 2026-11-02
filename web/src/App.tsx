@@ -46,17 +46,19 @@ export interface DeskActions {
   /** Sends a paper buy. Returns true on a fill. Shows "Buy anyway" for a cooldown or a hard kill. */
   buy: (ask: BuyAsk) => Promise<boolean>;
   askBuy: (ask: BuyAsk) => void;
-  sell: (mint: string, symbol: string, percent: 25 | 50 | 100) => Promise<void>;
+  sell: (mint: string, symbol: string, percent: 25 | 50 | 100, book?: "live") => Promise<void>;
   openAddCoin: (q: string) => void;
   /** v13.3 one tap: paper-buy now at the one-tap size. No dialog; every desk risk check still runs. */
   oneTapBuy: (mint: string, symbol: string, sizeUsd?: number) => Promise<void>;
   /** v13.3 one tap: close the whole position now. No dialog. */
-  oneTapSell: (mint: string, symbol: string) => Promise<void>;
+  oneTapSell: (mint: string, symbol: string, book?: "live") => Promise<void>;
   sellAll: () => Promise<void>;
   /** v13.3 one-tap size in dollars (this device). */
   tapUsd: number;
   /** v13.5 the desk is LIVE: one-tap buttons say so and use the live size. */
   live?: boolean;
+  /** v13.7 armed desk keeping the AI on paper: a paper book and a separate live book. */
+  split?: boolean;
   setTapUsd: (n: number) => void;
   /** v13.3 saves the entry (and optionally exit) slippage percent to the desk. */
   saveSlippage: (entryPct: number, exitPct?: number | null) => Promise<boolean>;
@@ -90,6 +92,7 @@ export function App() {
   const inflight = useRef(new Set<string>());
   /** v13.5 current mode for confirm texts inside stable callbacks. */
   const modeRef = useRef<string>("paper");
+  const splitRef = useRef(false);
   const [tapping, setTapping] = useState<ReadonlySet<string>>(() => new Set());
   const [tapSaved, setTapSaved] = useState<number | null>(() => {
     const raw = Number(localStorage.getItem(TAP_SIZE_KEY));
@@ -230,12 +233,15 @@ export function App() {
     [snap, minutesLeftFor]
   );
 
-  const sell = useCallback(async (mint: string, symbol: string, percent: 25 | 50 | 100) => {
+  const sell = useCallback(async (mint: string, symbol: string, percent: 25 | 50 | 100, book?: "live") => {
     const verb = percent === 100 ? `Close ${symbol} at the mark?` : `Sell ${percent}% of ${symbol} at the mark?`;
-    const how = modeRef.current === "live" ? "LIVE: a real on-chain sell from the desk wallet." : "Paper fill against the same pool model as a stop.";
+    const how =
+      book === "live" || (modeRef.current === "live" && !splitRef.current)
+        ? "LIVE: a real on-chain sell from the desk wallet."
+        : "Paper fill against the same pool model as a stop.";
     if (!window.confirm(`${verb} ${how} The hard stop still fires on its own.`)) return;
     setBusy(`${mint}:${percent}`);
-    const res = await api<{ proceedsUsd?: number }>("/api/positions/sell", { body: { mint, percent } });
+    const res = await api<{ proceedsUsd?: number }>("/api/positions/sell", { body: { mint, percent, ...(book ? { book } : {}) } });
     setBusy(null);
     setNotice(
       res.ok
@@ -270,12 +276,12 @@ export function App() {
   );
 
   const oneTapSell = useCallback(
-    async (mint: string, symbol: string) => {
-      const key = `sell:${mint}`;
+    async (mint: string, symbol: string, book?: "live") => {
+      const key = `sell:${book ?? "paper"}:${mint}`;
       if (inflight.current.has(key)) return;
       track(key, true);
       const started = performance.now();
-      const res = await api<SellReply>("/api/positions/sell", { body: { mint, percent: 100, idemKey: newIdemKey() } });
+      const res = await api<SellReply>("/api/positions/sell", { body: { mint, percent: 100, idemKey: newIdemKey(), ...(book ? { book } : {}) } });
       track(key, false);
       setNotice({ ok: res.ok, toast: true, text: sellToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
     },
@@ -315,6 +321,7 @@ export function App() {
     notify: setNotice,
     oneTapBuy,
     live: snap?.mode === "live",
+    split: snap?.liveBook != null,
     oneTapSell,
     sellAll,
     tapUsd,
@@ -342,12 +349,16 @@ export function App() {
 
   const openPnl = snap.positions.reduce((sum, pos) => sum + pos.pnlUsd, 0);
   modeRef.current = snap.mode;
+  splitRef.current = snap.liveBook != null;
+  const split = snap.liveBook != null;
 
   return (
     <div className={`shell${snap.mode === "live" ? " live-desk" : ""}`}>
       {snap.mode === "live" ? (
         <div className="live-strip" role="status">
-          LIVE · real swaps from the desk wallet · {usd(snap.prefs.liveTradeUsd ?? 5)} per trade
+          {split && snap.liveScope !== "all"
+            ? `Live: manual only · AI: paper · your buys are real swaps, ${usd(snap.prefs.liveTradeUsd ?? 5)} each`
+            : `LIVE · real swaps from the desk wallet · ${usd(snap.prefs.liveTradeUsd ?? 5)} per trade`}
         </div>
       ) : null}
       <header className={`top${tab === "tape" ? " on-tape" : ""}`}>
@@ -383,11 +394,11 @@ export function App() {
           </button>
         <div className={`lamp ${snap.mode}`} aria-label={`Trading mode ${snap.mode}`}>
           <i />
-          {snap.mode === "live" ? "LIVE · REAL $" : "PAPER"}
+          {split ? (snap.liveScope === "all" ? "LIVE · AI + YOU" : "LIVE YOU · AI PAPER") : snap.mode === "live" ? "LIVE · REAL $" : "PAPER"}
         </div>
         </div>
         <div className={`metrics${tab === "home" ? " on-home" : ""}${tab === "tape" ? " on-tape" : ""}`}>
-          <Metric label={snap.mode === "live" ? "Live cash" : "Paper cash"} value={usd(snap.cashUsd)} hint={`book ${usd(snap.startingBalanceUsd)}`} />
+          <Metric label={snap.mode === "live" && !split ? "Live cash" : "Paper cash"} value={usd(snap.cashUsd)} hint={`book ${usd(snap.startingBalanceUsd)}`} />
           <Metric label="Marked equity" value={usd(snap.equityUsd)} hint="cash + marks" />
           <Metric label="Session P&L" value={signedUsd(snap.sessionPnlUsd)} hint={signedPct(snap.sessionPnlPct)} tone={tone(snap.sessionPnlUsd)} />
           <Metric label="Open" value={String(snap.positions.length)} hint={`${signedUsd(openPnl)} open`} tone={tone(openPnl)} />

@@ -37,7 +37,7 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
   async function resetBook() {
     const amount = snap.prefs.paperResetUsd ?? 100;
     const ok = window.confirm(
-      `Reset the paper book to ${usd(amount, 0)}? Open positions are dropped and session PnL starts over. No order is sent. The log, advisor memory, and 1h volume floor stay. Live trading stays off.`
+      `Reset the paper book to ${usd(amount, 0)}? Open positions are dropped and session PnL starts over. No order is sent. The log, advisor memory, and 1h volume floor stay. ${snap.liveBook ? "The live book and its real positions are not touched." : "Live trading stays off."}`
     );
     if (!ok) return;
     setResetting(true);
@@ -52,8 +52,10 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
 
       <HeroCard snap={snap} openPnl={openPnl} />
 
+      {snap.liveBook ? <LiveBookSection snap={snap} actions={actions} busy={busy} /> : null}
+
       <div className="section-head">
-        <h2>Open positions</h2>
+        <h2>{snap.liveBook ? "Paper positions · AI" : "Open positions"}</h2>
         <span className={tone(openPnl)}>
           {signedUsd(openPnl)} · {snap.positions.length} open · exposure {usd(snap.exposureUsd ?? 0)}
           {snap.prefs.maxExposurePct != null && snap.prefs.maxExposurePct < 1 ? ` of ${(snap.prefs.maxExposurePct * 100).toFixed(0)}% cap` : ""}
@@ -76,14 +78,14 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
         <header>
           <h3>Equity</h3>
           <span className={snap.sessionPnlUsd >= 0 ? "up" : "down"}>{signedUsd(snap.sessionPnlUsd)}</span>
-          {snap.mode === "paper" ? (
+          {snap.mode === "paper" || snap.liveBook ? (
             <button className="ghost reset" type="button" disabled={resetting} onClick={() => void resetBook()}>
               {resetting ? "Resetting" : "Reset book"}
             </button>
           ) : null}
         </header>
         <EquityChart points={snap.equity} baseline={snap.startingBalanceUsd} />
-        {snap.mode === "paper" ? <p className="fine">Reset paper book refills to {usd(snap.prefs.paperResetUsd ?? 100, 0)} (Settings → Sizing / risk).</p> : null}
+        {snap.mode === "paper" || snap.liveBook ? <p className="fine">Reset paper book refills to {usd(snap.prefs.paperResetUsd ?? 100, 0)} (Settings → Sizing / risk).</p> : null}
       </section>
 
       <WalletCard snap={snap} />
@@ -184,10 +186,11 @@ export function MarkUpdated({ pos }: { pos: PositionView }) {
 
 function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionView; actions: DeskActions; busy: string | null; armPct: number; trailOn: boolean }) {
   const tag = pos.tag ?? (pos.entry === "manual" ? "manual" : null);
+  const live = pos.book === "live";
   const valueUsd = pos.marketValueUsd;
   const stopDist = pos.markPrice > 0 ? pos.stopPrice / pos.markPrice - 1 : null;
   return (
-    <article className={`pos-card ${pos.pnlUsd >= 0 ? "is-up" : "is-down"}`}>
+    <article className={`pos-card ${pos.pnlUsd >= 0 ? "is-up" : "is-down"}${live ? " live-pos" : ""}`}>
       <header>
         <CoinAvatar symbol={pos.symbol} mint={pos.mint} tone={tone(pos.pnlUsd)} />
         <div className="pos-title">
@@ -197,7 +200,7 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
             </button>
           </h3>
           <p className="sub">
-            {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
+            {live ? <span className="live-badge live">LIVE</span> : null} {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
             {pos.lpUnlocked ? " · LP unlocked" : ""}
           </p>
         </div>
@@ -241,14 +244,15 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
         </div>
       </dl>
       <div className="sells" role="group" aria-label={`Sell ${pos.symbol}`}>
-        <TapSellButton mint={pos.mint} symbol={pos.symbol} actions={actions} />
-        {([25, 50] as const).map((pct) => (
+        <TapSellButton mint={pos.mint} symbol={pos.symbol} actions={actions} book={pos.book} />
+        {/* v13.7: live positions close in full only (no partial live sells). */}
+        {(live ? ([] as const) : ([25, 50] as const)).map((pct) => (
           <button key={pct} className="tonal" type="button" disabled={busy === `${pos.mint}:${pct}`} onClick={() => void actions.sell(pos.mint, pos.symbol, pct)}>
             Sell {pct}%
           </button>
         ))}
-        <button className="danger close" type="button" disabled={busy === `${pos.mint}:100`} onClick={() => void actions.sell(pos.mint, pos.symbol, 100)}>
-          {busy === `${pos.mint}:100` ? "Closing" : "Close"} 100%
+        <button className="danger close" type="button" disabled={busy === `${pos.mint}:100`} onClick={() => void actions.sell(pos.mint, pos.symbol, 100, pos.book)}>
+          {busy === `${pos.mint}:100` ? "Closing" : "Close"} 100%{live ? " LIVE" : ""}
         </button>
       </div>
       <div className="links">
@@ -262,6 +266,36 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
   );
 }
 
+/** v13.7 armed desk: the live book (real money), apart from the AI's paper book. */
+function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions: DeskActions; busy: string | null }) {
+  const lb = snap.liveBook!;
+  return (
+    <section className="live-book" aria-label="Live positions">
+      <div className="section-head">
+        <h2>
+          <span className="live-badge live">LIVE</span> Live positions · real $
+        </h2>
+        <span className={tone(lb.openPnlUsd)}>
+          {signedUsd(lb.openPnlUsd)} · {lb.positions.length} open · USDC {usd(lb.cashUsd)} · equity {usd(lb.equityUsd)}
+        </span>
+      </div>
+      <p className="fine live-scope">
+        {lb.scope === "all" ? "Live: manual + AI." : "Live: manual only · AI: paper."} {usd(lb.tradeUsd)} per trade · trail {(lb.trailPct * 100).toFixed(1)}% · hard stop −
+        {(snap.rules.stopLossPct * 100).toFixed(0)}% · {lb.dailyCapUsd != null ? `daily cap ${usd(lb.dailyCapUsd)}` : "no daily max"}.
+      </p>
+      {lb.positions.length === 0 ? (
+        <p className="empty">No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real {usd(lb.tradeUsd)} buy.</p>
+      ) : (
+        <div className="positions">
+          {lb.positions.map((pos, index) => (
+            <PositionCard key={`live:${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function HeroCard({ snap, openPnl }: { snap: DeskSnapshot; openPnl: number }) {
   const base = dayBase(snap.equity, snap.startingBalanceUsd);
   const day = snap.equityUsd - base;
@@ -270,7 +304,7 @@ function HeroCard({ snap, openPnl }: { snap: DeskSnapshot; openPnl: number }) {
     <section className="hero" aria-label="Book">
       <div className="hero-top">
         <span className="kicker">Marked equity</span>
-        <span className={`mode-chip ${snap.mode}`}>{snap.mode === "live" ? "LIVE" : "PAPER"}</span>
+        <span className={`mode-chip ${snap.liveBook ? "paper" : snap.mode}`}>{snap.liveBook ? "PAPER · AI" : snap.mode === "live" ? "LIVE" : "PAPER"}</span>
       </div>
       <strong className="hero-value">{usd(snap.equityUsd)}</strong>
       <div className="hero-chips">

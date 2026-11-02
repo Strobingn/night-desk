@@ -35,7 +35,9 @@ data class PositionRow(
     /** v13.2 local wall time the shown mark was taken (receive time − markAgeMs). */
     val markLocalAt: Long = 0L,
     /** v13.2 "chain" (pool reserves), "dexscreener", "jupiter", … */
-    val markFeed: String = ""
+    val markFeed: String = "",
+    /** v13.7 true = a real-money position in the live book. */
+    val live: Boolean = false
 ) {
     val stopDistancePct: Double
         get() {
@@ -83,8 +85,26 @@ data class WalletInfo(
     val liveRequested: Boolean,
     val rpcPublic: Boolean,
     val liveSpentTodayUsd: Double,
-    val minFeeSol: Double
+    val minFeeSol: Double,
+    /** v13.7 "Live: manual only · AI: paper" etc. Null on an older desk. */
+    val liveScopeLine: String? = null
 )
+
+/** v13.7 armed desk: the live book (real money), apart from the AI's paper book. */
+data class LiveBookInfo(
+    /** "manual" = only Dirk's buys are live, the AI stays on paper. "all" = the AI buys live too. */
+    val scope: String,
+    val line: String,
+    val cashUsd: Double,
+    val equityUsd: Double,
+    val openPnlUsd: Double,
+    val positions: List<PositionRow>,
+    val tradeUsd: Double,
+    val trailPct: Double,
+    val dailyCapUsd: Double?
+) {
+    val manualOnly: Boolean get() = scope != "all"
+}
 
 data class DeskNotice(val ok: Boolean, val text: String)
 
@@ -372,6 +392,11 @@ data class DeskSnapshot(
     val liveDailyCapUsd: Double? = null,
     val liveTrailPct: Double = 0.01,
     val wallet: WalletInfo? = null,
+    /** v13.7 armed desk: "manual" or "all"; null when not armed. */
+    val liveScope: String? = null,
+    val liveBook: LiveBookInfo? = null,
+    /** v13.7 saved toggle: AI auto-buys go live too (default off). */
+    val liveAutoBuy: Boolean = false,
     /** v13 hero card. */
     val startingBalanceUsd: Double = 100.0,
     val sessionPnlPct: Double = 0.0,
@@ -592,37 +617,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
             }
         }
     }
-    val mintIds = HashSet<String>()
-    val book = buildList {
-        if (positions != null) {
-            for (i in 0 until positions.length()) {
-                val row = positions.optJSONObject(i) ?: continue
-                add(
-                    PositionRow(
-                        mint = freshId(mintIds, row.optText("mint").ifBlank { "mint-$i" }),
-                        symbol = row.optText("symbol", "—"),
-                        pnlUsd = row.optFinite("pnlUsd"),
-                        pnlPct = row.optFinite("pnlPct"),
-                        markPrice = row.optFinite("markPrice"),
-                        stopPrice = row.optFinite("stopPrice"),
-                        entryPrice = row.optFinite("entryPrice"),
-                        score = row.optFinite("score"),
-                        source = row.optText("source"),
-                        entry = row.optText("entry", "analyst"),
-                        lpUnlocked = row.optBoolean("lpUnlocked"),
-                        markAgeMs = row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
-                        markLocalAt = receivedAt - row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
-                        markFeed = row.optText("markFeed"),
-                        costUsd = row.optFinite("costUsd"),
-                        marketValueUsd = row.optFinite("marketValueUsd"),
-                        openedAt = row.optFinite("openedAt").toLong(),
-                        tag = row.optText("tag").ifBlank { null },
-                        peakPrice = row.optFinite("peakPrice")
-                    )
-                )
-            }
-        }
-    }
+    val book = parsePositionRows(positions, receivedAt, live = false)
     val bans = buildList {
         val rows = data.optJSONArray("cooldowns")
         if (rows != null) {
@@ -702,6 +697,9 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         liveDailyCapUsd = prefs?.let { row -> if (!row.has("liveDailyCapUsd") || row.isNull("liveDailyCapUsd")) null else row.optFinite("liveDailyCapUsd", Double.NaN).takeIf { it.isFinite() && it > 0 } },
         liveTrailPct = (prefs?.optFinite("liveTrailPct", 0.01) ?: 0.01).let { if (it >= 0.5) it / 100 else it }.coerceIn(0.005, 0.2),
         wallet = parseWallet(data.optJSONObject("wallet")),
+        liveScope = data.optText("liveScope").ifBlank { null }?.takeIf { it != "null" },
+        liveBook = if (data.isNull("liveBook")) null else parseLiveBook(data.optJSONObject("liveBook"), receivedAt),
+        liveAutoBuy = prefs?.optBoolean("liveAutoBuy", false) ?: false,
         startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
         sessionPnlPct = data.optFinite("sessionPnlPct"),
         equityPoints = equitySeries,
@@ -792,6 +790,58 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
     )
 }
 
+/** Position cards from a snapshot array (the paper book's `positions`, or v13.7 `liveBook.positions`). */
+internal fun parsePositionRows(positions: org.json.JSONArray?, receivedAt: Long, live: Boolean): List<PositionRow> {
+    val mintIds = HashSet<String>()
+    return buildList {
+        if (positions != null) {
+            for (i in 0 until positions.length()) {
+                val row = positions.optJSONObject(i) ?: continue
+                add(
+                    PositionRow(
+                        mint = freshId(mintIds, row.optText("mint").ifBlank { "mint-$i" }),
+                        symbol = row.optText("symbol", "—"),
+                        pnlUsd = row.optFinite("pnlUsd"),
+                        pnlPct = row.optFinite("pnlPct"),
+                        markPrice = row.optFinite("markPrice"),
+                        stopPrice = row.optFinite("stopPrice"),
+                        entryPrice = row.optFinite("entryPrice"),
+                        score = row.optFinite("score"),
+                        source = row.optText("source"),
+                        entry = row.optText("entry", "analyst"),
+                        lpUnlocked = row.optBoolean("lpUnlocked"),
+                        markAgeMs = row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
+                        markLocalAt = receivedAt - row.optFinite("markAgeMs").toLong().coerceAtLeast(0L),
+                        markFeed = row.optText("markFeed"),
+                        costUsd = row.optFinite("costUsd"),
+                        marketValueUsd = row.optFinite("marketValueUsd"),
+                        openedAt = row.optFinite("openedAt").toLong(),
+                        tag = row.optText("tag").ifBlank { null },
+                        peakPrice = row.optFinite("peakPrice"),
+                        live = live || row.optText("book") == "live"
+                    )
+                )
+            }
+        }
+    }
+}
+
+/** v13.7 the live book from /api/state `liveBook`. Null when the desk is not armed (or older). */
+internal fun parseLiveBook(row: JSONObject?, receivedAt: Long): LiveBookInfo? {
+    if (row == null) return null
+    return LiveBookInfo(
+        scope = row.optText("scope", "manual"),
+        line = row.optText("line"),
+        cashUsd = row.optFinite("cashUsd"),
+        equityUsd = row.optFinite("equityUsd"),
+        openPnlUsd = row.optFinite("openPnlUsd"),
+        positions = parsePositionRows(row.optJSONArray("positions"), receivedAt, live = true),
+        tradeUsd = row.optFinite("tradeUsd", 5.0),
+        trailPct = row.optFinite("trailPct", 0.05),
+        dailyCapUsd = if (!row.has("dailyCapUsd") || row.isNull("dailyCapUsd")) null else row.optFinite("dailyCapUsd", Double.NaN).takeIf { it.isFinite() && it > 0 }
+    )
+}
+
 /** v13.5 wallet card from /api/state `wallet`. Null on a desk older than v13.5. */
 internal fun parseWallet(row: JSONObject?): WalletInfo? {
     if (row == null) return null
@@ -809,6 +859,7 @@ internal fun parseWallet(row: JSONObject?): WalletInfo? {
         liveRequested = row.optBoolean("liveRequested"),
         rpcPublic = row.optBoolean("rpcPublic"),
         liveSpentTodayUsd = optNum("liveSpentTodayUsd") ?: 0.0,
-        minFeeSol = optNum("minFeeSol") ?: 0.005
+        minFeeSol = optNum("minFeeSol") ?: 0.005,
+        liveScopeLine = row.optText("liveScopeLine").ifBlank { null }?.takeIf { it != "null" }
     )
 }

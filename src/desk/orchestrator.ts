@@ -53,9 +53,17 @@ import type {
   WatchItem,
   WalletView,
   CoinLookup,
-  CoinLookupError
+  CoinLookupError,
+  BookKind,
+  LiveBookView
 } from "../types.js";
 import { PaperBook } from "./book.js";
+
+/** v13.7 per-book state maps (cooldowns, opening, marks) key live positions with this prefix. */
+const LIVE_KEY = "live:";
+function bookKey(kind: BookKind, mint: string): string {
+  return kind === "live" ? `${LIVE_KEY}${mint}` : mint;
+}
 
 type SettingsPatch = {
   [K in keyof DeskSettings]?: unknown;
@@ -98,6 +106,8 @@ interface DeskSettings {
   notifyNearMiss?: boolean;
   notifyFills?: boolean;
   notifyStops?: boolean;
+  /** v13.7 AI auto-buys go live too. Default false: live = Dirk's manual buys only. */
+  liveAutoBuy?: boolean;
   pnlAlertPct?: number;
   positionSizeUsd?: number | null;
   maxExposurePct?: number;
@@ -151,6 +161,7 @@ interface DeskSettingsView {
   liveTradeUsd: number;
   liveDailyCapUsd: number | null;
   liveTrailPct: number;
+  liveAutoBuy: boolean;
 }
 
 /** Codes that make a manual buy ask for "Buy anyway" first. */
@@ -247,6 +258,15 @@ export class Desk {
   private liveDailyCapUsd: number | null = null;
   /** v13.5 live trailing stop, fraction. Armed from entry. */
   private liveTrailPct: number = LIVE_BAND.trailPct.fallback;
+  /**
+   * v13.7 live book. Exists only when the desk is armed (LIVE_TRADING=true + a valid key). The paper
+   * book (`this.book`) always keeps running the AI; live holds real-money positions only.
+   */
+  liveBook: PaperBook | null = null;
+  private liveStartingUsd = 0;
+  private liveStartedAt = Date.now();
+  /** v13.7 false (default): only Dirk's manual buys go live; the AI keeps buying on paper. */
+  private liveAutoBuy = false;
   /** v13.5 last read-only wallet balance read. */
   private walletBalances: WalletBalances | null = null;
   private walletTimer: NodeJS.Timeout | null = null;
@@ -342,16 +362,27 @@ export class Desk {
           ? fetchWalletBalances(this.net.fetchAt(0), config.walletRpcUrl, owner)
           : { sol: null, usdc: null, at: Date.now(), error: "No wallet key loaded" });
     this.rugs = new LayeredRugRegistry(new StaticRugRegistry(loadRugWalletMap(config.rugWalletsFile)));
-    // v13.5: a live desk keeps its own book. The paper book (and Dirk's paper positions) stay saved
-    // under "book" and are never sent to the chain.
+    // v13.7: the paper book (and the AI on it) always runs. An armed desk adds a separate live book,
+    // saved under "book:live", that holds only real-money positions.
     const live = config.mode === "live";
-    const restored = live ? this.store.loadBook("book:live") : config.resetPaper ? null : this.store.loadBook();
-    const starting = live
-      ? restored?.startingBalanceUsd ?? 0
-      : restored && restored.startingBalanceUsd > 0 ? restored.startingBalanceUsd : config.startingBalanceUsd;
+    const restored = config.resetPaper ? null : this.store.loadBook();
+    const starting = restored && restored.startingBalanceUsd > 0 ? restored.startingBalanceUsd : config.startingBalanceUsd;
     this.config.startingBalanceUsd = starting;
     this.book = new PaperBook(restored?.cashUsd ?? starting);
-    if (live && !restored) this.startedAt = Date.now();
+    if (live) {
+      const liveSaved = this.store.loadBook("book:live");
+      this.liveBook = new PaperBook(liveSaved?.cashUsd ?? 0);
+      this.liveStartingUsd = liveSaved?.startingBalanceUsd ?? 0;
+      this.liveStartedAt = liveSaved?.startedAt ?? Date.now();
+      for (const pos of liveSaved?.positions ?? []) {
+        pos.closing = false;
+        pos.live = true;
+        this.liveBook.positions.set(pos.mint, pos);
+        this.liveBook.mark(pos.mint, pos.entryPrice);
+      }
+      for (const [mint, priceUsd] of liveSaved?.lastPrices ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.mark(mint, priceUsd);
+      for (const [mint, until] of liveSaved?.cooldowns ?? []) if (until > Date.now()) this.cooldowns.set(bookKey("live", mint), until);
+    }
     if (restored) {
       this.startedAt = restored.startedAt;
       for (const pos of restored.positions) {
@@ -360,7 +391,7 @@ export class Desk {
         this.book.mark(pos.mint, pos.entryPrice);
       }
       for (const [mint, priceUsd] of restored.lastPrices ?? []) this.book.mark(mint, priceUsd);
-      this.cooldowns = new Map(restored.cooldowns.filter(([, until]) => until > Date.now()));
+      for (const [mint, until] of restored.cooldowns) if (until > Date.now() && !mint.startsWith(LIVE_KEY)) this.cooldowns.set(mint, until);
     }
     this.resetAt = this.ensureResetAt();
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
@@ -397,7 +428,9 @@ export class Desk {
         ? new ChainMarkReader(config.walletRpcUrl || config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
         : undefined;
     this.pricer = new PositionPricer({
-      heldMints: () => [...this.book.positions.values()].filter((pos) => pos.source !== "replay").map((pos) => pos.mint),
+      heldMints: () => [
+        ...new Set([...this.book.positions.values(), ...(this.liveBook?.positions.values() ?? [])].filter((pos) => pos.source !== "replay").map((pos) => pos.mint))
+      ],
       tick: (mint, priceUsd, quote) =>
         this.scout.tick(mint, priceUsd, {
           feed: quote?.feed,
@@ -407,13 +440,13 @@ export class Desk {
         }),
       fetchImpl: deps.priceFetch ?? this.net.fetchAt(0),
       pollMs: () => this.positionRefreshMs,
-      pairFor: (mint) => this.book.positions.get(mint)?.pairAddress,
+      pairFor: (mint) => this.liveBook?.positions.get(mint)?.pairAddress ?? this.book.positions.get(mint)?.pairAddress,
       // v13.6: a held pump.fun coin with no DexScreener pair yet is read from its bonding curve.
       fallbackPair: (mint) => (mint.endsWith("pump") ? pumpCurveAddress(mint) ?? undefined : undefined),
       live: (mint, priceUsd, origin) => this.liveMark(mint, priceUsd, origin),
       chain: this.chain,
       onStale: (mint, silentMs) => {
-        const pos = this.book.positions.get(mint);
+        const pos = this.book.positions.get(mint) ?? this.liveBook?.positions.get(mint);
         this.log({
           stage: "risk",
           kind: "info",
@@ -424,7 +457,7 @@ export class Desk {
         });
       },
       onRecovered: (mint) => {
-        const pos = this.book.positions.get(mint);
+        const pos = this.book.positions.get(mint) ?? this.liveBook?.positions.get(mint);
         this.log({
           stage: "risk",
           kind: "info",
@@ -452,12 +485,15 @@ export class Desk {
     } else {
       this.persist();
     }
+    if (this.liveBook) {
+      for (const pos of [...this.liveBook.positions.values()]) this.review(pos.mint, this.liveBook.price(pos.mint, pos.entryPrice), "live");
+    }
     this.log({
       stage: "logger",
       kind: "info",
       message:
         config.mode === "live"
-          ? `Logger opened a live book. Live swaps are armed. Cash tracked at ${money(this.book.cashUsd)}.`
+          ? `Logger opened the paper book at ${money(this.book.cashUsd)} for the AI and a live book for real swaps. ${this.liveScopeLine()}`
           : `Logger opened the paper book at ${money(config.startingBalanceUsd)}. Live trading is disarmed.`,
       detail: config.armError
     });
@@ -534,9 +570,6 @@ export class Desk {
     startingUsd?: number
   ): { ok: true; cashUsd: number; startingBalanceUsd: number; archive: string; archivePath: string | null } | { ok: false; error: string } {
     if (confirm !== true) return { ok: false, error: "Confirm the reset before the paper book is cleared." };
-    if (this.config.mode !== "paper") {
-      return { ok: false, error: "Reset only clears the paper book. Live trading is unchanged." };
-    }
     if (startingUsd !== undefined && (typeof startingUsd !== "number" || !Number.isFinite(startingUsd) || startingUsd <= 0)) {
       return { ok: false, error: "startingUsd must be a positive dollar amount (100 to 10,000)." };
     }
@@ -589,7 +622,7 @@ export class Desk {
     this.log({
       stage: "system",
       kind: "info",
-      message: `Paper book reset to ${money(starting)}. The previous session was archived as ${archiveName} (trades and equity history kept). Open positions dropped. The log, advisor memory, and volume floor stay. Live trading is still off.`
+      message: `Paper book reset to ${money(starting)}. The previous session was archived as ${archiveName} (trades and equity history kept). Open positions dropped. The log, advisor memory, and volume floor stay. ${this.liveBook ? "The live book and its positions are untouched." : "Live trading is still off."}`
     });
     this.publishAdvice(this.buildAdvice());
     return { ok: true, cashUsd: this.book.cashUsd, startingBalanceUsd: starting, archive: archiveName, archivePath };
@@ -737,19 +770,28 @@ export class Desk {
    */
   async closePosition(
     mint: string,
-    fraction = 1
+    fraction = 1,
+    bookArg?: BookKind
   ): Promise<
     | { ok: true; soldFraction?: number; proceedsUsd?: number; symbol?: string; pnlUsd?: number; pnlPct?: number; exitPrice?: number; exitCode?: string }
     | { ok: false; error: string }
   > {
-    const pos = this.book.positions.get(mint);
-    if (!pos) return { ok: false, error: "No open position for that mint." };
+    // v13.7: a sell names its book. No book = the paper book, so an old client can never sell real coins by accident.
+    const kind: BookKind = bookArg === "live" ? "live" : "paper";
+    if (kind === "live" && !this.liveBook) return { ok: false, error: "No open position for that mint. Live trading is not armed." };
+    const book = this.bk(kind);
+    const pos = book.positions.get(mint);
+    if (!pos) {
+      const elsewhere = kind === "paper" && this.liveBook?.positions.has(mint);
+      return { ok: false, error: elsewhere ? "No open position for that mint in the paper book. It is held live; sell it from the Live section." : "No open position for that mint." };
+    }
     if (pos.closing) return { ok: false, error: "Close already in progress." };
     if (typeof fraction !== "number" || !Number.isFinite(fraction) || !(fraction > 0) || fraction > 1) {
       return { ok: false, error: "Sell fraction must be 25%, 50% or 100% (a number above 0 and at most 1)." };
     }
-    const mark = this.book.price(mint, pos.entryPrice);
+    const mark = book.price(mint, pos.entryPrice);
     if (!(mark > 0)) return { ok: false, error: "No mark to close against." };
+    if (fraction < 1 && kind === "live") return { ok: false, error: "Partial sells are paper-only. Use a full close for a live position." };
     if (fraction < 1) {
       const split = splitPosition(pos.qty, pos.costUsd, fraction);
       // A remainder worth under a cent is closed in full instead of leaving dust.
@@ -767,7 +809,8 @@ export class Desk {
       reason: {
         code: "MANUAL_CLOSE",
         message: "Manual close from the desk. Trail and hard stop were not the trigger."
-      }
+      },
+      ...(kind === "live" ? { book: "live" as const } : {})
     };
     this.log({
       stage: "system",
@@ -775,11 +818,11 @@ export class Desk {
       mint: pos.mint,
       symbol: pos.symbol,
       code: "MANUAL_CLOSE",
-      message: `Manual close requested for ${pos.symbol} at mark ${price(mark)}.`
+      message: `Manual ${kind === "live" ? "live " : ""}close requested for ${pos.symbol} at mark ${price(mark)}.`
     });
     this.bus.emit("risk.exit", order);
     await this.drain();
-    if (this.book.positions.has(mint)) return { ok: false, error: `Close of ${pos.symbol} did not complete. Position is still open.` };
+    if (book.positions.has(mint)) return { ok: false, error: `Close of ${pos.symbol} did not complete. Position is still open.` };
     const closed = this.store.recentClosed(20).find((trade) => trade.id === pos.tradeId);
     return {
       ok: true,
@@ -792,7 +835,7 @@ export class Desk {
   }
 
   /** v13.3 Sell all: closes every open position at its current mark, one after another. */
-  async closeAllPositions(): Promise<{
+  async closeAllPositions(bookArg?: BookKind): Promise<{
     ok: true;
     sold: Array<{ mint: string; symbol: string; proceedsUsd?: number; pnlUsd?: number }>;
     failed: Array<{ mint: string; symbol: string; error: string }>;
@@ -800,8 +843,10 @@ export class Desk {
   }> {
     const sold: Array<{ mint: string; symbol: string; proceedsUsd?: number; pnlUsd?: number }> = [];
     const failed: Array<{ mint: string; symbol: string; error: string }> = [];
-    for (const pos of [...this.book.positions.values()]) {
-      const result = await this.closePosition(pos.mint, 1);
+    const kind: BookKind = bookArg === "live" ? "live" : "paper";
+    const book = kind === "live" ? this.liveBook : this.book;
+    for (const pos of [...(book?.positions.values() ?? [])]) {
+      const result = await this.closePosition(pos.mint, 1, kind);
       if (result.ok) sold.push({ mint: pos.mint, symbol: pos.symbol, proceedsUsd: result.proceedsUsd, pnlUsd: result.pnlUsd });
       else failed.push({ mint: pos.mint, symbol: pos.symbol, error: result.error });
     }
@@ -810,7 +855,7 @@ export class Desk {
       stage: "system",
       kind: "info",
       code: "MANUAL_CLOSE",
-      message: `Sell all: closed ${sold.length} position${sold.length === 1 ? "" : "s"}${failed.length ? `, ${failed.length} could not close` : ""}. Realized ${signed(pnlUsd)}.`
+      message: `Sell all${kind === "live" ? " (live)" : ""}: closed ${sold.length} position${sold.length === 1 ? "" : "s"}${failed.length ? `, ${failed.length} could not close` : ""}. Realized ${signed(pnlUsd)}.`
     });
     return { ok: true, sold, failed, pnlUsd };
   }
@@ -821,7 +866,6 @@ export class Desk {
     mark: number,
     split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number }
   ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string } {
-    if (this.config.mode !== "paper") return { ok: false, error: "Partial sells are paper-only. Use a full close in live mode." };
     const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
     const quote = quotePaperSell(mark, split.sellQty, liquidity);
     const proceedsUsd = roundUsd(quote.proceedsUsd ?? 0);
@@ -959,9 +1003,9 @@ export class Desk {
    */
   async lookupTicker(query: string): Promise<CoinLookup | CoinLookupError> {
     // "Held" means open in the book the desk is trading now (paper, or live when LIVE).
-    const heldMints = new Set<string>(this.book.positions.keys());
+    const heldMints = new Set<string>([...this.book.positions.keys(), ...(this.liveBook?.positions.keys() ?? [])]);
     const tier0: LocalCoin[] = [];
-    for (const pos of this.book.positions.values()) {
+    for (const pos of [...(this.liveBook?.positions.values() ?? []), ...this.book.positions.values()]) {
       tier0.push({ mint: pos.mint, symbol: pos.symbol, name: pos.name, liquidityUsd: pos.liquidityUsd, held: true, origin: "position" });
     }
     const tier1: LocalCoin[] = [];
@@ -1019,7 +1063,9 @@ export class Desk {
   /** Positions saved in the other mode's book (live when paper, paper when live). Read-only. */
   private otherBookPositions(): Position[] {
     try {
-      const other = this.store.loadBook(this.config.mode === "live" ? "book" : "book:live");
+      // v13.7: an armed desk already holds both books in memory (tier 0).
+      if (this.liveBook) return [];
+      const other = this.store.loadBook("book:live");
       return Array.isArray(other?.positions) ? other!.positions : [];
     } catch {
       return [];
@@ -1093,7 +1139,7 @@ export class Desk {
       const first = this.lookups.keys().next().value;
       if (first) this.lookups.delete(first);
     }
-    const held = this.book.positions.has(mint);
+    const held = this.book.positions.has(mint) || this.liveBook?.positions.has(mint) === true;
     if (!held) {
       this.remember(token);
       this.book.mark(mint, token.priceUsd);
@@ -1241,10 +1287,17 @@ export class Desk {
   async manualBuy(
     mint: string,
     sizeUsd?: number,
-    opts?: { ignoreCooldown?: boolean; confirmHardKill?: boolean; confirmSize?: boolean }
+    opts?: { ignoreCooldown?: boolean; confirmHardKill?: boolean; confirmSize?: boolean; book?: BookKind }
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const cleaned = mint.trim();
     if (!cleaned) return { ok: false, error: "Mint is required.", code: "PRICE_UNAVAILABLE" };
+    // v13.7: on an armed desk Dirk's manual buys go live by default; the AI stays on paper.
+    const kind: BookKind = opts?.book === "paper" ? "paper" : opts?.book === "live" || this.liveBook ? "live" : "paper";
+    if (kind === "live" && !this.liveBook) {
+      const error = "Live trading is not armed on the desk. Buy refused (nothing was sent).";
+      this.log({ stage: "executor", kind: "reject", mint: cleaned, code: "LIVE_NOT_ARMED", message: `Manual buy refused. ${error}` });
+      return { ok: false, error, code: "LIVE_NOT_ARMED" };
+    }
     const looked = this.lookups.get(cleaned);
     if (looked && !this.sightings.has(cleaned)) this.remember(looked.token);
     const seen = this.sightings.get(cleaned);
@@ -1294,13 +1347,13 @@ export class Desk {
       message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)}.`
     });
     // Hard kills (mint authority not revoked, dev rug link) need the operator's "Buy anyway".
-    if (!this.book.positions.has(token.mint)) {
+    if (!this.bk(kind).positions.has(token.mint)) {
       const rug = await this.rugs.lookup(token.devWallet);
       const kills = evaluateFilter(token, rug, this.config.rules, { allowUnlockedLp: this.allowUnlockedLp }).checks.filter(
         (check) => !check.pass && HARD_KILL_CODES.has(check.code)
       );
       if (kills.length && opts?.confirmHardKill !== true) {
-        const message = `Hard kill on ${token.symbol}: ${kills.map((k) => k.message).join(" ")} Tap Buy anyway to paper-buy it regardless.`;
+        const message = `Hard kill on ${token.symbol}: ${kills.map((k) => k.message).join(" ")} Tap Buy anyway to ${kind === "live" ? "buy it with real money" : "paper-buy it"} regardless.`;
         this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "HARD_KILL", message: `Manual buy held. ${message}` });
         return { ok: false, error: message, code: "HARD_KILL" };
       }
@@ -1311,7 +1364,7 @@ export class Desk {
           mint: token.mint,
           symbol: token.symbol,
           code: "HARD_KILL",
-          message: `Operator chose Buy anyway on ${token.symbol} past ${kills.map((k) => k.code).join(", ")}. Paper only.`
+          message: `Operator chose Buy anyway on ${token.symbol} past ${kills.map((k) => k.code).join(", ")}. ${kind === "live" ? "Live buy." : "Paper only."}`
         });
       }
     }
@@ -1321,7 +1374,8 @@ export class Desk {
     const tag = looked ? positionTag(looked.platform) : undefined;
     return this.executeBuy(token, score, sizeUsd, "manual", opts?.ignoreCooldown === true, {
       confirmSize: opts?.confirmSize === true,
-      tag
+      tag,
+      book: kind
     });
   }
 
@@ -1361,13 +1415,13 @@ export class Desk {
           : "No wallet key on the Austin desk host. Paste the wallet's private key into WALLET_PRIVATE_KEY= in C:\\Users\\Austin\\ndesk2\\.env on that machine. Never into the phone or a chat.",
       rpcPresent ? "RPC is set on the desk host. The URL is not shown here." : "SOLANA_RPC_URL is missing on the desk host.",
       mode === "live"
-        ? "Live swaps are on. Austin restarted with LIVE_TRADING=true and a wallet key."
+        ? `Live swaps are on. Austin restarted with LIVE_TRADING=true and a wallet key. ${this.liveScopeLine()}`
         : "Still paper. Real money starts only after Austin sets LIVE_TRADING=true (with WALLET_PRIVATE_KEY filled) in .env, then restarts the desk.",
       operatorReady
         ? "Operator marked this checklist ready. That mark does not arm live trading and does not store a wallet."
         : "Operator has not marked this checklist ready."
     ];
-    return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, lines };
+    return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null, lines };
   }
 
   /** One advisory pass. Logs notes. Does not buy, sell, or change a rule. */
@@ -1404,6 +1458,8 @@ export class Desk {
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
     return {
+      liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null,
+      liveBook: this.liveBookView(),
       wallet: this.walletView(),
       mode: this.config.mode,
       liveRequested: this.config.liveRequested,
@@ -1631,10 +1687,18 @@ export class Desk {
     requestedUsd: number | undefined,
     source: "analyst" | "manual",
     ignoreCooldown = false,
-    extra: { confirmSize?: boolean; tag?: string } = {}
+    extra: { confirmSize?: boolean; tag?: string; book?: BookKind } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
-    const isLive = this.config.mode === "live";
+    // v13.7: AI entries go live only when Dirk turned on "AI buys live" (liveAutoBuy). Default: paper.
+    const kind: BookKind = extra.book ?? (source === "analyst" && this.liveBook && this.liveAutoBuy ? "live" : "paper");
+    if (kind === "live" && !this.liveBook) {
+      const error = "Live trading is not armed on the desk. Buy refused (nothing was sent).";
+      return { ok: false, error, code: "LIVE_NOT_ARMED" };
+    }
+    const book = this.bk(kind);
+    const key = bookKey(kind, token.mint);
+    const isLive = kind === "live";
     // A confirmed manual buy may use up to 100% of the book. Everything else uses the saved cap (≤ 50%).
     // v13.5 live: the wallet's USDC is the book and the live per-trade size is the limit.
     const capPct =
@@ -1642,7 +1706,7 @@ export class Desk {
         ? SIZING_BAND.manualMaxPct
         : Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     if (isLive) {
-      // v13.5: auto and one-tap buys alike use the live size. A larger request (e.g. the phone's
+      // v13.5: every live buy uses the live size. A larger request (e.g. the phone's
       // paper one-tap amount) is cut to it. Never the paper position size.
       requestedUsd = requestedUsd != null && requestedUsd > 0 ? Math.min(requestedUsd, this.liveTradeUsd) : this.liveTradeUsd;
       const ready = await this.liveBuyReady(requestedUsd);
@@ -1682,8 +1746,9 @@ export class Desk {
         return { ok: false, error: gate.reason.message, code: gate.reason.code };
       }
     }
-    const openCount = [...this.book.positions.values()].filter((pos) => !pos.closing).length + this.opening.size;
-    if (!this.book.positions.has(token.mint) && !this.opening.has(token.mint) && openCount >= this.maxOpenPositions) {
+    const openingHere = [...this.opening].filter((k) => k.startsWith(LIVE_KEY) === isLive).length;
+    const openCount = [...book.positions.values()].filter((pos) => !pos.closing).length + openingHere;
+    if (!book.positions.has(token.mint) && !this.opening.has(key) && openCount >= this.maxOpenPositions) {
       const reason = {
         code: "MAX_OPEN_POSITIONS" as const,
         message: `Already ${openCount} open. The desk allows ${this.maxOpenPositions}. Close one before another buy.`
@@ -1701,16 +1766,17 @@ export class Desk {
       return { ok: false, error: reason.message, code: reason.code };
     }
     const plan = planOrder({
-      equityUsd: this.book.equity(),
-      cashUsd: this.book.cashUsd,
+      equityUsd: book.equity(),
+      cashUsd: book.cashUsd,
       rules: this.config.rules,
       token,
-      hasPosition: this.book.positions.has(token.mint) || this.opening.has(token.mint),
-      cooldownUntil: this.cooldowns.get(token.mint) ?? null,
+      hasPosition: book.positions.has(token.mint) || this.opening.has(key),
+      cooldownUntil: this.cooldowns.get(key) ?? null,
       now: Date.now(),
       ignoreCooldown: source === "manual" && ignoreCooldown,
       ceilingPct: capPct,
-      exposureRoomUsd: this.exposureRoomUsd()
+      // Live: the per-trade size and the wallet's USDC are the limits; paper exposure caps do not apply.
+      exposureRoomUsd: isLive ? undefined : this.exposureRoomUsd()
     });
     if (!plan.ok) {
       this.pipeline.executorSkips += 1;
@@ -1774,9 +1840,9 @@ export class Desk {
       });
       return { ok: false, error: exitGate.message, code: "EXIT_IMPACT" };
     }
-    this.opening.add(token.mint);
+    this.opening.add(key);
     try {
-      if (this.config.mode === "live") {
+      if (isLive) {
         try {
           const { executeLiveSwap } = await import("../market/live-broker.js");
           const live = await executeLiveSwap({
@@ -1817,7 +1883,7 @@ export class Desk {
               ? sized.clampedFrom != null
                 ? `Manual live buy $${sized.sizeUsd.toFixed(2)} (requested $${sized.clampedFrom.toFixed(2)} cut to the $${plan.capUsd.toFixed(2)} cap).`
                 : `Manual live buy $${sized.sizeUsd.toFixed(2)} of the $${plan.capUsd.toFixed(2)} cap.`
-              : `Live auto-buy at the live size $${sized.sizeUsd.toFixed(2)}.`;
+              : `Live AI buy at the live size $${sized.sizeUsd.toFixed(2)}.`;
           this.applyBuy(
             {
               id: randomUUID(),
@@ -1840,7 +1906,8 @@ export class Desk {
             score,
             source,
             capPct,
-            extra.tag
+            extra.tag,
+            "live"
           );
           return this.bought(token, sized, "live");
         } catch (err) {
@@ -1903,7 +1970,7 @@ export class Desk {
       );
       return this.bought(token, sized, "paper");
     } finally {
-      this.opening.delete(token.mint);
+      this.opening.delete(key);
     }
   }
 
@@ -1913,12 +1980,14 @@ export class Desk {
     score: number,
     entry: "manual" | "analyst",
     capPct: number = this.config.rules.maxPositionPct,
-    tag?: string
+    tag?: string,
+    kind: BookKind = "paper"
   ): void {
-    if (!(capPct > 0) || fill.notionalUsd > this.book.equity() * Math.min(capPct, SIZING_BAND.manualMaxPct) + 0.02) {
+    const book = this.bk(kind);
+    if (!(capPct > 0) || fill.notionalUsd > book.equity() * Math.min(capPct, SIZING_BAND.manualMaxPct) + 0.02) {
       throw new Error(`Position cap breached on ${token.symbol}`);
     }
-    this.book.cashUsd = roundUsd(this.book.cashUsd - fill.notionalUsd);
+    book.cashUsd = roundUsd(book.cashUsd - fill.notionalUsd);
     const position: Position = {
       mint: token.mint,
       symbol: token.symbol,
@@ -1942,7 +2011,7 @@ export class Desk {
       ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {}),
       ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {})
     };
-    this.book.positions.set(token.mint, position);
+    book.positions.set(token.mint, position);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
       sample.nearMiss = true;
@@ -1954,7 +2023,7 @@ export class Desk {
     this.advisor.save();
     // Record the spot. Review waits for the next tick so a fill that is already through
     // the hard stop is closed by that tick, not erased inside the buy itself.
-    this.book.mark(token.mint, fill.markUsd);
+    book.mark(token.mint, fill.markUsd);
     this.pipeline.fills += 1;
     this.store.openTrade({
       id: fill.id,
@@ -1983,10 +2052,11 @@ export class Desk {
   }
 
   private async sell(order: ExitOrder): Promise<void> {
-    const pos = this.book.positions.get(order.mint);
+    const kind: BookKind = order.book === "live" ? "live" : "paper";
+    const pos = kind === "live" ? this.liveBook?.positions.get(order.mint) : this.book.positions.get(order.mint);
     if (!pos) return;
     try {
-      if (this.config.mode === "live") {
+      if (kind === "live") {
         const { executeLiveSwap } = await import("../market/live-broker.js");
         const live = await executeLiveSwap({
           side: "sell",
@@ -2061,15 +2131,16 @@ export class Desk {
   }
 
   private applySell(pos: Position, fill: Fill, order: ExitOrder, proceeds?: number): void {
-    if (!this.book.positions.has(pos.mint)) return;
+    const book = this.bk(order.book === "live" ? "live" : "paper");
+    if (!book.positions.has(pos.mint)) return;
     const rawProceeds = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     const proceedsUsd = typeof rawProceeds === "number" && Number.isFinite(rawProceeds) && rawProceeds > 0 ? roundUsd(rawProceeds) : 0;
     const fillPrice = typeof fill.priceUsd === "number" && Number.isFinite(fill.priceUsd) && fill.priceUsd > 0 ? fill.priceUsd : 0;
     assertNonNegativeFinite("proceedsUsd", proceedsUsd);
     assertNonNegativeFinite("fillPrice", fillPrice);
     const booked: Fill = { ...fill, priceUsd: fillPrice };
-    this.book.cashUsd = roundUsd(this.book.cashUsd + proceedsUsd);
-    this.book.positions.delete(pos.mint);
+    book.cashUsd = roundUsd(book.cashUsd + proceedsUsd);
+    book.positions.delete(pos.mint);
     const pnlUsd = roundUsd(proceedsUsd - pos.costUsd);
     const pnlPct = pos.costUsd > 0 ? pnlUsd / pos.costUsd : order.pnlPct;
     const label = classifyStopExit({
@@ -2148,8 +2219,8 @@ export class Desk {
     this.markEquity(true);
   }
 
-  private review(mint: string, mark: number): void {
-    const pos = this.book.positions.get(mint);
+  private review(mint: string, mark: number, kind: BookKind = "paper"): void {
+    const pos = kind === "live" ? this.liveBook?.positions.get(mint) : this.book.positions.get(mint);
     if (!pos || pos.closing) return;
     const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit, liveTrailPct: this.liveTrailFor(pos) });
     const peakRose = view.peakPrice > pos.peakPrice || (view.markPeak != null && view.markPeak > (pos.markPeak ?? 0));
@@ -2163,7 +2234,7 @@ export class Desk {
     }
     pos.closing = true;
     if (view.code === "STOP_LOSS") {
-      this.cooldowns.set(mint, Date.now() + this.config.rules.revengeCooldownMs);
+      this.cooldowns.set(bookKey(kind, mint), Date.now() + this.config.rules.revengeCooldownMs);
       this.persist();
     }
     const order: ExitOrder = {
@@ -2174,7 +2245,8 @@ export class Desk {
       liquidityUsd: pos.liquidityUsd,
       pnlPct: view.pnlPct,
       score: pos.score,
-      reason: { code: view.code, message: view.message }
+      reason: { code: view.code, message: view.message },
+      ...(kind === "live" ? { book: "live" as const } : {})
     };
     this.bus.emit("risk.exit", order);
   }
@@ -2192,14 +2264,16 @@ export class Desk {
     });
   }
 
-  private view(pos: Position): PositionView {
-    const shown = this.displayMark(pos);
+  private view(pos: Position, kind: BookKind = "paper"): PositionView {
+    const book = this.bk(kind);
+    const shown = this.displayMark(pos, kind);
     const markPrice = shown.price;
     const marketValueUsd = pos.qty * markPrice;
     const pnlUsd = marketValueUsd - pos.costUsd;
     // The stop and peak shown are the risk book's, never moved by a display-only mark.
-    const assessment = assessPosition(pos, this.book.price(pos.mint, pos.entryPrice), this.config.rules, { liveTrailPct: this.liveTrailFor(pos) });
+    const assessment = assessPosition(pos, book.price(pos.mint, pos.entryPrice), this.config.rules, { liveTrailPct: this.liveTrailFor(pos) });
     return {
+      ...(kind === "live" ? { book: "live" as const } : {}),
       mint: pos.mint,
       symbol: pos.symbol,
       name: pos.name,
@@ -2221,7 +2295,7 @@ export class Desk {
       markAgeMs: Math.max(0, Date.now() - shown.at),
       markAt: shown.at,
       markFeed: shown.feed,
-      riskMarkAgeMs: Math.max(0, Date.now() - (this.book.markedAt(pos.mint) ?? pos.openedAt)),
+      riskMarkAgeMs: Math.max(0, Date.now() - (book.markedAt(pos.mint) ?? pos.openedAt)),
       openedAt: pos.openedAt,
       ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {})
     };
@@ -2291,10 +2365,18 @@ export class Desk {
     return false;
   }
 
+  /** v13.7 one feed print marks the paper book and, when held there, the live book. */
   private applyMark(mint: string, priceUsd: number, origin?: MarkOrigin, advise = true): void {
-    const pos = this.book.positions.get(mint);
+    this.applyMarkIn("paper", mint, priceUsd, origin, advise);
+    if (this.liveBook?.positions.has(mint)) this.applyMarkIn("live", mint, priceUsd, origin, false);
+  }
+
+  private applyMarkIn(kind: BookKind, mint: string, priceUsd: number, origin?: MarkOrigin, advise = true): void {
+    const book = this.bk(kind);
+    const key = bookKey(kind, mint);
+    const pos = book.positions.get(mint);
     if (markUnusable(priceUsd)) {
-      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", mint)) {
+      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", key)) {
         this.log({
           stage: "risk",
           kind: "reject",
@@ -2309,17 +2391,17 @@ export class Desk {
     let reanchored = false;
     if (pos && !sameMarkSource(pos, origin)) {
       const now = Date.now();
-      const lastGoodAt = this.book.markedAt(mint) ?? pos.openedAt;
+      const lastGoodAt = book.markedAt(mint) ?? pos.openedAt;
       if (!pos.closing && origin && now - lastGoodAt >= REANCHOR_SILENT_MS) {
-        const step = reanchorCandidate(this.reanchors.get(mint), origin, priceUsd, this.book.price(mint, pos.entryPrice), now);
+        const step = reanchorCandidate(this.reanchors.get(key), origin, priceUsd, book.price(mint, pos.entryPrice), now);
         if (step.verdict === "adopt") {
           const was = `${pos.priceFeed ?? pos.source}${pos.pairAddress ? ` pair ${pos.pairAddress.slice(0, 4)}` : ""}`;
           pos.priceFeed = origin.feed as Position["priceFeed"];
           if (origin.pairAddress) pos.pairAddress = origin.pairAddress;
           else delete pos.pairAddress;
           if (origin.dex) pos.dex = origin.dex;
-          this.reanchors.delete(mint);
-          this.shocks.delete(mint);
+          this.reanchors.delete(key);
+          this.shocks.delete(key);
           reanchored = true;
           this.persist();
           this.log({
@@ -2331,11 +2413,11 @@ export class Desk {
             message: `Risk moved ${pos.symbol} to ${originLabel(origin)}. ${was} had no price for ${Math.round((now - lastGoodAt) / 1000)}s and the new feed printed twice in agreement (${price(priceUsd)}). The stop now uses it.`
           });
         } else if (step.verdict === "wait" && step.next) {
-          this.reanchors.set(mint, step.next);
+          this.reanchors.set(key, step.next);
         }
       }
       if (!reanchored) {
-        if (!this.quiet("PRICE_SOURCE", mint)) {
+        if (!this.quiet("PRICE_SOURCE", key)) {
           this.log({
             stage: "risk",
             kind: "reject",
@@ -2348,18 +2430,18 @@ export class Desk {
         return;
       }
     } else if (pos) {
-      this.reanchors.delete(mint);
+      this.reanchors.delete(key);
     }
     const shock = !!pos && !pos.closing && needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now());
     // Operator and replay marks carry no feed and are trusted as before; feed prints must repeat a >30% jump.
-    const jump = !!pos && !pos.closing && !reanchored && !!origin?.feed && isJump(this.book.lastPrice.get(mint), priceUsd);
+    const jump = !!pos && !pos.closing && !reanchored && !!origin?.feed && isJump(book.lastPrice.get(mint), priceUsd);
     if (pos && (shock || jump)) {
       const feed = origin?.feed ?? pos.priceFeed ?? "mark";
-      const pending = this.shocks.get(mint);
+      const pending = this.shocks.get(key);
       const agrees = pending?.price == null || Math.abs(priceUsd / pending.price - 1) <= SHOCK_MOVE;
       if (!pending || pending.feed !== feed || !agrees) {
-        this.shocks.set(mint, { feed, price: priceUsd });
-        const base = shock ? pos.entryPrice : this.book.price(mint, pos.entryPrice);
+        this.shocks.set(key, { feed, price: priceUsd });
+        const base = shock ? pos.entryPrice : book.price(mint, pos.entryPrice);
         const move = ((priceUsd - base) / base) * 100;
         this.log({
           stage: "risk",
@@ -2373,19 +2455,19 @@ export class Desk {
         });
         return;
       }
-      this.shocks.delete(mint);
+      this.shocks.delete(key);
     } else if (pos) {
-      this.shocks.delete(mint);
+      this.shocks.delete(key);
     }
-    const seen = this.sightings.get(mint);
+    const seen = kind === "paper" ? this.sightings.get(mint) : undefined;
     if (seen) this.sightings.set(mint, { ...seen, priceUsd });
     if (origin?.liquidityUsd && origin.liquidityUsd > 0 && pos) this.markLiquidity.set(mint, origin.liquidityUsd);
-    this.book.mark(mint, priceUsd);
+    if (kind === "paper" || pos) book.mark(mint, priceUsd);
     if (pos) {
-      this.riskFeed.set(mint, origin?.feed ?? pos.priceFeed ?? pos.source);
+      this.riskFeed.set(key, origin?.feed ?? pos.priceFeed ?? pos.source);
       this.bus.emit("position.mark", { mint, at: Date.now() });
     }
-    this.review(mint, priceUsd);
+    this.review(mint, priceUsd, kind);
     if (advise) this.publishAdvice(this.buildAdvice());
   }
 
@@ -2395,55 +2477,104 @@ export class Desk {
    * or runs 3% away from the risk mark, the entry feed is asked right away.
    */
   private liveMark(mint: string, priceUsd: number, origin: LiveOrigin): void {
-    const pos = this.book.positions.get(mint);
+    this.liveMarkIn("paper", mint, priceUsd, origin);
+    if (this.liveBook?.positions.has(mint)) this.liveMarkIn("live", mint, priceUsd, origin);
+  }
+
+  private liveMarkIn(kind: BookKind, mint: string, priceUsd: number, origin: LiveOrigin): void {
+    const book = this.bk(kind);
+    const key = bookKey(kind, mint);
+    const pos = book.positions.get(mint);
     if (!pos || pos.closing || markUnusable(priceUsd)) return;
     const now = Date.now();
-    const prev = this.liveMarks.get(mint);
-    const last = prev?.price ?? this.book.lastPrice.get(mint);
+    const prev = this.liveMarks.get(key);
+    const last = prev?.price ?? book.lastPrice.get(mint);
     if (isJump(last, priceUsd)) {
-      const pending = this.livePending.get(mint);
+      const pending = this.livePending.get(key);
       if (!pending || Math.abs(priceUsd / pending.price - 1) > 0.1) {
-        this.livePending.set(mint, { price: priceUsd, at: now });
+        this.livePending.set(key, { price: priceUsd, at: now });
         return;
       }
     }
-    this.livePending.delete(mint);
-    this.liveMarks.set(mint, { price: priceUsd, at: origin.at || now, feed: origin.feed });
+    this.livePending.delete(key);
+    this.liveMarks.set(key, { price: priceUsd, at: origin.at || now, feed: origin.feed });
     if (pos.priceFeed === "chain" && pos.pairAddress && origin.pairAddress === pos.pairAddress) {
       // v13.6: the entry itself was priced from this curve/pool, so it is the stop source.
-      this.applyMark(mint, priceUsd, { feed: "chain", pairAddress: origin.pairAddress, dex: origin.kind });
+      this.applyMarkIn(kind, mint, priceUsd, { feed: "chain", pairAddress: origin.pairAddress, dex: origin.kind });
       return;
     }
-    const risk = this.book.price(mint, pos.entryPrice);
+    const risk = book.price(mint, pos.entryPrice);
     const seen = assessPosition(pos, risk, this.config.rules, { liveTrailPct: this.liveTrailFor(pos) });
     const stop = pos.live && seen.trailHintPrice != null ? Math.max(seen.stopPrice, seen.trailHintPrice) : seen.stopPrice;
     const drift = risk > 0 ? Math.abs(priceUsd / risk - 1) : 1;
-    const lastAsk = this.lastConfirmAt.get(mint) ?? 0;
+    const lastAsk = this.lastConfirmAt.get(key) ?? 0;
     if ((priceUsd <= stop && now - lastAsk >= 1_500) || (drift > 0.03 && now - lastAsk >= 5_000)) {
-      this.lastConfirmAt.set(mint, now);
+      this.lastConfirmAt.set(key, now);
       this.pricer.confirm(mint);
     }
     this.bus.emit("position.mark", { mint, at: now });
   }
 
   /** v13.2 what the card shows: a fresh live mark, else the latest of risk and live. */
-  private displayMark(pos: Position): { price: number; at: number; feed: string } {
-    const riskAt = this.book.markedAt(pos.mint) ?? pos.openedAt;
-    const risk = { price: this.book.price(pos.mint, pos.entryPrice), at: riskAt, feed: this.riskFeed.get(pos.mint) ?? pos.priceFeed ?? pos.source };
-    const live = this.liveMarks.get(pos.mint);
+  private displayMark(pos: Position, kind: BookKind = "paper"): { price: number; at: number; feed: string } {
+    const book = this.bk(kind);
+    const key = bookKey(kind, pos.mint);
+    const riskAt = book.markedAt(pos.mint) ?? pos.openedAt;
+    const risk = { price: book.price(pos.mint, pos.entryPrice), at: riskAt, feed: this.riskFeed.get(key) ?? pos.priceFeed ?? pos.source };
+    const live = this.liveMarks.get(key);
     if (!live) return risk;
     const now = Date.now();
     if (now - live.at <= LIVE_FRESH_MS || live.at >= riskAt) return live;
     return risk;
   }
 
+  /** v13.7 the live book's card: wallet USDC as cash, real positions only. Null when not armed. */
+  private liveBookView(): LiveBookView | null {
+    if (!this.liveBook) return null;
+    const positions = [...this.liveBook.positions.values()].map((pos) => this.view(pos, "live"));
+    const equityUsd = this.displayEquity("live");
+    const startingUsd = this.liveStartingUsd;
+    return {
+      scope: this.liveAutoBuy ? "all" : "manual",
+      line: this.liveScopeLine(),
+      cashUsd: roundUsd(this.liveBook.cashUsd),
+      equityUsd: roundUsd(equityUsd),
+      startingUsd: roundUsd(startingUsd),
+      pnlUsd: startingUsd > 0 ? roundUsd(equityUsd - startingUsd) : 0,
+      openPnlUsd: roundUsd(positions.reduce((sum, p) => sum + p.pnlUsd, 0)),
+      positions,
+      tradeUsd: this.liveTradeUsd,
+      trailPct: this.liveTrailPct,
+      dailyCapUsd: this.liveDailyCapUsd
+    };
+  }
+
   /** v13.2 small WS payload: only what a position card needs. */
   marksDelta(): MarksDelta {
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
+    const livePositions = this.liveBook ? [...this.liveBook.positions.values()].map((pos) => this.view(pos, "live")) : [];
+    const slim = (p: PositionView) => ({
+      ...(p.book ? { book: p.book } : {}),
+      mint: p.mint,
+      markPrice: p.markPrice,
+      marketValueUsd: p.marketValueUsd,
+      pnlUsd: p.pnlUsd,
+      pnlPct: p.pnlPct,
+      stopPrice: p.stopPrice,
+      peakPrice: p.peakPrice,
+      trailArmed: p.trailArmed,
+      trailHintPrice: p.trailHintPrice,
+      markAgeMs: p.markAgeMs ?? 0,
+      markAt: p.markAt ?? 0,
+      markFeed: p.markFeed ?? ""
+    });
     return {
       now: Date.now(),
       cashUsd: roundUsd(this.book.cashUsd),
       equityUsd: roundUsd(this.displayEquity()),
+      ...(this.liveBook
+        ? { live: { cashUsd: roundUsd(this.liveBook.cashUsd), equityUsd: roundUsd(this.displayEquity("live")), positions: livePositions.map(slim) } }
+        : {}),
       positions: positions.map((p) => ({
         mint: p.mint,
         markPrice: p.markPrice,
@@ -2461,9 +2592,10 @@ export class Desk {
     };
   }
 
-  private displayEquity(): number {
-    let total = this.book.cashUsd;
-    for (const pos of this.book.positions.values()) total += pos.qty * this.displayMark(pos).price;
+  private displayEquity(kind: BookKind = "paper"): number {
+    const book = this.bk(kind);
+    let total = book.cashUsd;
+    for (const pos of book.positions.values()) total += pos.qty * this.displayMark(pos, kind).price;
     return total;
   }
 
@@ -2588,7 +2720,7 @@ export class Desk {
       sizeUsd: sized.sizeUsd,
       mode,
       ...(sized.clampedFrom != null ? { clampedFrom: sized.clampedFrom } : {}),
-      ...(this.book.positions.get(token.mint)?.entryPrice ? { fillPriceUsd: this.book.positions.get(token.mint)!.entryPrice } : {})
+      ...(this.bk(mode).positions.get(token.mint)?.entryPrice ? { fillPriceUsd: this.bk(mode).positions.get(token.mint)!.entryPrice } : {})
     };
   }
 
@@ -2634,7 +2766,8 @@ export class Desk {
       paperResetUsd: this.paperResetUsd,
       liveTradeUsd: this.liveTradeUsd,
       liveDailyCapUsd: this.liveDailyCapUsd,
-      liveTrailPct: this.liveTrailPct
+      liveTrailPct: this.liveTrailPct,
+      liveAutoBuy: this.liveAutoBuy
     };
   }
 
@@ -2754,7 +2887,8 @@ export class Desk {
       "scoutLaunchLab",
       "notifyNearMiss",
       "notifyFills",
-      "notifyStops"
+      "notifyStops",
+      "liveAutoBuy"
     ];
     for (const key of flags) {
       if (!(key in patch)) continue;
@@ -2782,6 +2916,7 @@ export class Desk {
     if (typeof saved.trailGapPct === "number") this.config.rules.trailGapPct = clampTrailGapPct(saved.trailGapPct);
     if (typeof saved.trailTakeProfit === "boolean") this.trailTakeProfit = saved.trailTakeProfit;
     if (typeof saved.autoBuy === "boolean") this.autoBuy = saved.autoBuy;
+    if (typeof saved.liveAutoBuy === "boolean") this.liveAutoBuy = saved.liveAutoBuy;
     this.scoutSources = {
       dexscreener: saved.scoutDexscreener !== false,
       gecko: saved.scoutGecko !== false,
@@ -2860,22 +2995,54 @@ export class Desk {
       maxExitSlippage: view.maxExitSlippage,
       liveTradeUsd: view.liveTradeUsd,
       liveDailyCapUsd: view.liveDailyCapUsd,
-      liveTrailPct: view.liveTrailPct
+      liveTrailPct: view.liveTrailPct,
+      liveAutoBuy: view.liveAutoBuy
     };
   }
 
   private persist(): void {
+    const cooldowns = [...this.cooldowns.entries()];
     this.store.saveBook(
       {
-      cashUsd: this.book.cashUsd,
-      startingBalanceUsd: this.config.startingBalanceUsd,
-      startedAt: this.startedAt,
-      positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
-      cooldowns: [...this.cooldowns.entries()],
-      lastPrices: [...this.book.lastPrice.entries()]
+        cashUsd: this.book.cashUsd,
+        startingBalanceUsd: this.config.startingBalanceUsd,
+        startedAt: this.startedAt,
+        positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
+        cooldowns: cooldowns.filter(([key]) => !key.startsWith(LIVE_KEY)),
+        lastPrices: [...this.book.lastPrice.entries()]
       },
-      this.config.mode === "live" ? "book:live" : "book"
+      "book"
     );
+    if (this.liveBook) {
+      this.store.saveBook(
+        {
+          cashUsd: this.liveBook.cashUsd,
+          startingBalanceUsd: this.liveStartingUsd,
+          startedAt: this.liveStartedAt,
+          positions: [...this.liveBook.positions.values()].map((pos) => ({ ...pos, closing: false })),
+          cooldowns: cooldowns.filter(([key]) => key.startsWith(LIVE_KEY)).map(([key, until]) => [key.slice(LIVE_KEY.length), until] as [string, number]),
+          lastPrices: [...this.liveBook.lastPrice.entries()]
+        },
+        "book:live"
+      );
+    }
+  }
+
+  /** v13.7 the book a kind names. "live" is only asked for when the live book exists. */
+  private bk(kind: BookKind): PaperBook {
+    if (kind === "live") {
+      if (!this.liveBook) throw new Error("Live book is not open (desk is not armed).");
+      return this.liveBook;
+    }
+    return this.book;
+  }
+
+  /** v13.7 plain words for the live scope, shown on the wallet card, readiness and the log. */
+  private liveScopeLine(): string {
+    if (!this.liveBook) return "Live trading is off. Everything is paper.";
+    return this.liveAutoBuy
+      ? "Live: manual + AI. Your buys and the AI's auto-buys send real swaps."
+      : "Live: manual only · AI: paper. Your one-tap and Add coin buys send real swaps; the AI keeps buying on the paper book.";
   }
 
   /** v13.5 the live trail applies to live positions only. */
@@ -2887,10 +3054,12 @@ export class Desk {
   async refreshWallet(): Promise<WalletBalances | null> {
     const read = await this.walletReader();
     this.walletBalances = read;
-    if (this.config.mode === "live" && read.error == null && read.usdc != null) {
-      this.book.cashUsd = roundUsd(read.usdc);
-      if (!(this.config.startingBalanceUsd > 0)) {
-        this.config.startingBalanceUsd = roundUsd(read.usdc + this.exposureUsd());
+    if (this.liveBook && read.error == null && read.usdc != null) {
+      this.liveBook.cashUsd = roundUsd(read.usdc);
+      if (!(this.liveStartingUsd > 0)) {
+        let held = 0;
+        for (const pos of this.liveBook.positions.values()) held += pos.qty * this.liveBook.price(pos.mint, pos.entryPrice);
+        this.liveStartingUsd = roundUsd(read.usdc + held);
       }
       this.persist();
     }
@@ -2956,6 +3125,9 @@ export class Desk {
       balanceAt: bal?.at ?? null,
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",
+      liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null,
+      liveScopeLine: this.liveScopeLine(),
+      liveAutoBuy: this.liveAutoBuy,
       liveRequested: this.config.liveRequested,
       rpcPublic: isPublicRpc(this.config.walletRpcUrl),
       liveTradeUsd: this.liveTradeUsd,

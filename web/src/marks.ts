@@ -49,11 +49,10 @@ export function liveAgeMs(pos: PositionView, nowMs: number): number {
 
 /** Stamps each position with the local time its mark was taken. */
 export function stampSnapshot(snap: DeskSnapshot, receivedAt: number): DeskSnapshot {
-  if (!snap.positions?.length) return snap;
-  return {
-    ...snap,
-    positions: snap.positions.map((pos) => ({ ...pos, markLocalAt: receivedAt - Math.max(0, pos.markAgeMs ?? 0) }))
-  };
+  const stamp = (rows: PositionView[]) => rows.map((pos) => ({ ...pos, markLocalAt: receivedAt - Math.max(0, pos.markAgeMs ?? 0) }));
+  const live = snap.liveBook?.positions?.length ? { ...snap.liveBook, positions: stamp(snap.liveBook.positions) } : snap.liveBook;
+  if (!snap.positions?.length && live === snap.liveBook) return snap;
+  return { ...snap, positions: stamp(snap.positions ?? []), liveBook: live };
 }
 
 const usable = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
@@ -64,9 +63,34 @@ const usable = (n: unknown): n is number => typeof n === "number" && Number.isFi
  */
 export function mergeMarks(snap: DeskSnapshot | null, delta: MarksDelta, receivedAt: number): DeskSnapshot | null {
   if (!snap || !delta || !Array.isArray(delta.positions)) return snap;
-  const byMint = new Map(delta.positions.filter((row) => usable(row.markPrice) && row.markPrice > 0).map((row) => [row.mint, row]));
+  const paper = mergeRows(snap.positions, delta.positions, receivedAt);
+  // v13.7: the live book's cards ride in delta.live on an armed desk.
+  const liveRows = delta.live && Array.isArray(delta.live.positions) ? delta.live.positions : null;
+  const live = snap.liveBook && liveRows ? mergeRows(snap.liveBook.positions, liveRows, receivedAt) : null;
+  if (!paper.touched && !live?.touched) return snap;
+  return {
+    ...snap,
+    positions: paper.positions,
+    cashUsd: paper.touched && usable(delta.cashUsd) ? delta.cashUsd : snap.cashUsd,
+    equityUsd: paper.touched && usable(delta.equityUsd) ? delta.equityUsd : snap.equityUsd,
+    ...(snap.liveBook && live?.touched
+      ? {
+          liveBook: {
+            ...snap.liveBook,
+            positions: live.positions,
+            cashUsd: usable(delta.live?.cashUsd) ? delta.live!.cashUsd : snap.liveBook.cashUsd,
+            equityUsd: usable(delta.live?.equityUsd) ? delta.live!.equityUsd : snap.liveBook.equityUsd,
+            openPnlUsd: live.positions.reduce((sum, p) => sum + p.pnlUsd, 0)
+          }
+        }
+      : {})
+  };
+}
+
+function mergeRows(rows: PositionView[], delta: MarksDelta["positions"], receivedAt: number): { positions: PositionView[]; touched: boolean } {
+  const byMint = new Map(delta.filter((row) => usable(row.markPrice) && row.markPrice > 0).map((row) => [row.mint, row]));
   let touched = false;
-  const positions = snap.positions.map((pos) => {
+  const positions = rows.map((pos) => {
     const row = byMint.get(pos.mint);
     if (!row) return pos;
     touched = true;
@@ -86,11 +110,5 @@ export function mergeMarks(snap: DeskSnapshot | null, delta: MarksDelta, receive
       markLocalAt: receivedAt - Math.max(0, usable(row.markAgeMs) ? row.markAgeMs : 0)
     };
   });
-  if (!touched) return snap;
-  return {
-    ...snap,
-    positions,
-    cashUsd: usable(delta.cashUsd) ? delta.cashUsd : snap.cashUsd,
-    equityUsd: usable(delta.equityUsd) ? delta.equityUsd : snap.equityUsd
-  };
+  return { positions, touched };
 }

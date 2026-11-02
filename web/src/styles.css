@@ -682,3 +682,22 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 /* v13.6 Add coin errors are full sentences (what was tried): wrap them. */
 .add-card .banner { white-space: normal; border-radius: 14px; align-items: flex-start; line-height: 1.4; }
 .add-card .banner::before { margin-top: 4px; }
+
+/* v13.7 armed desk: the live book sits above the AI's paper book. */
+.live-book {
+  border: 1px solid var(--down);
+  border-radius: 16px;
+  padding: 10px 12px 4px;
+  margin-bottom: 14px;
+}
+.live-book .section-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.live-book .live-scope {
+  margin: 0 0 8px;
+}
+.pos-card.live-pos {
+  box-shadow: inset 3px 0 0 var(--down);
+}

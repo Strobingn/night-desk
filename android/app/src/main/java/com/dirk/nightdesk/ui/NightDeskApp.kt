@@ -309,7 +309,13 @@ fun NightDeskApp(desk: DeskRepository) {
             onTapUsd = { desk.setTapUsd(it) },
             onSlip = { pct -> scope.launch { desk.saveSettings(mapOf("maxEntrySlippage" to pct)) } },
             live = s.mode == "live",
-            liveTrailPct = s.liveTrailPct
+            liveTrailPct = s.liveTrailPct,
+            split = s.liveBook != null,
+            aiLive = s.liveBook?.manualOnly == false,
+            onSellLive = { mint, symbol ->
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                scope.launch { desk.oneTapSell(mint, symbol, live = true) }
+            }
         )
     }
 
@@ -367,7 +373,7 @@ fun NightDeskApp(desk: DeskRepository) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
-            if (tab != 1) Header(status = status, live = live, mode = snap?.mode ?: "paper")
+            if (tab != 1) Header(status = status, live = live, mode = snap?.mode ?: "paper", liveScope = snap?.liveScope)
             snap?.feedBanner?.let { banner ->
                 StatusPill(text = "Feed: $banner", tint = Amber)
             }
@@ -401,6 +407,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 0 -> BookScreen(
                     snap,
                     onClose = { mint -> scope.launch { desk.closePosition(mint) } },
+                    onCloseLive = { mint -> scope.launch { desk.closePosition(mint, live = true) } },
                     onSell = { mint, percent -> scope.launch { desk.sellPosition(mint, percent) } },
                     onReset = { scope.launch { desk.resetPaperBook() } },
                     onReady = { ready -> scope.launch { desk.setOperatorReady(ready) } },
@@ -455,7 +462,7 @@ fun NightDeskApp(desk: DeskRepository) {
 }
 
 @Composable
-private fun Header(status: String, live: Boolean, mode: String, compact: Boolean = false, subline: (@Composable () -> Unit)? = null) {
+private fun Header(status: String, live: Boolean, mode: String, compact: Boolean = false, liveScope: String? = null, subline: (@Composable () -> Unit)? = null) {
     val context = LocalContext.current
     // v13.4: the Tape tab uses a slimmer header so the coin list gets the room.
     val box = if (compact) 34.dp else 40.dp
@@ -500,7 +507,12 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
         Spacer(Modifier.width(8.dp))
         val isLive = mode == "live"
         Text(
-            if (isLive) "LIVE · REAL $" else mode.uppercase(),
+            when {
+                isLive && liveScope == "manual" -> "LIVE YOU · AI PAPER"
+                isLive && liveScope == "all" -> "LIVE · AI + YOU"
+                isLive -> "LIVE · REAL $"
+                else -> mode.uppercase()
+            },
             color = if (isLive) P.onDown else P.onAccent,
             fontWeight = FontWeight.ExtraBold,
             fontSize = 12.sp,
@@ -520,9 +532,12 @@ private fun BookScreen(
     onBuy: (String, Boolean) -> Unit,
     oneTap: OneTapUi? = null,
     /** v13.6 tapping a held coin opens its Add coin card. */
-    onOpenCoin: (String) -> Unit = {}
+    onOpenCoin: (String) -> Unit = {},
+    /** v13.7 close a live-book position (real sell). */
+    onCloseLive: (String) -> Unit = {}
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
+    val liveBook = snap?.liveBook
     LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { LastCrashCard() }
         if (!snap?.lastClientCrash.isNullOrBlank()) {
@@ -534,9 +549,34 @@ private fun BookScreen(
             }
         }
         item { HeroCard(snap, openPnl) }
+        if (liveBook != null) {
+            item {
+                SectionTitle(
+                    "LIVE positions · real $",
+                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · USDC ${money(liveBook.cashUsd)} · equity ${money(liveBook.equityUsd)}",
+                    P.down
+                )
+            }
+            item {
+                Text(
+                    (if (liveBook.manualOnly) "Live: manual only · AI: paper. " else "Live: manual + AI. ") +
+                        "${money(liveBook.tradeUsd)} per trade · trail ${"%.1f".format(Locale.US, liveBook.trailPct * 100)}% · hard stop −${"%.0f".format(Locale.US, snap.stopLossPct * 100)}% · " +
+                        (liveBook.dailyCapUsd?.let { "daily cap ${money(it)}" } ?: "no daily max") + ".",
+                    color = P.ink,
+                    fontSize = 13.sp
+                )
+            }
+            if (liveBook.positions.isEmpty()) {
+                item { Text("No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real ${money(liveBook.tradeUsd)} buy.", color = Dim, fontSize = 14.sp) }
+            } else {
+                itemsIndexed(liveBook.positions, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
+                    OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin)
+                }
+            }
+        }
         item {
             SectionTitle(
-                "Open positions",
+                if (liveBook != null) "Paper positions · AI" else "Open positions",
                 "${signed(openPnl)} · ${snap?.positions?.size ?: 0} open · exposure ${money(snap?.exposureUsd ?: 0.0)}",
                 if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
             )
@@ -559,7 +599,7 @@ private fun BookScreen(
         item { WalletCard(snap) }
         item { LiveReadyCard(snap?.readiness, onReady) }
         item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
-        if (snap?.mode != "live") {
+        if (snap?.mode != "live" || liveBook != null) {
             item { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
         }
         item { SectionTitle("Recent trades", "${snap?.closed?.size ?: 0}") }
@@ -601,8 +641,8 @@ private fun HeroCard(snap: DeskSnapshot?, openPnl: Double) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Marked equity", color = P.dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            val live = snap?.mode == "live"
-            Chip(if (live) "LIVE" else "PAPER", if (live) P.onDown else P.onAccent, if (live) P.down else P.accent, size = 11)
+            val live = snap?.mode == "live" && snap.liveBook == null
+            Chip(if (live) "LIVE" else if (snap?.liveBook != null) "PAPER · AI" else "PAPER", if (live) P.onDown else P.onAccent, if (live) P.down else P.accent, size = 11)
         }
         Text(money(equity), color = P.ink, fontSize = 40.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1).sp, modifier = Modifier.padding(vertical = 4.dp))
         @OptIn(ExperimentalLayoutApi::class)
@@ -983,6 +1023,10 @@ private fun OpenPositionCard(
                 Text(pos.symbol + " ›", color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (pos.live) {
+                        Chip("LIVE", P.onDown, P.down, size = 10)
+                        Spacer(Modifier.width(6.dp))
+                    }
                     if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
                     else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
                     Spacer(Modifier.width(6.dp))
@@ -1014,20 +1058,29 @@ private fun OpenPositionCard(
         }
         // v13.3 one tap: closes 100% now, no dialog. The 25 / 50 / 100 buttons below still ask first.
         if (oneTap != null) {
-            val inFlight = oneTap.selling(pos.mint)
+            // v13.7: live-book cards sell for real; on an armed desk the AI's paper cards sell on paper.
+            val inFlight = if (pos.live) oneTap.sellingLive(pos.mint) else oneTap.selling(pos.mint)
+            val label = when {
+                pos.live -> "⚡ Sell now LIVE"
+                oneTap.split -> oneTap.paperSellLabel
+                else -> oneTap.sellLabel
+            }
             BigButton(
-                if (inFlight) "Selling…" else oneTap.sellLabel,
+                if (inFlight) "Selling…" else label,
                 P.down,
                 P.onDown,
                 Modifier.fillMaxWidth().padding(top = 12.dp),
                 enabled = !inFlight
-            ) { oneTap.onSell(pos.mint, pos.symbol) }
+            ) { if (pos.live) oneTap.onSellLive(pos.mint, pos.symbol) else oneTap.onSell(pos.mint, pos.symbol) }
         }
         // Sell 25 / 50 / 100. Each one still asks first; the confirm never touches the connection.
+        // v13.7: a live position closes in full only.
         Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            BigButton("Sell 25%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 25 }
-            BigButton("Sell 50%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 50 }
-            BigButton("Sell 100%", P.down, P.onDown, Modifier.weight(1f)) { sellAsk = 100 }
+            if (!pos.live) {
+                BigButton("Sell 25%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 25 }
+                BigButton("Sell 50%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 50 }
+            }
+            BigButton(if (pos.live) "Sell 100% LIVE" else "Sell 100%", P.down, P.onDown, Modifier.weight(1f)) { sellAsk = 100 }
         }
         FlowRow(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             chartLinks(pos.mint).forEach { (label, url) ->
@@ -1052,7 +1105,12 @@ private fun OpenPositionCard(
             titleContentColor = Ink,
             textContentColor = Ink,
             title = { Text(if (pending >= 100) "Sell all of ${pos.symbol}?" else "Sell $pending% of ${pos.symbol}?") },
-            text = { Text("Paper fill at the mark against the same pool model as a stop. The hard stop keeps guarding what is left.") },
+            text = {
+                Text(
+                    if (pos.live) "LIVE: a real on-chain sell from the desk wallet at the market. The hard stop still fires on its own."
+                    else "Paper fill at the mark against the same pool model as a stop. The hard stop keeps guarding what is left."
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = {

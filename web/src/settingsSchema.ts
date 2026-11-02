@@ -47,7 +47,8 @@ const pct = { toWire: (d: number) => Math.round(d * 100) / 10_000, fromState: (r
 
 export const SETTINGS_FIELDS: SettingField[] = [
   // v13.5 Live wallet (separate from every paper size; LIVE_TRADING itself is never set from here)
-  { key: "liveTradeUsd", label: "Live $ per trade", group: "Live wallet", kind: "slider", min: 1, max: 100, step: 1, unit: "$", toWire: same, fromState: same, hint: "Up to $100. Every live buy, auto or one-tap, spends exactly this much USDC ($5 default). Paper sizes are never used live." },
+  { key: "liveTradeUsd", label: "Live $ per trade", group: "Live wallet", kind: "slider", min: 1, max: 100, step: 1, unit: "$", toWire: same, fromState: same, hint: "Up to $100. Every live buy spends exactly this much USDC ($5 default): your one-tap / Add coin buys, and the AI's only when \"AI buys live too\" is on. Paper sizes are never used live." },
+  { key: "liveAutoBuy", label: "AI buys live too", group: "Live wallet", kind: "toggle", hint: "Off (default) = Live: manual only · AI: paper. Your buys are real; the AI keeps trading the paper book. On = the AI's auto-buys also spend real USDC. Only matters when Austin's desk is LIVE." },
   { key: "liveDailyCapUsd", label: "Live daily cap $", group: "Live wallet", kind: "slider", min: 5, max: 1_000, step: 5, unit: "$", toWire: same, fromState: same, nullable: "No daily cap (default)", nullDefault: 50, hint: "Total USDC live buys may spend per day. Off by default." },
   { key: "liveTrailPct", label: "Live trailing stop %", group: "Live wallet", kind: "slider", min: 0.5, max: 20, step: 0.5, unit: "%", toWire: same, fromState: (raw: number) => Math.round(raw * 10_000) / 100, hint: "Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first." },
   // Sizing / risk

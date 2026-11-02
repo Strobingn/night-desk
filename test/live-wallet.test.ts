@@ -50,6 +50,7 @@ function liveDesk(balances: () => Promise<WalletBalances> = rich, dbDir?: string
     cfg.dbPath = path.join(dbDir, "desk.sqlite");
     cfg.jsonlPath = path.join(dbDir, "desk.jsonl");
     cfg.logPath = path.join(dbDir, "desk.log");
+    cfg.resetPaper = false;
   }
   return new Desk(cfg, { walletBalances: balances });
 }
@@ -152,18 +153,32 @@ describe("v13.5 live settings", () => {
 });
 
 describe("v13.5 live orders", () => {
-  it("live auto-buys use the $5 live size, never the paper auto size", async () => {
+  it("v13.7: an armed desk keeps AI auto-buys on paper by default; liveAutoBuy sends them live at the $5 size", async () => {
     const desk = liveDesk();
     try {
       desk.updateSettings({ positionSizeUsd: 1040, autoBuy: true });
       const m = "AutoLive11111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m, symbol: "AUTO", priceUsd: 1, liquidityUsd: 180_000 }));
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+      expect(desk.book.positions.get(m)?.live).toBeUndefined();
+      expect(desk.book.positions.has(m)).toBe(true);
+      expect(desk.liveBook!.positions.size).toBe(0);
+      const snap = desk.snapshot();
+      expect(snap.mode).toBe("live");
+      expect(snap.liveScope).toBe("manual");
+      expect(snap.wallet?.liveScopeLine).toMatch(/manual only · AI: paper/);
+      expect(desk.readiness().lines.join(" ")).toMatch(/manual only · AI: paper/);
+
+      expect(desk.updateSettings({ liveAutoBuy: true }).ok).toBe(true);
+      const m2 = "AutoLive21111111111111111111111111111111111";
+      await desk.submitCandidate(makeToken({ mint: m2, symbol: "AUTO2", priceUsd: 1, liquidityUsd: 180_000 }));
       expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
-      expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint: m, sizeUsd: 5 });
-      const pos = desk.book.positions.get(m)!;
+      expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint: m2, sizeUsd: 5 });
+      const pos = desk.liveBook!.positions.get(m2)!;
       expect(pos.live).toBe(true);
       expect(pos.costUsd).toBe(5);
-      expect(desk.snapshot().mode).toBe("live");
+      expect(desk.book.positions.has(m2)).toBe(false);
+      expect(desk.snapshot().liveScope).toBe("all");
     } finally {
       desk.stop();
     }
@@ -180,13 +195,22 @@ describe("v13.5 live orders", () => {
       expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
       expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", sizeUsd: 5 });
       expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1);
-      const sold = await Promise.all([desk.closePosition(m), desk.closePosition(m)]);
+      expect(desk.liveBook!.positions.get(m)?.live).toBe(true);
+      expect(desk.book.positions.has(m)).toBe(false);
+      expect(desk.snapshot().liveBook?.positions.map((p) => p.mint)).toEqual([m]);
+      expect(desk.snapshot().positions).toHaveLength(0);
+      // No book named = the paper book: an old client can never sell real coins by accident.
+      const blind = await desk.closePosition(m);
+      expect(blind).toMatchObject({ ok: false });
+      if (!blind.ok) expect(blind.error).toMatch(/held live/);
+      expect((await desk.closePosition(m, 0.5, "live")).ok).toBe(false);
+      const sold = await Promise.all([desk.closePosition(m, 1, "live"), desk.closePosition(m, 1, "live")]);
       const sells = liveBroker.executeLiveSwap.mock.calls.filter((c) => c[0].side === "sell");
       expect(sells).toHaveLength(1);
       expect(sells[0]?.[0]).toHaveProperty("readEnvSecret");
       expect(sells[0]?.[0]).toHaveProperty("maxExitSlippage");
       expect(sold.some((r) => r.ok)).toBe(true);
-      expect(desk.book.positions.has(m)).toBe(false);
+      expect(desk.liveBook!.positions.has(m)).toBe(false);
     } finally {
       desk.stop();
     }
@@ -201,10 +225,13 @@ describe("v13.5 live orders", () => {
         await desk.submitCandidate(makeToken({ mint: m, symbol: m.slice(0, 5), priceUsd: 1, liquidityUsd: 180_000 }));
         expect((await desk.manualBuy(m)).ok).toBe(true);
       }
-      const out = await desk.closeAllPositions();
+      const paperOnly = await desk.closeAllPositions();
+      expect(paperOnly.sold).toHaveLength(0);
+      expect(liveBroker.executeLiveSwap.mock.calls.filter((c) => c[0].side === "sell")).toHaveLength(0);
+      const out = await desk.closeAllPositions("live");
       expect(out.ok).toBe(true);
       expect(liveBroker.executeLiveSwap.mock.calls.filter((c) => c[0].side === "sell")).toHaveLength(2);
-      expect(desk.book.positions.size).toBe(0);
+      expect(desk.liveBook!.positions.size).toBe(0);
     } finally {
       desk.stop();
     }
@@ -266,9 +293,12 @@ describe("v13.5 live orders", () => {
 
     const live = liveDesk(rich, dir);
     try {
-      expect(live.book.positions.has(pm)).toBe(false);
+      // v13.7: the armed desk keeps running the paper book (the AI's) and adds a separate live book.
+      expect(live.book.positions.has(pm)).toBe(true);
+      expect(live.liveBook!.positions.has(pm)).toBe(false);
       await live.refreshWallet();
-      expect(live.snapshot().cashUsd).toBe(100);
+      expect(live.snapshot().liveBook?.cashUsd).toBe(100);
+      expect(live.snapshot().cashUsd).toBe(paperCash);
     } finally {
       live.stop();
     }
@@ -315,10 +345,10 @@ describe("v13.5 live trail (1%) and the −6% hard stop", () => {
       await desk.submitCandidate(makeToken({ mint: m, symbol: "TRL", priceUsd: 1, liquidityUsd: 180_000 }));
       expect((await desk.manualBuy(m)).ok).toBe(true);
       await desk.markPrice(m, 1.05);
-      expect(desk.book.positions.has(m)).toBe(true);
-      expect(desk.book.positions.get(m)!.markPeak).toBe(1.05);
+      expect(desk.liveBook!.positions.has(m)).toBe(true);
+      expect(desk.liveBook!.positions.get(m)!.markPeak).toBe(1.05);
       await desk.markPrice(m, 1.035);
-      expect(desk.book.positions.has(m)).toBe(false);
+      expect(desk.liveBook!.positions.has(m)).toBe(false);
       const sells = liveBroker.executeLiveSwap.mock.calls.filter((c) => c[0].side === "sell");
       expect(sells).toHaveLength(1);
       const closed = desk.snapshot().closed[0];

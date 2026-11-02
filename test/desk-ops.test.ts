@@ -144,11 +144,7 @@ describe("manual close, log, and commentary", () => {
       expect(refused.ok).toBe(false);
       expect(desk.book.positions.has(mint)).toBe(true);
 
-      desk.config.mode = "live";
-      const live = desk.resetPaperBook(true);
-      expect(live.ok).toBe(false);
-      expect(desk.book.positions.has(mint)).toBe(true);
-      desk.config.mode = "paper";
+      // v13.7: an armed desk runs the paper book too, so reset is allowed; it never touches the live book (see v137 tests).
 
       const done = desk.resetPaperBook(true);
       expect(done).toMatchObject({ ok: true, cashUsd: 100, startingBalanceUsd: 100 });
