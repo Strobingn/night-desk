@@ -721,4 +721,4 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .live-pair.compact button { min-height: 38px; font-size: 13px; }
 
 /* v13.10 Tape: a short reason instead of a bare dash. */
-.coin-card b.why, .cc-chgbox b.why { font-size: 11px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.coin-card .cc-stat b.why, .tape-screen .coin-card .cc-chgbox b.why, .tape-screen .coin-card .cc-stats.inline .cc-stat b.why { font-size: 11px; font-weight: 700; color: var(--muted); white-space: nowrap; }
