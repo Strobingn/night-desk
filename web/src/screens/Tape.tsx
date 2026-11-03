@@ -498,6 +498,9 @@ function Row({ event, selected, onSelect }: { event: FeedEvent; selected: boolea
 /** v13.10 a short reason in place of a bare dash when a Tape value is not available. */
 function missingText(coin: CoinRow, field: "price" | "vol" | "chg"): string {
   if (field === "price") return coin.why ?? "checking…";
-  if (coin.why) return coin.why === "no trades yet" ? "no trades" : "not listed";
-  return coin.mark ? (coin.quoteSource === "pump.fun curve" ? "curve only" : "not listed") : "checking…";
+  if (coin.why === "no trades yet") return "no trades";
+  if (coin.quoteSource === "pump.fun curve") return "curve only";
+  // Quoted, but DexScreener has no pair with this number (priced by Jupiter / the sighting only).
+  if (coin.quoteSource || coin.why) return "no DEX data";
+  return "checking…";
 }

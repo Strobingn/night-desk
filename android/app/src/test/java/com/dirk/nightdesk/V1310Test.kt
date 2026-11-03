@@ -63,7 +63,8 @@ class V1310Test {
         val c = coinCards(events, emptySet(), quotes = q)[0]
         assertNull(c.mark)
         assertEquals("curve done, no pool yet", tapeMissing(c, "price"))
-        assertEquals("not listed", tapeMissing(c, "vol"))
+        assertEquals("no DEX data", tapeMissing(c, "vol"))
+        assertEquals("checking…", tapeMissing(c.copy(why = null, quoteSource = null), "vol"))
         val curve = c.copy(mark = 0.00001, why = null, quoteSource = "pump.fun curve")
         assertEquals("curve only", tapeMissing(curve, "chg"))
     }

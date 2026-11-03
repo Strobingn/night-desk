@@ -56,8 +56,10 @@ fun parsePxText(raw: String?): Double? {
 /** v13.10 short text in place of a bare dash on a Tape card. */
 fun tapeMissing(coin: CoinCard, field: String): String = when {
     field == "price" -> coin.why ?: "checking…"
-    coin.why != null -> if (coin.why == "no trades yet") "no trades" else "not listed"
-    coin.mark != null -> if (coin.quoteSource == "pump.fun curve") "curve only" else "not listed"
+    coin.why == "no trades yet" -> "no trades"
+    coin.quoteSource == "pump.fun curve" -> "curve only"
+    // Quoted, but DexScreener has no pair with this number (priced by Jupiter / the sighting only).
+    coin.quoteSource != null || coin.why != null -> "no DEX data"
     else -> "checking…"
 }
 
