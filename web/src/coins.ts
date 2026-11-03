@@ -117,8 +117,9 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
     const q = quotes?.[row.mint];
     if (q) {
       if (q.priceUsd != null && q.priceUsd > 0 && Number.isFinite(q.priceUsd)) row.mark = q.priceUsd;
-      if (q.vol1hUsd != null && Number.isFinite(q.vol1hUsd)) row.vol1h = q.vol1hUsd;
-      if (q.vol5mUsd != null && Number.isFinite(q.vol5mUsd)) row.vol5m = q.vol5mUsd;
+      // A live 0 never hides real volume the sighting saw (fresh pump.fun pairs read 0 on DexScreener).
+      if (q.vol1hUsd != null && Number.isFinite(q.vol1hUsd) && (q.vol1hUsd > 0 || row.vol1h == null)) row.vol1h = q.vol1hUsd;
+      if (q.vol5mUsd != null && Number.isFinite(q.vol5mUsd) && (q.vol5mUsd > 0 || row.vol5m == null)) row.vol5m = q.vol5mUsd;
       if (q.change1hPct != null && Number.isFinite(q.change1hPct)) {
         row.change1h = q.change1hPct;
         delete row.changeSeen;

@@ -39,6 +39,11 @@ describe("v13.10 Tape prices", () => {
     expect(a.change1h).toBe(-2.5);
     expect(b.mark).toBeUndefined();
     expect(b.why).toBe("curve done, no pool yet");
+    const [c] = coinCards([ev({ mint: "C", symbol: "C", detail: "pumpfun", message: "Scout found C on pumpfun. Mark 0.0₅8092, 1h volume $9,407.82." })], new Set(), 60, {
+      C: { priceUsd: null, vol1hUsd: 0, vol5mUsd: 0, change1hPct: null, source: null, at: 5, why: "no trades yet" }
+    });
+    expect(c.vol1h).toBeCloseTo(9407.82, 2);
+    expect(c.mark).toBeCloseTo(0.000008092, 15);
   });
 });
 
@@ -114,6 +119,11 @@ describe("v13.10 TapeQuoter", () => {
     }) as unknown as typeof fetch;
     const out = await fetchDexTape(["A", "B", "A"], fake);
     expect(out.get("A")).toMatchObject({ priceUsd: 0.0002, vol1hUsd: 700, vol5mUsd: 30, change1hPct: 9 });
+    const out2 = await fetchDexTape(["A", "B"], (async () => new Response(JSON.stringify([
+      { baseToken: { address: "A" }, priceUsd: "0.0002", liquidity: { usd: 50 }, volume: { h1: 100, m5: 1 } },
+      { baseToken: { address: "A" }, priceUsd: "0.0001", liquidity: { usd: 5 }, volume: { h1: 900, m5: 40 } }
+    ]))) as unknown as typeof fetch);
+    expect(out2.get("A")).toMatchObject({ priceUsd: 0.0002, vol1hUsd: 900, vol5mUsd: 40 });
     expect(out.has("B")).toBe(false);
     expect(out.has("Z")).toBe(false);
   });

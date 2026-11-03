@@ -50,6 +50,13 @@ class V1310Test {
         assertEquals(1, c.volRank)
     }
 
+    @Test fun liveZeroVolumeNeverHidesSightingVolume() {
+        val events = listOf(ev(1, "A", "Scout found A on pumpfun. Mark 0.0₅8092, 1h volume \$9,407.82.", "pumpfun"))
+        val c = coinCards(events, emptySet(), quotes = mapOf("A" to TapeQuote(null, 0.0, 0.0, null, null, 5, "no trades yet")))[0]
+        assertEquals(9407.82, c.vol1h!!, 1e-6)
+        assertEquals(0.000008092, c.mark!!, 1e-15)
+    }
+
     @Test fun missingPriceShowsTheReason() {
         val events = listOf(ev(1, "A", "Scout found A on pumpfun. Mark 0, 1h volume \$0.00.", "pumpfun"))
         val q = mapOf("A" to TapeQuote(null, null, null, null, null, 5, "curve done, no pool yet"))

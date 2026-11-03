@@ -172,8 +172,9 @@ private fun withQuote(c: CoinCard, q: TapeQuote?): CoinCard {
     if (q == null) return c
     return c.copy(
         mark = q.priceUsd?.takeIf { it > 0 && it.isFinite() } ?: c.mark,
-        vol1h = q.vol1hUsd?.takeIf { it.isFinite() } ?: c.vol1h,
-        vol5m = q.vol5mUsd?.takeIf { it.isFinite() } ?: c.vol5m,
+        // A live 0 never hides real volume the sighting saw (fresh pump.fun pairs read 0 on DexScreener).
+        vol1h = q.vol1hUsd?.takeIf { it.isFinite() && (it > 0 || c.vol1h == null) } ?: c.vol1h,
+        vol5m = q.vol5mUsd?.takeIf { it.isFinite() && (it > 0 || c.vol5m == null) } ?: c.vol5m,
         change1h = q.change1hPct?.takeIf { it.isFinite() } ?: c.change1h,
         why = q.why,
         quoteSource = q.source

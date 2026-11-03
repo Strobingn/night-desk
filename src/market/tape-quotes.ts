@@ -70,11 +70,20 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
       dex: typeof row.dexId === "string" ? row.dexId : undefined
     };
     const prev = out.get(mint);
+    // 1h / 5m volume: the busiest pair, the same way the Scout's filter reads it.
+    if (prev) {
+      cand.vol1hUsd = Math.max(cand.vol1hUsd ?? 0, prev.vol1hUsd ?? 0);
+      cand.vol5mUsd = Math.max(cand.vol5mUsd ?? 0, prev.vol5mUsd ?? 0);
+    }
     const better =
       !prev ||
       (cand.priceUsd != null && prev.priceUsd == null) ||
       ((cand.priceUsd != null) === (prev.priceUsd != null) && cand.liquidityUsd > prev.liquidityUsd);
     if (better) out.set(mint, cand);
+    else if (prev) {
+      prev.vol1hUsd = cand.vol1hUsd;
+      prev.vol5mUsd = cand.vol5mUsd;
+    }
   }
   return out;
 }
