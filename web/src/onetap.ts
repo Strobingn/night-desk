@@ -1,5 +1,6 @@
 /** v13.3 one-tap helpers shared by the web screens (pure, unit-tested). */
 import { px, signedPct, signedUsd, usd } from "./format";
+import type { DeskSnapshot } from "./types";
 
 export const TAP_SIZE_KEY = "night-desk-tap-usd";
 
@@ -65,4 +66,23 @@ export function sellToast(symbol: string, r: SellReply, roundTripMs: number): st
   const fill = r.exitPrice ? ` @ ${px(r.exitPrice)}` : "";
   const gap = r.exitCode === "GAP_RUG" ? " · gap/rug" : "";
   return `Sold ${r.symbol ?? symbol}${r.proceedsUsd != null ? ` for ${usd(r.proceedsUsd)}` : ""}${fill}${pnl}${gap} · ${roundTripMs} ms`;
+}
+
+/** v13.9 the live one-tap size: the live book's trade size, else Dirk's saved liveTradeUsd, else $5. */
+export function liveTapUsd(snap: Pick<DeskSnapshot, "liveBook" | "prefs"> | null | undefined): number {
+  const n = snap?.liveBook?.tradeUsd ?? snap?.prefs?.liveTradeUsd;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 5;
+}
+
+/** v13.9 why a LIVE tap does nothing. Null = live book armed, send it. Never a paper fallback. */
+export function liveTapBlock(snap: Pick<DeskSnapshot, "liveBook" | "liveNotArmed" | "wallet"> | null | undefined): string | null {
+  if (!snap) return "Desk not loaded yet. Nothing was sent.";
+  if (snap.liveBook) return null;
+  const why = snap.liveNotArmed ?? (snap.wallet && !snap.wallet.keyLoaded ? "Live not armed: wallet key missing." : "Live not armed.");
+  return `${why} Nothing was sent.`;
+}
+
+/** v13.9 the live position in a coin (live book), if any. */
+export function liveHolding(snap: Pick<DeskSnapshot, "liveBook">, mint: string) {
+  return snap.liveBook?.positions.find((pos) => pos.mint === mint) ?? null;
 }

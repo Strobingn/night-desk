@@ -395,6 +395,8 @@ data class DeskSnapshot(
     /** v13.7 armed desk: "manual" or "all"; null when not armed. */
     val liveScope: String? = null,
     val liveBook: LiveBookInfo? = null,
+    /** v13.9 why LIVE BUY / LIVE SELL do nothing yet ("Live not armed: wallet key missing."). Null when armed. */
+    val liveNotArmed: String? = null,
     /** v13.7 saved toggle: AI auto-buys go live too (default off). */
     val liveAutoBuy: Boolean = false,
     /** v13 hero card. */
@@ -699,6 +701,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         wallet = parseWallet(data.optJSONObject("wallet")),
         liveScope = data.optText("liveScope").ifBlank { null }?.takeIf { it != "null" },
         liveBook = if (data.isNull("liveBook")) null else parseLiveBook(data.optJSONObject("liveBook"), receivedAt),
+        liveNotArmed = if (data.isNull("liveNotArmed")) null else data.optText("liveNotArmed").ifBlank { null },
         liveAutoBuy = prefs?.optBoolean("liveAutoBuy", false) ?: false,
         startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
         sessionPnlPct = data.optFinite("sessionPnlPct"),

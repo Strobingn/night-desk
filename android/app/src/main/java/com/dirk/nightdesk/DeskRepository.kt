@@ -550,6 +550,35 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * v13.9 LIVE BUY from a paper card: a real buy at the live size into the LIVE book.
+     * [blocked] non-null (desk not armed) = show it and send nothing. Never a paper fallback.
+     */
+    suspend fun liveTapBuy(mint: String, symbol: String, sizeUsd: Double, blocked: String?): DeskNotice? = withContext(Dispatchers.IO) {
+        if (blocked != null) return@withContext DeskNotice(false, "$symbol: $blocked").also { _notice.value = it }
+        val key = "livebuy:$mint"
+        if (!claimTap(key)) return@withContext null
+        try {
+            val base = link.baseUrl
+            if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+            val body = JSONObject().put("mint", mint).put("sizeUsd", sizeUsd).put("book", "live").put("idemKey", OneTap.newIdemKey()).put("oneTap", true)
+            val started = System.nanoTime()
+            val notice = sendRaw("$base/api/positions/buy", body.toString()).fold(
+                onSuccess = { (code, raw) ->
+                    val json = runCatching { JSONObject(raw) }.getOrNull()
+                    val ok = code in 200..299 && json?.optBoolean("ok", false) == true
+                    DeskNotice(ok, OneTap.buyText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
+                },
+                onFailure = { err -> DeskNotice(false, "$symbol: ${err.message ?: "live buy failed"}") }
+            )
+            _notice.value = notice
+            refresh()
+            notice
+        } finally {
+            releaseTap(key)
+        }
+    }
+
     /** v13.3 one-tap sell: closes 100% now. No dialog. Null = already in flight. */
     suspend fun oneTapSell(mint: String, symbol: String, live: Boolean = false): DeskNotice? = withContext(Dispatchers.IO) {
         val key = if (live) "sell:live:$mint" else "sell:$mint"

@@ -605,6 +605,8 @@ export interface DeskSnapshot {
   liveScope?: "manual" | "all" | null;
   /** v13.7 the live book. Top-level cash/equity/positions are the paper book on an armed desk. */
   liveBook?: LiveBookView | null;
+  /** v13.9 why the LIVE BUY / LIVE SELL buttons do nothing yet ("Live not armed: wallet key missing"). Null when armed. */
+  liveNotArmed?: string | null;
   /** v13.5 wallet card. */
   wallet?: WalletView;
   mode: "paper" | "live";

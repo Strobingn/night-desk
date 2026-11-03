@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { countNewSince, initialTapeFollow, pausedLabel, stepTapeFollow, type TapeFollowState } from "../../../src/desk/tape-follow";
 import { api } from "../api";
-import { clock } from "../format";
+import { clock, signedUsd } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
-import { OneTapBar, TapBuyButton, TapSellButton } from "./OneTap";
+import { LiveTapPair, OneTapBar, TapBuyButton, TapSellButton } from "./OneTap";
 import { slipText, tapUsdText } from "../tapeToolbar";
 import { ScoutStatus } from "./ScoutStatus";
 import { coinCards, HOT_RANK, parseTapeSort, sortCoins, TAPE_SORT_KEY, TAPE_SORTS, TOP_VOLUME, VERDICT_LABEL, type CoinRow, type TapeSort, type Verdict } from "../coins";
@@ -341,6 +341,7 @@ export function TapeScreen({
                 selected={selected?.mint === coin.mint}
                 busy={busy === coin.mint}
                 actions={actions}
+                snap={snap}
                 onSelect={() => {
                   setSelected({ mint: coin.mint, symbol: coin.symbol });
                   setBuySize(capText);
@@ -387,7 +388,9 @@ export function TapeScreen({
   );
 }
 
-function CoinCard({ coin, selected, busy, actions, onSelect, onBuy }: { coin: CoinRow; selected: boolean; busy: boolean; actions: DeskActions; onSelect: () => void; onBuy: () => void }) {
+function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { coin: CoinRow; selected: boolean; busy: boolean; actions: DeskActions; onSelect: () => void; onBuy: () => void; snap?: DeskSnapshot }) {
+  // v13.9: a coin the paper book holds gets LIVE BUY / LIVE SELL right on its Tape card.
+  const paperPos = snap?.positions.find((pos) => pos.mint === coin.mint) ?? null;
   const tone: Record<Verdict, "up" | "down" | "flat"> = { open: "up", bought: "up", trade: "up", near: "flat", killed: "down", seen: "flat" };
   const rank = coin.volRank;
   const top = rank != null && rank <= TOP_VOLUME;
@@ -455,11 +458,20 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy }: { coin: Co
           </span>
         ) : (
           <span className="cc-buys">
-            <span className="verdict-chip v-open">Holding</span>
+            <span className="verdict-chip v-open">
+              {paperPos ? (
+                <>
+                  <span className="book-tag paper">PAPER</span> <span className={paperPos.pnlUsd >= 0 ? "up" : "down"}>{signedUsd(paperPos.pnlUsd)}</span>
+                </>
+              ) : (
+                "Holding"
+              )}
+            </span>
             <TapSellButton mint={coin.mint} symbol={coin.symbol} actions={actions} />
           </span>
         )}
       </div>
+      {paperPos && snap ? <LiveTapPair snap={snap} mint={coin.mint} symbol={coin.symbol} actions={actions} compact /> : null}
     </article>
   );
 }

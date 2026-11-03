@@ -234,13 +234,22 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                     BigButton("Buy", P.up, P.onUp, Modifier.width(104.dp), height = 38.dp, onClick = onBuy)
                 }
             } else {
-                Chip("Holding", P.blue, P.blue.copy(alpha = 0.18f), size = 13)
+                if (oneTap != null && oneTap.paperHeld.containsKey(coin.mint)) {
+                    BookTag(live = false)
+                    Spacer(Modifier.width(4.dp))
+                    val pp = oneTap.paperHeld[coin.mint]!!
+                    Text((if (pp >= 0) "+" else "−") + formatUsd(kotlin.math.abs(pp)), color = if (pp >= 0) P.up else P.down, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                } else Chip("Holding", P.blue, P.blue.copy(alpha = 0.18f), size = 13)
                 if (oneTap != null) {
                     Spacer(Modifier.width(6.dp))
                     val inFlight = oneTap.selling(coin.mint)
                     BigButton(if (inFlight) "Selling…" else "⚡ Sell", P.down, P.onDown, Modifier.width(92.dp), height = 38.dp, enabled = !inFlight) { oneTap.onSell(coin.mint, coin.symbol) }
                 }
             }
+        }
+        // v13.9: a coin the paper book holds gets LIVE BUY / LIVE SELL right on its Tape card.
+        if (oneTap != null && coin.verdict == Verdict.OPEN && oneTap.paperHeld.containsKey(coin.mint)) {
+            LivePair(oneTap, coin.mint, coin.symbol, Modifier.padding(top = 6.dp), compact = true)
         }
     }
 }
@@ -315,6 +324,14 @@ fun NightDeskApp(desk: DeskRepository) {
             onSellLive = { mint, symbol ->
                 haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                 scope.launch { desk.oneTapSell(mint, symbol, live = true) }
+            },
+            liveTapUsd = com.dirk.nightdesk.LiveTap.size(s),
+            liveBlock = com.dirk.nightdesk.LiveTap.block(s),
+            liveHeld = com.dirk.nightdesk.LiveTap.held(s),
+            paperHeld = s.positions.associate { it.mint to it.pnlUsd },
+            onLiveBuy = { mint, symbol ->
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                scope.launch { desk.liveTapBuy(mint, symbol, com.dirk.nightdesk.LiveTap.size(s), com.dirk.nightdesk.LiveTap.block(s)) }
             }
         )
     }
@@ -1027,6 +1044,10 @@ private fun OpenPositionCard(
                     if (pos.live) {
                         Chip("LIVE", P.onDown, P.down, size = 10)
                         Spacer(Modifier.width(6.dp))
+                    } else if (oneTap != null) {
+                        // v13.9: paper numbers are labelled PAPER; the LIVE strip below is the real-money side.
+                        BookTag(live = false)
+                        Spacer(Modifier.width(6.dp))
                     }
                     if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
                     else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
@@ -1057,13 +1078,15 @@ private fun OpenPositionCard(
                 PosStat("To stop", "${num(pos.stopDistancePct, "%.1f")}%")
             }
         }
+        // v13.9: LIVE BUY / LIVE SELL side by side on every paper card.
+        if (oneTap != null && !pos.live) LivePair(oneTap, pos.mint, pos.symbol, Modifier.padding(top = 12.dp))
         // v13.3 one tap: closes 100% now, no dialog. The 25 / 50 / 100 buttons below still ask first.
         if (oneTap != null) {
             // v13.7: live-book cards sell for real; on an armed desk the AI's paper cards sell on paper.
             val inFlight = if (pos.live) oneTap.sellingLive(pos.mint) else oneTap.selling(pos.mint)
             val label = when {
                 pos.live -> "⚡ Sell now LIVE"
-                oneTap.split -> oneTap.paperSellLabel
+                oneTap.split || !oneTap.live -> "⚡ Sell now PAPER"
                 else -> oneTap.sellLabel
             }
             BigButton(

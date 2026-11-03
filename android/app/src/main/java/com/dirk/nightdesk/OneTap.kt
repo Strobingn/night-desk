@@ -103,3 +103,32 @@ object OneTap {
         else -> "$" + PriceText.px(p)
     }
 }
+
+/**
+ * v13.9 LIVE BUY / LIVE SELL beside a paper position. Pure helpers (unit-tested).
+ * A LIVE tap never falls back to a paper trade.
+ */
+object LiveTap {
+    /** "LIVE BUY $5" (whole dollars without cents). */
+    fun buyLabel(usd: Double): String {
+        val n = if (usd.isFinite() && usd > 0) usd else 5.0
+        val whole = kotlin.math.abs(n - kotlin.math.round(n)) < 1e-9
+        return "LIVE BUY $" + if (whole) "%.0f".format(java.util.Locale.US, n) else "%.2f".format(java.util.Locale.US, n)
+    }
+
+    /** The live size: the live book's trade size, else the saved liveTradeUsd, else $5. */
+    fun size(snap: DeskSnapshot?): Double =
+        snap?.liveBook?.tradeUsd?.takeIf { it.isFinite() && it > 0 } ?: snap?.liveTradeUsd?.takeIf { it.isFinite() && it > 0 } ?: 5.0
+
+    /** Null = armed, send it. Otherwise the plain message shown instead of doing anything. */
+    fun block(snap: DeskSnapshot?): String? {
+        if (snap == null) return "Desk not loaded yet. Nothing was sent."
+        if (snap.liveBook != null) return null
+        val why = snap.liveNotArmed ?: if (snap.wallet?.keyLoaded == false) "Live not armed: wallet key missing." else "Live not armed."
+        return "$why Nothing was sent."
+    }
+
+    /** Live positions by mint (live book only). */
+    fun held(snap: DeskSnapshot?): Map<String, PositionRow> = snap?.liveBook?.positions?.associateBy { it.mint } ?: emptyMap()
+}
+

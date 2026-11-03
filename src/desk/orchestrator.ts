@@ -790,7 +790,7 @@ export class Desk {
   > {
     // v13.7: a sell names its book. No book = the paper book, so an old client can never sell real coins by accident.
     const kind: BookKind = bookArg === "live" ? "live" : "paper";
-    if (kind === "live" && !this.liveBook) return { ok: false, error: "No open position for that mint. Live trading is not armed." };
+    if (kind === "live" && !this.liveBook) return { ok: false, error: `No live position to sell. ${this.liveNotArmedMessage()}` };
     const book = this.bk(kind);
     const pos = book.positions.get(mint);
     if (!pos) {
@@ -1346,7 +1346,7 @@ export class Desk {
     // v13.7: on an armed desk Dirk's manual buys go live by default; the AI stays on paper.
     const kind: BookKind = opts?.book === "paper" ? "paper" : opts?.book === "live" || this.liveBook ? "live" : "paper";
     if (kind === "live" && !this.liveBook) {
-      const error = "Live trading is not armed on the desk. Buy refused (nothing was sent).";
+      const error = this.liveNotArmedMessage();
       this.log({ stage: "executor", kind: "reject", mint: cleaned, code: "LIVE_NOT_ARMED", message: `Manual buy refused. ${error}` });
       return { ok: false, error, code: "LIVE_NOT_ARMED" };
     }
@@ -1451,6 +1451,26 @@ export class Desk {
     return { ok: true, readiness: this.readiness() };
   }
 
+  /**
+   * v13.9 plain reason the live buttons do nothing yet. Null when the live book is armed.
+   * Never includes key material: only whether a usable key is present.
+   */
+  liveNotArmedReason(): string | null {
+    if (this.liveBook) return null;
+    const { keypairPresent, keyInvalid } = this.walletStatus;
+    if (!keypairPresent) {
+      return keyInvalid
+        ? "Live not armed: wallet key missing (WALLET_PRIVATE_KEY on Austin is not a private key)."
+        : "Live not armed: wallet key missing.";
+    }
+    if (!this.config.liveRequested) return "Live not armed: LIVE_TRADING is off on Austin.";
+    return `Live not armed${this.config.armError ? `: ${this.config.armError}` : "."}`;
+  }
+
+  private liveNotArmedMessage(): string {
+    return `${this.liveNotArmedReason() ?? "Live not armed."} Nothing was sent, and no paper trade was placed instead.`;
+  }
+
   readiness(): LiveReadiness {
     const mode = this.config.mode;
     const liveTradingFlag = this.config.liveRequested;
@@ -1512,6 +1532,7 @@ export class Desk {
     return {
       liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null,
       liveBook: this.liveBookView(),
+      liveNotArmed: this.liveNotArmedReason(),
       wallet: this.walletView(),
       mode: this.config.mode,
       liveRequested: this.config.liveRequested,
@@ -1745,7 +1766,7 @@ export class Desk {
     // v13.7: AI entries go live only when Dirk turned on "AI buys live" (liveAutoBuy). Default: paper.
     const kind: BookKind = extra.book ?? (source === "analyst" && this.liveBook && this.liveAutoBuy ? "live" : "paper");
     if (kind === "live" && !this.liveBook) {
-      const error = "Live trading is not armed on the desk. Buy refused (nothing was sent).";
+      const error = this.liveNotArmedMessage();
       return { ok: false, error, code: "LIVE_NOT_ARMED" };
     }
     const book = this.bk(kind);

@@ -11,7 +11,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
-import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
+import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
 export const TABS = [
@@ -50,6 +50,8 @@ export interface DeskActions {
   openAddCoin: (q: string) => void;
   /** v13.3 one tap: paper-buy now at the one-tap size. No dialog; every desk risk check still runs. */
   oneTapBuy: (mint: string, symbol: string, sizeUsd?: number) => Promise<void>;
+  /** v13.9 one tap: real buy at the live size into the LIVE book. Never falls back to paper. */
+  liveTapBuy?: (mint: string, symbol: string) => Promise<void>;
   /** v13.3 one tap: close the whole position now. No dialog. */
   oneTapSell: (mint: string, symbol: string, book?: "live") => Promise<void>;
   sellAll: () => Promise<void>;
@@ -75,6 +77,8 @@ function tabFromHash(): TabId {
 
 export function App() {
   const [snap, setSnap] = useState<DeskSnapshot | null>(null);
+  const snapNow = useRef<DeskSnapshot | null>(null);
+  snapNow.current = snap;
   const [offline, setOffline] = useState(false);
   const [denied, setDenied] = useState(false);
   const [history, setHistory] = useState<FeedEvent[]>([]);
@@ -275,6 +279,27 @@ export function App() {
     [tapUsd, track]
   );
 
+  // v13.9: LIVE BUY on a paper card. Unarmed desk → plain message, no request, no paper trade.
+  const liveTapBuy = useCallback(
+    async (mint: string, symbol: string) => {
+      const current = snapNow.current;
+      const notArmed = liveTapBlock(current);
+      if (notArmed) {
+        setNotice({ ok: false, toast: true, text: `${symbol}: ${notArmed}` });
+        return;
+      }
+      const key = `livebuy:${mint}`;
+      if (inflight.current.has(key)) return;
+      track(key, true);
+      const started = performance.now();
+      const sizeUsd = liveTapUsd(current);
+      const res = await api<BuyReply>("/api/positions/buy", { body: { mint, sizeUsd, book: "live", idemKey: newIdemKey(), oneTap: true } });
+      track(key, false);
+      setNotice({ ok: res.ok, toast: true, text: buyToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
+    },
+    [track]
+  );
+
   const oneTapSell = useCallback(
     async (mint: string, symbol: string, book?: "live") => {
       const key = `sell:${book ?? "paper"}:${mint}`;
@@ -320,6 +345,7 @@ export function App() {
   const actions: DeskActions = {
     notify: setNotice,
     oneTapBuy,
+    liveTapBuy,
     live: snap?.mode === "live",
     split: snap?.liveBook != null,
     oneTapSell,

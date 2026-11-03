@@ -7,7 +7,7 @@ import { tone, type DeskActions } from "../App";
 import { CoinAvatar, PnlChip, Sparkline, StopTrailBar } from "../ui";
 import { dayBase } from "../coins";
 import { exitLabel } from "../../../src/desk/gap";
-import { OneTapBar, TapSellButton } from "./OneTap";
+import { LiveTapPair, OneTapBar, TapSellButton } from "./OneTap";
 import { WalletCard } from "./Wallet";
 
 
@@ -69,7 +69,7 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
       ) : (
         <div className="positions">
           {snap.positions.map((pos, index) => (
-            <PositionCard key={`${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} />
+            <PositionCard key={`${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} snap={snap} />
           ))}
         </div>
       )}
@@ -183,7 +183,7 @@ export function MarkUpdated({ pos }: { pos: PositionView }) {
   );
 }
 
-function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionView; actions: DeskActions; busy: string | null; armPct: number; trailOn: boolean }) {
+function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: PositionView; actions: DeskActions; busy: string | null; armPct: number; trailOn: boolean; snap?: DeskSnapshot }) {
   const tag = pos.tag ?? (pos.entry === "manual" ? "manual" : null);
   const live = pos.book === "live";
   const valueUsd = pos.marketValueUsd;
@@ -199,7 +199,7 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
             </button>
           </h3>
           <p className="sub">
-            {live ? <span className="live-badge live">LIVE</span> : null} {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
+            {live ? <span className="live-badge live">LIVE</span> : snap ? <span className="book-tag paper">PAPER</span> : null} {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
             {pos.lpUnlocked ? " · LP unlocked" : ""}
           </p>
         </div>
@@ -242,7 +242,10 @@ function PositionCard({ pos, actions, busy, armPct, trailOn }: { pos: PositionVi
           </dd>
         </div>
       </dl>
+      {/* v13.9: real-money buttons beside the paper position. The paper numbers above stay paper. */}
+      {!live && snap ? <LiveTapPair snap={snap} mint={pos.mint} symbol={pos.symbol} actions={actions} /> : null}
       <div className="sells" role="group" aria-label={`Sell ${pos.symbol}`}>
+        {!live && snap ? <span className="book-tag paper sells-tag">PAPER</span> : null}
         <TapSellButton mint={pos.mint} symbol={pos.symbol} actions={actions} book={pos.book} />
         {/* v13.7: live positions close in full only (no partial live sells). */}
         {(live ? ([] as const) : ([25, 50] as const)).map((pct) => (

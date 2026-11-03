@@ -56,8 +56,17 @@ class OneTapUi(
     /** v13.7 armed desk with a separate live book (AI on paper unless liveAutoBuy). */
     val split: Boolean = false,
     val aiLive: Boolean = false,
-    val onSellLive: (mint: String, symbol: String) -> Unit = { _, _ -> }
+    val onSellLive: (mint: String, symbol: String) -> Unit = { _, _ -> },
+    /** v13.9 LIVE BUY on paper cards: the live size, why it is blocked (null = armed), live holdings, the action. */
+    val liveTapUsd: Double = 5.0,
+    val liveBlock: String? = null,
+    val liveHeld: Map<String, com.dirk.nightdesk.PositionRow> = emptyMap(),
+    /** Paper positions by mint → paper PnL $ (for the Tape's PAPER chip). */
+    val paperHeld: Map<String, Double> = emptyMap(),
+    val onLiveBuy: (mint: String, symbol: String) -> Unit = { _, _ -> }
 ) {
+    fun buyingLive(mint: String) = tapping.contains("livebuy:$mint")
+    val liveBuyLabel: String get() = com.dirk.nightdesk.LiveTap.buyLabel(liveTapUsd)
     fun buying(mint: String) = tapping.contains("buy:$mint")
     fun selling(mint: String) = tapping.contains("sell:$mint")
     fun sellingLive(mint: String) = tapping.contains("sell:live:$mint")
@@ -198,3 +207,82 @@ private fun sliderColors() = SliderDefaults.colors(
 
 private fun fmt(n: Double): String = if (n == kotlin.math.floor(n)) "%.0f".format(Locale.US, n) else "%.1f".format(Locale.US, n)
 private fun fmtUsd(n: Double): String = "$" + "%.2f".format(Locale.US, n)
+
+private val LivePink = Color(0xFFFF2E7E)
+private val LiveGreen = Color(0xFF00E676)
+private val LiveGreenInk = Color(0xFF00210C)
+
+/** v13.9 PAPER / LIVE tag. */
+@Composable
+fun BookTag(live: Boolean) {
+    Text(
+        if (live) "LIVE" else "PAPER",
+        color = if (live) Color.White else Color(0xFF9CC3FF),
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Black,
+        letterSpacing = 1.2.sp,
+        modifier = Modifier.background(if (live) LivePink else Color(0xFF2B3A55), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
+    )
+}
+
+/**
+ * v13.9 LIVE BUY / LIVE SELL right beside each other on a paper card (Book and Tape).
+ * The paper numbers stay on the card; this strip is the real-money side only.
+ * LIVE BUY: the live size into the LIVE book (never paper). LIVE SELL: 100% of the live position, no confirm.
+ */
+@Composable
+fun LivePair(ui: OneTapUi, mint: String, symbol: String, modifier: Modifier = Modifier, compact: Boolean = false) {
+    val held = ui.liveHeld[mint]
+    val buying = ui.buyingLive(mint)
+    val selling = ui.sellingLive(mint)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(LivePink.copy(alpha = 0.08f), RoundedCornerShape(14.dp))
+            .border(1.5.dp, LivePink, RoundedCornerShape(14.dp))
+            .padding(if (compact) 6.dp else 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            BookTag(live = true)
+            Text(" ", fontSize = 11.sp)
+            if (held != null) {
+                val tint = if (held.pnlUsd >= 0) P.up else P.down
+                Text(
+                    "cost ${com.dirk.nightdesk.formatUsd(held.costUsd)} · value ${com.dirk.nightdesk.formatUsd(held.marketValueUsd)} · " +
+                        (if (held.pnlUsd >= 0) "+" else "−") + com.dirk.nightdesk.formatUsd(kotlin.math.abs(held.pnlUsd)) +
+                        " (" + (if (held.pnlPct >= 0) "+" else "−") + "%.1f".format(Locale.US, kotlin.math.abs(held.pnlPct) * 100) + "%)",
+                    color = tint,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            } else {
+                Text(
+                    ui.liveBlock?.removeSuffix(" Nothing was sent.") ?: "No live position in this coin",
+                    color = P.muted,
+                    fontSize = 12.sp,
+                    maxLines = 1
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            BigButton(
+                if (buying) "Buying…" else ui.liveBuyLabel,
+                if (ui.liveBlock == null) LiveGreen else LiveGreen.copy(alpha = 0.55f),
+                LiveGreenInk,
+                Modifier.weight(1f),
+                height = if (compact) 38.dp else 46.dp,
+                enabled = !buying
+            ) { ui.onLiveBuy(mint, symbol) }
+            BigButton(
+                if (selling) "Selling…" else "LIVE SELL",
+                if (held != null) Color(0xFFFF3D57) else P.card3,
+                if (held != null) Color.White else P.muted,
+                Modifier.weight(1f),
+                height = if (compact) 38.dp else 46.dp,
+                enabled = held != null && !selling
+            ) { ui.onSellLive(mint, symbol) }
+        }
+    }
+}

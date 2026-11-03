@@ -701,3 +701,21 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .pos-card.live-pos {
   box-shadow: inset 3px 0 0 var(--down);
 }
+
+/* v13.9 PAPER vs LIVE tags and the LIVE BUY / LIVE SELL strip on paper cards. */
+.book-tag { display: inline-block; font-size: 10px; font-weight: 900; letter-spacing: 0.12em; border-radius: 6px; padding: 2px 6px; line-height: 1.3; vertical-align: middle; }
+.book-tag.paper { background: #2b3a55; color: #9cc3ff; }
+.book-tag.live { background: #ff2e7e; color: #fff; }
+.sells .sells-tag { flex: 0 0 auto; min-height: 0; align-self: center; font-size: 10px; }
+.live-pair { margin: 10px 0 8px; padding: 8px; border-radius: 12px; border: 1.5px solid #ff2e7e; background: rgba(255, 46, 126, 0.08); display: grid; gap: 6px; }
+.live-pair .lp-line { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.live-pair .lp-held { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-pair .lp-held.muted { color: var(--muted); }
+.live-pair .lp-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.live-pair button { min-height: 46px; border-radius: 12px; font-weight: 900; font-size: 15px; letter-spacing: 0.04em; border: 0; cursor: pointer; }
+.live-pair .live-buy { background: #00e676; color: #00210c; }
+.live-pair .live-sell { background: #ff3d57; color: #fff; }
+.live-pair button:disabled { background: var(--card-2); color: var(--muted); cursor: not-allowed; }
+.live-pair.unarmed .live-buy { background: #1f5e3a; color: #b8ffd4; }
+.live-pair.compact { margin: 6px 0 0; padding: 6px; }
+.live-pair.compact button { min-height: 38px; font-size: 13px; }

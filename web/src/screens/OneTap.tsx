@@ -1,6 +1,7 @@
 import { capHint } from "../tickerText";
 import { useEffect, useState } from "react";
-import { usd } from "../format";
+import { signedPct, signedUsd, usd } from "../format";
+import { liveHolding, liveTapBlock, liveTapUsd } from "../onetap";
 import type { DeskSnapshot } from "../types";
 import type { DeskActions } from "../App";
 
@@ -170,4 +171,65 @@ export function TapSellButton({ mint, symbol, actions, book }: { mint: string; s
       {inFlight ? "Selling…" : live ? "⚡ Sell now LIVE" : "⚡ Sell now"}
     </button>
   );
+}
+
+/**
+ * v13.9 LIVE BUY / LIVE SELL beside a paper position. Paper numbers stay on the card above;
+ * this strip is the real-money side only. LIVE BUY uses the live size and goes to the LIVE book
+ * (never a paper fallback). LIVE SELL closes 100% of the live position, no confirm; greyed when none.
+ */
+export function LiveTapPair({ snap, mint, symbol, actions, compact = false }: { snap: DeskSnapshot; mint: string; symbol: string; actions: DeskActions; compact?: boolean }) {
+  const held = liveHolding(snap, mint);
+  const size = liveTapUsd(snap);
+  const block = liveTapBlock(snap);
+  const buying = actions.tapping.has(`livebuy:${mint}`);
+  const selling = actions.tapping.has(`sell:live:${mint}`);
+  return (
+    <div className={`live-pair${compact ? " compact" : ""}${block ? " unarmed" : ""}`} role="group" aria-label={`Live trade ${symbol}`}>
+      <div className="lp-line">
+        <span className="book-tag live">LIVE</span>
+        {held ? (
+          <span className="lp-held">
+            qty {fmtQty(held.qty)} · <b className={held.pnlUsd >= 0 ? "up" : "down"}>{signedUsd(held.pnlUsd)} ({signedPct(held.pnlPct)})</b> · cost {usd(held.costUsd)}
+          </span>
+        ) : (
+          <span className="lp-held muted">{block ? block.replace(/ Nothing was sent\.$/, "") : "No live position in this coin"}</span>
+        )}
+      </div>
+      <div className="lp-btns">
+        <button
+          className="live-buy"
+          type="button"
+          disabled={buying}
+          aria-label={`LIVE buy ${symbol} for ${usd(size)}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            void actions.liveTapBuy?.(mint, symbol);
+          }}
+        >
+          {buying ? "Buying…" : `LIVE BUY ${usd(size, size >= 100 || Number.isInteger(size) ? 0 : 2)}`}
+        </button>
+        <button
+          className="live-sell"
+          type="button"
+          disabled={!held || selling}
+          title={held ? `Sell 100% of the live ${symbol}` : "No live position in this coin"}
+          aria-label={`LIVE sell all ${symbol}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (held) void actions.oneTapSell(mint, symbol, "live");
+          }}
+        >
+          {selling ? "Selling…" : "LIVE SELL"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function fmtQty(q: number): string {
+  if (!Number.isFinite(q)) return "—";
+  if (q >= 1e6) return `${(q / 1e6).toFixed(2)}M`;
+  if (q >= 1e3) return `${(q / 1e3).toFixed(1)}K`;
+  return q.toFixed(q >= 1 ? 2 : 4);
 }
