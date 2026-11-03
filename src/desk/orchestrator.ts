@@ -5,7 +5,7 @@ import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailArmFraction, TRAIL_ARM_MAX, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
 import { classifyStopExit } from "./gap.js";
 import { MomentumTracker } from "../market/momentum.js";
@@ -61,6 +61,7 @@ import type {
   LiveBookView
 } from "../types.js";
 import { PaperBook } from "./book.js";
+import { ORDER_MARK_MAX_AGE_MS, ORDER_MAX_TRIES, ORDER_RETRY_MS, OrderList, PERMANENT_REFUSALS, crosses, describeOrder, distance, resolveOrder, type DeskOrder, type OrderInput } from "./orders.js";
 
 /** v13.7 per-book state maps (cooldowns, opening, marks) key live positions with this prefix. */
 const LIVE_KEY = "live:";
@@ -247,6 +248,16 @@ export class Desk {
   tape: TapeQuoter | null = null;
   private tapeTimer: NodeJS.Timeout | null = null;
   private lastClientCrash: { at: number; version: string; brief: string } | null = null;
+  /** v13.11 limit / take-profit / stop orders (paper and live), saved in the desk store. */
+  private orders = new OrderList();
+  private orderTimer: NodeJS.Timeout | null = null;
+  private readonly firingOrders = new Set<string>();
+  private readonly orderJobs = new Set<Promise<unknown>>();
+  /** Marks restored from disk at boot are not fresh prices: an order never fires on them. */
+  private bootAt = Date.now();
+  private readonly bootMarks = new Map<string, number>();
+  /** Supply (market cap ÷ price) from a coin's first priced sighting, for market-cap triggers. */
+  private readonly supplyByMint = new Map<string, number>();
   private readonly lookupFetch: typeof fetch;
   private readonly depthFetch: typeof fetch | undefined;
   /** v12.1: one shared request budget for Scout, enrichment, held marks, Add coin and the watchlist. */
@@ -436,6 +447,10 @@ export class Desk {
     }
     this.resetAt = this.ensureResetAt();
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
+    this.orders = new OrderList(this.store.readJson("orders"));
+    this.bootAt = Date.now();
+    for (const [mint, at] of this.book.lastMarkAt) this.bootMarks.set(`paper:${mint}`, at);
+    for (const [mint, at] of this.liveBook?.lastMarkAt ?? []) this.bootMarks.set(`live:${mint}`, at);
     const crash = this.store.readJson("lastClientCrash") as { at?: unknown; version?: unknown; brief?: unknown } | null;
     if (crash && typeof crash.at === "number" && typeof crash.brief === "string") {
       this.lastClientCrash = { at: crash.at, version: typeof crash.version === "string" ? crash.version : "unknown", brief: crash.brief };
@@ -566,6 +581,10 @@ export class Desk {
       setTimeout(() => void this.refreshWatchlist(), 3_000);
     }
     this.equityTimer = setInterval(() => this.markEquity(), 2_000);
+    // v13.11 orders: every 2 s on the latest fresh price (held coins are also checked on every mark).
+    this.orderTimer = setInterval(() => this.checkOrders(), 2_000);
+    this.orderTimer.unref?.();
+    this.pinOrderMints();
     // v13.5 read-only wallet balance for the card (and the live cash line). Never signs.
     if (this.walletStatus.walletPublicKey && this.config.feedMode !== "replay") {
       this.walletTimer = setInterval(() => void this.refreshWallet(), this.config.mode === "live" ? 20_000 : 60_000);
@@ -595,6 +614,7 @@ export class Desk {
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.watchTimer) clearInterval(this.watchTimer);
     if (this.tapeTimer) clearInterval(this.tapeTimer);
+    if (this.orderTimer) clearInterval(this.orderTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
     this.persist();
     this.advisor.save();
@@ -884,6 +904,254 @@ export class Desk {
         ? { proceedsUsd: closed.proceedsUsd, pnlUsd: closed.pnlUsd, pnlPct: closed.pnlPct, exitPrice: closed.exitPrice, exitCode: closed.exitCode }
         : {})
     };
+  }
+
+
+  // ---------------------------------------------------------------- v13.11 orders
+
+  private saveOrders(): void {
+    this.store.writeJson("orders", this.orders.toJSON());
+    this.pinOrderMints();
+  }
+
+  /** Limit-buy coins stay quoted on the Tape quoter (batched, rate-safe) while their order is open. */
+  private pinOrderMints(): void {
+    this.tape?.pin(this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint));
+  }
+
+  /**
+   * The freshest real price an order may act on. Held coins: the book's confirmed mark (the one
+   * the hard stop uses). Limit buys: that, or the Tape quote, whichever is newer. Never a mark
+   * restored from disk, never one older than 30 s, never 0.
+   */
+  private orderMark(o: Pick<DeskOrder, "book" | "mint" | "side">, maxAgeMs = ORDER_MARK_MAX_AGE_MS, now = Date.now()): { price: number; at: number; source: string } | { stale: string } {
+    const book = o.book === "live" ? this.liveBook : this.book;
+    const cands: Array<{ price: number; at: number; source: string }> = [];
+    if (book) {
+      const at = book.markedAt(o.mint);
+      const p = book.lastPrice.get(o.mint);
+      if (at != null && p != null && p > 0 && Number.isFinite(p) && this.freshMark(o.book, o.mint, at)) cands.push({ price: p, at, source: "mark" });
+    }
+    if (o.side === "limit_buy") {
+      const q = this.tape?.get(o.mint);
+      if (q?.priceUsd != null && q.priceUsd > 0 && Number.isFinite(q.priceUsd)) cands.push({ price: q.priceUsd, at: q.at, source: q.source ?? "tape" });
+      if (o.book === "live") {
+        const at = this.book.markedAt(o.mint);
+        const p = this.book.lastPrice.get(o.mint);
+        if (at != null && p != null && p > 0 && this.freshMark("paper", o.mint, at)) cands.push({ price: p, at, source: "mark" });
+      }
+    }
+    const best = cands.sort((a, b) => b.at - a.at)[0];
+    if (!best) return { stale: "waiting: no price yet" };
+    const age = now - best.at;
+    if (age > maxAgeMs) return { stale: `waiting: price stale (${Math.round(age / 1000)}s old)` };
+    return best;
+  }
+
+  /** A mark restored from disk at boot is not a fresh price. */
+  private freshMark(book: "paper" | "live", mint: string, at: number): boolean {
+    const restored = this.bootMarks.get(`${book}:${mint}`);
+    return restored == null || at !== restored || at > this.bootAt;
+  }
+
+  /** v13.11 place a limit buy, take profit or stop. Checked against a fresh price; nothing fires at placement. */
+  placeOrder(input: OrderInput): { ok: true; order: DeskOrder; text: string } | { ok: false; error: string } {
+    const book = input.book === "live" ? "live" : "paper";
+    const mint = typeof input.mint === "string" ? input.mint.trim() : "";
+    if (!mint) return { ok: false, error: "Mint is required." };
+    const side = input.side;
+    const pbook = book === "live" ? this.liveBook : this.book;
+    const pos = pbook?.positions.get(mint);
+    const seen = this.sightings.get(mint) ?? this.lookups.get(mint)?.token;
+    const symbol = pos?.symbol ?? seen?.symbol ?? mint.slice(0, 4);
+    if (side === "limit_buy" && !seen && !pos) {
+      return { ok: false, error: `${symbol} has not been scouted or looked up. Open it in Add coin first, then set the limit.` };
+    }
+    if (side === "limit_buy" && pos) {
+      return { ok: false, error: `${symbol} is already open in the ${book} book (no averaging down). Set a stop or take profit on it instead.` };
+    }
+    // Placement accepts a price up to 2 minutes old; firing needs one under 30 s.
+    let markNow: number | null = null;
+    const m = this.orderMark({ book, mint, side: side === "limit_buy" ? "limit_buy" : "stop_sell" }, 120_000);
+    if ("price" in m) markNow = m.price;
+    else if (pos) {
+      const shown = this.displayMark(pos, book);
+      if (shown.price > 0 && Date.now() - shown.at <= 120_000) markNow = shown.price;
+    } else if (seen && seen.priceUsd > 0 && side === "limit_buy" && book === "paper") {
+      const at = this.book.markedAt(mint);
+      if (at != null && Date.now() - at <= 120_000) markNow = seen.priceUsd;
+    }
+    const hardStopPrice = pos ? assessPosition(pos, pbook!.price(mint, pos.entryPrice), this.config.rules).stopPrice : null;
+    const supply = this.supplyByMint.get(mint) ?? null;
+    const made = resolveOrder(input, {
+      symbol,
+      mark: markNow,
+      held: !!pos && !pos.closing,
+      entryPrice: pos?.entryPrice ?? null,
+      hardStopPrice,
+      hardStopPct: this.config.rules.stopLossPct,
+      supply,
+      liveArmed: !!this.liveBook
+    });
+    if (!made.ok) {
+      this.log({ stage: "system", kind: "reject", mint, symbol, code: "ORDER", message: `Order refused. ${made.error}` });
+      return made;
+    }
+    if (made.order.book === "live" && made.order.side === "limit_buy" && made.order.sizeUsd == null) made.order.sizeUsd = this.liveTradeUsd;
+    const added = this.orders.add(made.order);
+    if (!added.ok) return added;
+    this.saveOrders();
+    const text = `${describeOrder(made.order)} placed${made.order.book === "live" && !this.liveBook ? " · waiting: live not armed (never fills on paper)" : ""}.`;
+    this.log({ stage: "system", kind: "info", mint, symbol, code: "ORDER", message: `Order: ${text}` });
+    return { ok: true, order: made.order, text };
+  }
+
+  cancelOrder(id: string): { ok: true; order: DeskOrder } | { ok: false; error: string } {
+    const o = this.orders.get(id);
+    if (!o) return { ok: false, error: "No order with that id." };
+    if (o.status !== "open") return { ok: false, error: o.status === "working" ? "That order is firing right now and can't be canceled." : `That order is already ${o.status}.` };
+    this.orders.finish(o, "canceled", "Canceled by you.");
+    this.saveOrders();
+    this.log({ stage: "system", kind: "info", mint: o.mint, symbol: o.symbol, code: "ORDER", message: `Order canceled: ${describeOrder(o)}.` });
+    return { ok: true, order: o };
+  }
+
+  /** v13.11 check open orders (all, or one mint) against fresh prices and fire the ones that crossed. */
+  checkOrders(onlyMint?: string): void {
+    const now = Date.now();
+    let changed = false;
+    for (const o of this.orders.open()) {
+      if (onlyMint && o.mint !== onlyMint) continue;
+      if (o.status !== "open" || this.firingOrders.has(o.id)) continue;
+      if (o.book === "live" && !this.liveBook) {
+        if (o.note !== "waiting: live not armed") {
+          o.note = "waiting: live not armed";
+          changed = true;
+        }
+        continue;
+      }
+      const book = this.bk(o.book);
+      if (o.side !== "limit_buy") {
+        const pos = book.positions.get(o.mint);
+        if (!pos) {
+          this.orders.finish(o, "canceled", "Position closed before this order fired.", now);
+          changed = true;
+          continue;
+        }
+        if (pos.closing) continue;
+      } else if (book.positions.has(o.mint)) {
+        this.orders.finish(o, "canceled", `Already holding ${o.symbol} in the ${o.book} book.`, now);
+        changed = true;
+        continue;
+      }
+      if (o.nextTryAt && now < o.nextTryAt) continue;
+      const mark = this.orderMark(o, ORDER_MARK_MAX_AGE_MS, now);
+      if (!("price" in mark)) {
+        if (!o.note?.startsWith("Refused") && o.note !== mark.stale) {
+          o.note = mark.stale;
+          changed = true;
+        }
+        continue;
+      }
+      if (o.note?.startsWith("waiting:")) {
+        delete o.note;
+        changed = true;
+      }
+      if (crosses(o, mark.price)) {
+        // Not tracked with the pipeline jobs: the sell path drains those, and would wait on itself.
+        const job = this.fireOrder(o, mark.price, mark.source).catch((err) => console.error("[desk] order failed", err));
+        this.orderJobs.add(job);
+        void job.finally(() => this.orderJobs.delete(job));
+      }
+    }
+    if (changed) this.store.writeJson("orders", this.orders.toJSON());
+  }
+
+  private async fireOrder(o: DeskOrder, mark: number, source: string): Promise<void> {
+    if (this.firingOrders.has(o.id)) return;
+    this.firingOrders.add(o.id);
+    const now = Date.now();
+    o.status = "working";
+    o.firedAt = now;
+    o.firedMark = mark;
+    o.tries += 1;
+    o.updatedAt = now;
+    this.saveOrders();
+    this.log({ stage: "system", kind: "info", mint: o.mint, symbol: o.symbol, code: "ORDER", message: `Order triggered: ${describeOrder(o)}. Mark ${price(mark)} (${source}). Running the normal ${o.side === "limit_buy" ? "buy" : "sell"} checks.` });
+    try {
+      let ok = false;
+      let error = "";
+      let code = "";
+      let fill: number | undefined;
+      if (o.side === "limit_buy") {
+        // The quote that fired it is the newest price: the buy checks run against it, not an older mark.
+        if (source !== "mark" && !this.book.positions.has(o.mint)) {
+          this.book.mark(o.mint, mark);
+          const seen = this.sightings.get(o.mint);
+          if (seen) this.sightings.set(o.mint, { ...seen, priceUsd: mark });
+        }
+        const res = await this.manualBuy(o.mint, o.sizeUsd, { book: o.book });
+        ok = res.ok;
+        if (res.ok) fill = res.fillPriceUsd;
+        else {
+          error = res.error;
+          code = res.code;
+        }
+      } else {
+        const res = await this.closePosition(o.mint, o.fraction ?? 1, o.book);
+        ok = res.ok;
+        if (res.ok) fill = res.exitPrice;
+        else error = res.error;
+      }
+      const at = Date.now();
+      if (ok) {
+        o.fillPrice = fill;
+        this.orders.finish(o, "filled", `Filled${fill ? ` at ${price(fill)}` : ""} (trigger ${price(o.triggerPrice)}, mark ${price(mark)}).`, at);
+      } else if (o.side !== "limit_buy" && !this.bk(o.book).positions.has(o.mint)) {
+        this.orders.finish(o, "canceled", "Position closed before this order fired.", at);
+      } else if (PERMANENT_REFUSALS.has(code) || o.tries >= ORDER_MAX_TRIES) {
+        this.orders.finish(o, "failed", `Refused: ${error}${code === "HARD_KILL" ? "" : ` (${o.tries} tries)`}`, at);
+      } else {
+        o.status = "open";
+        o.nextTryAt = at + ORDER_RETRY_MS;
+        o.note = `Refused at ${price(mark)}: ${error} Retrying in ${Math.round(ORDER_RETRY_MS / 1000)}s (try ${o.tries} of ${ORDER_MAX_TRIES}).`;
+        o.updatedAt = at;
+      }
+      this.log({
+        stage: "system",
+        kind: ok ? "info" : "reject",
+        mint: o.mint,
+        symbol: o.symbol,
+        code: "ORDER",
+        message: `Order ${o.status}: ${describeOrder(o)}. ${o.note ?? ""}`.trim()
+      });
+    } catch (err) {
+      o.status = "open";
+      o.nextTryAt = Date.now() + ORDER_RETRY_MS;
+      o.note = `Refused: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      this.firingOrders.delete(o.id);
+      this.saveOrders();
+    }
+  }
+
+  /** Tests: wait for orders that are firing. */
+  async ordersSettled(): Promise<void> {
+    while (this.orderJobs.size) await Promise.all([...this.orderJobs]);
+  }
+
+  /** Open orders first, then the last finished ones, with the live distance to the trigger. */
+  private orderViews(): NonNullable<DeskSnapshot["orders"]> {
+    const now = Date.now();
+    const rank = (o: DeskOrder) => (o.status === "open" || o.status === "working" ? 0 : 1);
+    return [...this.orders.all()]
+      .sort((a, b) => rank(a) - rank(b) || b.updatedAt - a.updatedAt)
+      .map((o) => {
+        const m = o.status === "open" || o.status === "working" ? this.orderMark(o, 120_000, now) : null;
+        const markUsd = m && "price" in m ? m.price : null;
+        const waiting = o.status === "open" ? (o.book === "live" && !this.liveBook ? "waiting: live not armed" : o.note?.startsWith("waiting:") ? o.note : null) : null;
+        return { ...o, markUsd, distancePct: distance(o, markUsd), waiting, text: describeOrder(o) };
+      });
   }
 
   /** v13.3 Sell all: closes every open position at its current mark, one after another. */
@@ -1574,6 +1842,7 @@ export class Desk {
       liveBook: this.liveBookView(),
       liveNotArmed: this.liveNotArmedReason(),
       tapeQuotes: this.tape?.view() ?? {},
+      orders: this.orderViews(),
       wallet: this.walletView(),
       mode: this.config.mode,
       liveRequested: this.config.liveRequested,
@@ -2597,6 +2866,8 @@ export class Desk {
     }
     this.review(mint, priceUsd, kind);
     if (advise) this.publishAdvice(this.buildAdvice());
+    // v13.11: a held coin's order fires on the same confirmed mark the hard stop uses.
+    if (this.orders.open().some((o) => o.mint === mint)) this.checkOrders(mint);
   }
 
   /**
@@ -2642,7 +2913,9 @@ export class Desk {
     const stop = pos.live && seen.trailHintPrice != null ? Math.max(seen.stopPrice, seen.trailHintPrice) : seen.stopPrice;
     const drift = risk > 0 ? Math.abs(priceUsd / risk - 1) : 1;
     const lastAsk = this.lastConfirmAt.get(key) ?? 0;
-    if ((priceUsd <= stop && now - lastAsk >= 1_500) || (drift > 0.03 && now - lastAsk >= 5_000)) {
+    // v13.11: an instant on-chain mark across an order level asks the risk feed right away too.
+    const orderNear = this.orders.open().some((o) => o.mint === mint && o.book === kind && crosses(o, priceUsd));
+    if (((priceUsd <= stop || orderNear) && now - lastAsk >= 1_500) || (drift > 0.03 && now - lastAsk >= 5_000)) {
       this.lastConfirmAt.set(key, now);
       this.pricer.confirm(mint);
     }
@@ -2775,6 +3048,11 @@ export class Desk {
 
   private remember(token: CandidateToken): void {
     this.sightings.set(token.mint, { ...token, social: { ...token.social } });
+    // v13.11 supply from the first sighting where price and market cap came from the same read.
+    if (!this.supplyByMint.has(token.mint) && (token.marketCapUsd ?? 0) > 0 && token.priceUsd > 0) {
+      const supply = (token.marketCapUsd as number) / token.priceUsd;
+      if (Number.isFinite(supply) && supply > 0) this.supplyByMint.set(token.mint, supply);
+    }
     this.momentum.note(token.mint, token.priceUsd, token.liquidityUsd);
   }
 
@@ -2986,6 +3264,7 @@ export class Desk {
       if (!Number.isFinite(fraction) || fraction < HARD_RULES.trailArmPct - 1e-9) {
         return { ok: false, error: "Trail arm cannot be easier than 12%." };
       }
+      if (fraction > TRAIL_ARM_MAX + 1e-9) return { ok: false, error: "Trail arm can be at most 600%." };
       next.trailArmPct = clampTrailArmPct(raw);
     }
     if ("trailGapPct" in patch) {
@@ -3077,7 +3356,7 @@ export class Desk {
     if (typeof saved.stopLossPct === "number" && saved.stopLossPct > 0 && saved.stopLossPct <= HARD_RULES.stopLossPct + 1e-9) {
       this.config.rules.stopLossPct = clampStopLossPct(saved.stopLossPct);
     }
-    if (typeof saved.trailArmPct === "number") this.config.rules.trailArmPct = clampTrailArmPct(saved.trailArmPct);
+    if (typeof saved.trailArmPct === "number") this.config.rules.trailArmPct = clampTrailArmFraction(saved.trailArmPct);
     if (typeof saved.trailGapPct === "number") this.config.rules.trailGapPct = clampTrailGapPct(saved.trailGapPct);
     if (typeof saved.trailTakeProfit === "boolean") this.trailTakeProfit = saved.trailTakeProfit;
     if (typeof saved.autoBuy === "boolean") this.autoBuy = saved.autoBuy;

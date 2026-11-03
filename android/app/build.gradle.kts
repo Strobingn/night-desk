@@ -12,8 +12,8 @@ android {
         applicationId = "com.dirk.nightdesk"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "v13.10"
+        versionCode = 27
+        versionName = "v13.11"
     }
 
     buildTypes {

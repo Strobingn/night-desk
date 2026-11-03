@@ -11,7 +11,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class V122LinkTest {
     private val dead = "https://able-muslim-examines-disposition.trycloudflare.com"
-    private val live = "https://deaths-fridge-portal-neck.trycloudflare.com"
+    private val live = "https://fever-solved-permissions-variations.trycloudflare.com"
 
     @Test
     fun theUrlThatLastWorkedComesBeforeAStaleBeacon() {

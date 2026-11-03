@@ -79,7 +79,7 @@ export const SETTINGS_FIELDS: SettingField[] = [
   { key: "stopLossPct", label: "Hard stop %", group: "Exits / stops", kind: "slider", min: 1, max: 6, step: 0.5, unit: "%", ...pct, hint: "Locked at 6% or tighter. The desk refuses a looser stop." },
   { key: "cooldownHours", label: "Cooldown after a stop", group: "Exits / stops", kind: "slider", min: 6, max: 72, step: 1, unit: "h", toWire: same, fromState: same },
   { key: "trailTakeProfit", label: "Trailing take profit", group: "Exits / stops", kind: "toggle", hint: "Off by default. Winners stay until you sell." },
-  { key: "trailArmPct", label: "Trail arm %", group: "Exits / stops", kind: "slider", min: 12, max: 80, step: 1, unit: "%", ...pct },
+  { key: "trailArmPct", label: "Trail arm %", group: "Exits / stops", kind: "slider", min: 12, max: 600, step: 1, unit: "%", toWire: (d: number) => Math.round(d), fromState: pct.fromState, hint: "Profit the trail waits for before it locks in gains (12–600%)." },
   { key: "trailGapPct", label: "Trail gap %", group: "Exits / stops", kind: "slider", min: 0.5, max: 4, step: 0.5, unit: "%", ...pct },
   // Scout sources
   { key: "scoutPump", label: "Pump", group: "Scout sources", kind: "toggle", locked: true, hint: "Pump stays on. It is the primary feed." },

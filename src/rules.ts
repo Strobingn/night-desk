@@ -263,11 +263,23 @@ export function clampStopLossPct(raw: number, fallback = HARD_RULES.stopLossPct)
   return Math.min(HARD_RULES.stopLossPct, Math.max(0.01, Math.round(fraction * 10_000) / 10_000));
 }
 
-/** Arm percent as a fraction. Cannot be easier than the 12% hard floor. */
+/** v13.11 highest profit the trail can wait for before it arms (was 80%). */
+export const TRAIL_ARM_MAX = 6;
+
+/**
+ * Arm percent as a fraction. Cannot be easier than the 12% hard floor; at most 600%.
+ * A number above 1 is a percent (15 = 15%, 600 = 600%); 1 or less is a fraction.
+ */
 export function clampTrailArmPct(raw: number, fallback = HARD_RULES.trailArmPct): number {
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
   const fraction = raw > 1 ? raw / 100 : raw;
-  return Math.min(0.8, Math.max(HARD_RULES.trailArmPct, Math.round(fraction * 10_000) / 10_000));
+  return Math.min(TRAIL_ARM_MAX, Math.max(HARD_RULES.trailArmPct, Math.round(fraction * 10_000) / 10_000));
+}
+
+/** v13.11 a saved arm (always a fraction, e.g. 0.8 or 6 for 600%) back into the 12%–600% band. */
+export function clampTrailArmFraction(fraction: number, fallback = HARD_RULES.trailArmPct): number {
+  if (!Number.isFinite(fraction) || fraction <= 0) return fallback;
+  return Math.min(TRAIL_ARM_MAX, Math.max(HARD_RULES.trailArmPct, Math.round(fraction * 10_000) / 10_000));
 }
 
 /** Trail gap as a fraction. Cannot be wider than 4%. */

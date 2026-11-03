@@ -100,6 +100,7 @@ export const TAPE_TICK_MS = 8_000;
 export const TAPE_STALE_MS = 20_000;
 export const TAPE_MAX_TRACKED = 90;
 export const TAPE_DEX_COOLOFF_MS = 60_000;
+export const TAPE_PINNED_STALE_MS = 10_000;
 
 /** Short Tape reason from a longer curve-reader reason. */
 export function shortWhy(reason: string | undefined, pumpLike: boolean): string {
@@ -116,6 +117,8 @@ export class TapeQuoter {
   private quotes = new Map<string, TapeQuote>();
   private dexPausedUntil = 0;
   private running = false;
+  /** v13.11 mints with an open limit order: always tracked, re-quoted every 10 s. */
+  private pinned = new Set<string>();
   stats = { ticks: 0, dexCalls: 0, dexErrors: 0, curveCalls: 0, jupCalls: 0 };
 
   constructor(private readonly deps: TapeQuoterDeps) {}
@@ -129,11 +132,23 @@ export class TapeQuoter {
     if (!mint) return;
     this.tracked.delete(mint);
     this.tracked.set(mint, { source, seenAt: this.now() });
-    while (this.tracked.size > TAPE_MAX_TRACKED) {
-      const oldest = this.tracked.keys().next().value as string;
-      this.tracked.delete(oldest);
-      this.quotes.delete(oldest);
+    this.evict();
+  }
+
+  private evict(): void {
+    for (const key of [...this.tracked.keys()]) {
+      if (this.tracked.size <= TAPE_MAX_TRACKED + this.pinned.size) break;
+      if (this.pinned.has(key)) continue;
+      this.tracked.delete(key);
+      this.quotes.delete(key);
     }
+  }
+
+  /** v13.11 keep these mints quoted (limit orders). Replaces the previous pin set. */
+  pin(mints: Iterable<string>, source = "order"): void {
+    this.pinned = new Set([...mints].filter(Boolean));
+    for (const m of this.pinned) if (!this.tracked.has(m)) this.tracked.set(m, { source, seenAt: this.now() });
+    this.evict();
   }
 
   get(mint: string): TapeQuote | undefined {
@@ -161,7 +176,11 @@ export class TapeQuoter {
       })
       .sort((a, b) => (this.quotes.get(a[0])!.at - this.quotes.get(b[0])!.at))
       .map(([m]) => m);
-    return [...never, ...stale].slice(0, max);
+    const pinnedDue = [...this.pinned].filter((m) => {
+      const q = this.quotes.get(m);
+      return q == null || now - q.at >= TAPE_PINNED_STALE_MS;
+    });
+    return [...new Set([...pinnedDue, ...never, ...stale])].slice(0, max);
   }
 
   /** One batched pass. Safe to call on a timer; overlapping calls are skipped. */

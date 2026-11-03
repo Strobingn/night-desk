@@ -722,3 +722,61 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 
 /* v13.10 Tape: a short reason instead of a bare dash. */
 .coin-card .cc-stat b.why, .tape-screen .coin-card .cc-chgbox b.why, .tape-screen .coin-card .cc-stats.inline .cc-stat b.why { font-size: 11px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+
+/* v13.11 limit / take-profit / stop orders */
+.order-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.order-bar .ob-label { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; margin-right: 2px; }
+.ot-chip { border: 1px solid var(--line-strong); background: var(--surface); color: var(--dim); font-weight: 800; font-size: 12.5px; border-radius: 999px; padding: 6px 11px; min-height: 32px; cursor: pointer; }
+.ot-chip.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.ot-chip.side-take_profit { color: var(--up); border-color: color-mix(in srgb, var(--up) 45%, transparent); }
+.ot-chip.side-take_profit.on { background: var(--up); color: var(--on-up); }
+.ot-chip.side-stop_sell { color: var(--down); border-color: color-mix(in srgb, var(--down) 45%, transparent); }
+.ot-chip.side-stop_sell.on { background: var(--down); color: var(--on-down); }
+.ot-chip.side-limit_buy { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, transparent); }
+.ot-chip.side-limit_buy.on { background: var(--blue); color: #001427; }
+.ot-chip.book-live.on { background: #ff2e7e; border-color: #ff2e7e; color: #fff; }
+.ot-chip.book-paper.on { background: #2b3a55; border-color: #2b3a55; color: #9cc3ff; }
+.order-ticket { margin-top: 8px; padding: 10px; border-radius: 14px; background: color-mix(in srgb, var(--accent) 7%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); display: grid; gap: 8px; }
+.order-ticket.live { border-color: #ff2e7e; background: color-mix(in srgb, #ff2e7e 8%, var(--surface)); }
+.order-ticket .ot-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.order-ticket .ot-book { display: inline-flex; gap: 4px; margin-left: auto; }
+.order-ticket .ot-row > .book-tag { margin-left: auto; }
+.order-ticket .ot-x { border: 0; background: transparent; color: var(--muted); font-size: 16px; padding: 4px 6px; cursor: pointer; }
+.ot-input { display: inline-flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; min-height: 38px; flex: 1 1 120px; }
+.ot-input.size { flex: 0 1 96px; }
+.ot-input span { color: var(--muted); font-weight: 800; font-size: 12px; }
+.ot-input input { background: transparent; border: 0; color: var(--ink); font-size: 16px; font-weight: 800; width: 100%; min-width: 0; outline: none; font-variant-numeric: tabular-nums; }
+.ot-preview { margin: 0; font-size: 12px; color: var(--dim); }
+.ot-place { border: 0; border-radius: 12px; min-height: 42px; font-weight: 900; font-size: 15px; cursor: pointer; background: var(--accent); color: var(--on-accent); }
+.ot-place.side-take_profit { background: var(--up); color: var(--on-up); }
+.ot-place.side-stop_sell { background: var(--down); color: var(--on-down); }
+.ot-place.side-limit_buy { background: var(--blue); color: #001427; }
+.ot-place:disabled { opacity: 0.5; }
+.order-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.order-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 800; border-radius: 999px; padding: 3px 4px 3px 9px; background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink); }
+.order-chip.side-take_profit { border-color: var(--up); }
+.order-chip.side-stop_sell { border-color: var(--down); }
+.order-chip.side-limit_buy { border-color: var(--blue); }
+.order-chip.waiting { border-style: dashed; opacity: 0.85; }
+.order-chip small { color: var(--muted); font-weight: 700; }
+.order-chip b.lv { background: #ff2e7e; color: #fff; border-radius: 5px; padding: 0 4px; font-size: 10px; }
+.order-chip button { border: 0; background: var(--line); color: var(--ink); border-radius: 999px; width: 22px; height: 22px; font-size: 11px; cursor: pointer; }
+.orders-card .order-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.order-row { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); }
+.order-row.waiting { border-style: dashed; }
+.order-row.done { opacity: 0.7; }
+.order-row .ord-side { font-size: 10.5px; font-weight: 900; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 6px; padding: 3px 6px; white-space: nowrap; }
+.ord-side.side-take_profit { background: var(--up); color: var(--on-up); }
+.ord-side.side-stop_sell { background: var(--down); color: var(--on-down); }
+.ord-side.side-limit_buy { background: var(--blue); color: #001427; }
+.order-row .ord-main { display: grid; min-width: 0; flex: 1; }
+.order-row .ord-main b { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.order-row .ord-main small { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.order-row .ord-cancel { border: 1px solid var(--line-strong); background: transparent; color: var(--ink); border-radius: 10px; padding: 6px 10px; font-weight: 800; min-height: 34px; cursor: pointer; }
+.limit-btn.on { background: var(--blue); color: #001427; }
+.order-row .ord-trig { font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.ord-trig.side-take_profit { color: var(--up); }
+.ord-trig.side-stop_sell { color: var(--down); }
+.ord-trig.side-limit_buy { color: var(--blue); }
+.order-row .ord-main small.wait { color: var(--amber); }
+.order-row.waiting { border-color: color-mix(in srgb, var(--amber) 60%, transparent); }

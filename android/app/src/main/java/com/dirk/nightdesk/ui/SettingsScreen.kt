@@ -208,7 +208,7 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
             Text("Locked at 6% or tighter. The desk refuses a looser stop.", color = Dim, fontSize = 12.sp)
             ExactSlider("Cooldown hours", draft.cooldown, 6f..72f, 1f, { "%.0f".format(it) }) { draft = draft.copy(cooldown = it.coerceAtLeast(6f)) }
             ExactSlider("Daily max loss $", draft.dailyLoss, 0f..1000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(dailyLoss = it) }
-            ExactSlider("Trail arm %", draft.arm, 12f..80f, 1f, { "%.0f".format(it) }) { draft = draft.copy(arm = it.coerceAtLeast(12f)) }
+            ExactSlider("Trail arm %", draft.arm, 12f..600f, 1f, { "%.0f".format(it) }) { draft = draft.copy(arm = it.coerceAtLeast(12f)) }
             ExactSlider("Trail gap %", draft.gap, 0.5f..4f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(gap = it.coerceAtMost(4f)) }
             ToggleRow("Trailing take profit", draft.trail) { draft = draft.copy(trail = it) }
             Text("Off by default. Winners stay until you sell. Arm cannot be easier than 12%. Gap cannot be wider than 4%.", color = Dim, fontSize = 12.sp)

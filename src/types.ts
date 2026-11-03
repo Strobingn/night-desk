@@ -609,6 +609,8 @@ export interface DeskSnapshot {
   liveNotArmed?: string | null;
   /** v13.10 live price / 5m & 1h volume / 1h change per Tape coin (killed ones too). Missing value = null + `why`. */
   tapeQuotes?: Record<string, import("./market/tape-quotes.js").TapeQuote>;
+  /** v13.11 limit / take-profit / stop orders, open first. */
+  orders?: Array<import("./desk/orders.js").DeskOrder & { markUsd: number | null; distancePct: number | null; waiting: string | null; text: string }>;
   /** v13.5 wallet card. */
   wallet?: WalletView;
   mode: "paper" | "live";

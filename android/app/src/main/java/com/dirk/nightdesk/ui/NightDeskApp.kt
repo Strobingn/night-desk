@@ -134,7 +134,9 @@ private fun stageColor(stage: String): Color = when (stage) {
 }
 
 @Composable
-private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null) {
+private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null, orders: OrderActions? = null) {
+    // v13.11 limit buy ticket on this card.
+    var limitOpen by remember(coin.mint) { mutableStateOf(orders?.openFor?.let { it.first == coin.mint && it.second == "limit_buy" } == true) }
     // v13.4 compact card: same facts and buttons as v13.1, packed into three rows so 4-5 cards fit
     // on one phone screen. Symbol, 1h change and volume stay large; nothing was dropped.
     val vc = verdictColor(coin.verdict)
@@ -228,7 +230,11 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                 if (oneTap != null) {
                     // v13.3: one tap buys now at the one-tap size; "Buy…" keeps the confirm dialog.
                     val inFlight = oneTap.buying(coin.mint)
-                    BigButton(if (inFlight) "Buying…" else oneTap.buyLabel, P.up, P.onUp, Modifier.width(118.dp), height = 38.dp, enabled = !inFlight) { oneTap.onBuy(coin.mint, coin.symbol) }
+                    BigButton(if (inFlight) "Buying…" else oneTap.buyLabel, P.up, P.onUp, Modifier.width(if (orders != null) 108.dp else 118.dp), height = 38.dp, enabled = !inFlight) { oneTap.onBuy(coin.mint, coin.symbol) }
+                    if (orders != null) {
+                        Spacer(Modifier.width(6.dp))
+                        BigButton("Limit", if (limitOpen) P.blue else P.card3, if (limitOpen) Color(0xFF001427) else P.blue, Modifier.width(58.dp), border = P.blue.copy(alpha = 0.6f), height = 38.dp) { limitOpen = !limitOpen }
+                    }
                     Spacer(Modifier.width(6.dp))
                     BigButton("Buy…", P.card3, P.ink, Modifier.width(60.dp), border = P.lineStrong, height = 38.dp, onClick = onBuy)
                 } else {
@@ -251,6 +257,11 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
         // v13.9: a coin the paper book holds gets LIVE BUY / LIVE SELL right on its Tape card.
         if (oneTap != null && coin.verdict == Verdict.OPEN && oneTap.paperHeld.containsKey(coin.mint)) {
             LivePair(oneTap, coin.mint, coin.symbol, Modifier.padding(top = 6.dp), compact = true)
+        }
+        if (orders != null) {
+            val mine = orders.openOn(coin.mint)
+            if (mine.isNotEmpty()) Box(Modifier.padding(top = 6.dp)) { OrderChips(orders, mine) }
+            if (limitOpen) Box(Modifier.padding(top = 8.dp)) { LimitBuyTicket(orders, coin.mint, coin.symbol, coin.mark) { limitOpen = false } }
         }
     }
 }
@@ -361,6 +372,15 @@ fun NightDeskApp(desk: DeskRepository) {
             }
         }
     }
+    // v13.11 limit / take-profit / stop orders (paper and live).
+    val orderActions = snap?.let { s ->
+        orderActionsFor(
+            s,
+            oneTap?.tapUsd ?: 50.0,
+            { side, mint, basis, value, live, pct, size -> scope.launch { desk.placeOrder(side, mint, basis, value, live, pct, size) } },
+            { id -> scope.launch { desk.cancelOrder(id) } }
+        )
+    }
     val positionCount = snap?.positions?.size ?: 0
     Scaffold(
         containerColor = P.bg,
@@ -435,7 +455,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     onOpenCoin = { mint ->
                         addPrefill = mint to ((addPrefill?.second ?: 0) + 1)
                         tab = 2
-                    }
+                    },
+                    orders = orderActions
                 )
                 1 -> TapeScreen(
                     snap?.events.orEmpty(),
@@ -449,7 +470,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     headerLive = live,
                     mode = snap?.mode ?: "paper",
                     liveScope = snap?.liveScope,
-                    tapeQuotes = snap?.tapeQuotes.orEmpty()
+                    tapeQuotes = snap?.tapeQuotes.orEmpty(),
+                    tapeOrders = orderActions
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -555,7 +577,9 @@ private fun BookScreen(
     /** v13.6 tapping a held coin opens its Add coin card. */
     onOpenCoin: (String) -> Unit = {},
     /** v13.7 close a live-book position (real sell). */
-    onCloseLive: (String) -> Unit = {}
+    onCloseLive: (String) -> Unit = {},
+    /** v13.11 limit / take-profit / stop orders. */
+    orders: OrderActions? = null
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     val liveBook = snap?.liveBook
@@ -591,7 +615,7 @@ private fun BookScreen(
                 item { Text("No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real ${money(liveBook.tradeUsd)} buy.", color = Dim, fontSize = 14.sp) }
             } else {
                 itemsIndexed(liveBook.positions, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
-                    OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin)
+                    OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
                 }
             }
         }
@@ -614,9 +638,10 @@ private fun BookScreen(
             }
         } else {
             itemsIndexed(snap.positions, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
-                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin)
+                OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
             }
         }
+        if (orders != null) item { OrdersCard(orders) }
         item { WalletCard(snap) }
         item { LiveReadyCard(snap?.readiness, onReady) }
         item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
@@ -1031,7 +1056,8 @@ private fun OpenPositionCard(
     armPct: Double = 0.12,
     trailOn: Boolean = false,
     oneTap: OneTapUi? = null,
-    onOpenCoin: (String) -> Unit = {}
+    onOpenCoin: (String) -> Unit = {},
+    orders: OrderActions? = null
 ) {
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
@@ -1108,6 +1134,10 @@ private fun OpenPositionCard(
                 BigButton("Sell 50%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 50 }
             }
             BigButton(if (pos.live) "Sell 100% LIVE" else "Sell 100%", P.down, P.onDown, Modifier.weight(1f)) { sellAsk = 100 }
+        }
+        // v13.11 take profit / stop orders on this position.
+        if (orders != null) {
+            PositionOrders(orders, pos.mint, pos.symbol, pos.live, pos.markPrice.takeIf { it > 0 }, pos.entryPrice.takeIf { it > 0 }, pos.stopPrice.takeIf { it > 0 }, Modifier.padding(top = 12.dp))
         }
         FlowRow(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             chartLinks(pos.mint).forEach { (label, url) ->
@@ -1204,7 +1234,8 @@ private fun TapeScreen(
     headerLive: Boolean = true,
     mode: String = "paper",
     liveScope: String? = null,
-    tapeQuotes: Map<String, com.dirk.nightdesk.TapeQuote> = emptyMap()
+    tapeQuotes: Map<String, com.dirk.nightdesk.TapeQuote> = emptyMap(),
+    tapeOrders: OrderActions? = null
 ) {
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
@@ -1440,7 +1471,8 @@ private fun TapeScreen(
                             sizeText = capText
                             askBuy = true
                         },
-                        oneTap = oneTap
+                        oneTap = oneTap,
+                        orders = tapeOrders
                     )
                 }
             }
@@ -1928,7 +1960,8 @@ private fun clock(ts: Long): String = if (ts <= 0) "—" else clockFmt.format(In
 
 /** v13 render harness for screenshot tests: the real screens with a fixed snapshot and no network. */
 @Composable
-internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null, scoutOpen: Boolean? = null, sheetOpen: Boolean = false, addPreview: Pair<String, com.dirk.nightdesk.CoinLookup>? = null) {
+internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null, scoutOpen: Boolean? = null, sheetOpen: Boolean = false, addPreview: Pair<String, com.dirk.nightdesk.CoinLookup>? = null, orderOpenFor: Pair<String, String>? = null) {
+    val previewOrders = orderActionsFor(snap, oneTap?.tapUsd ?: 50.0, { _, _, _, _, _, _, _ -> }, {}, orderOpenFor)
     NightTheme {
         Scaffold(
             containerColor = P.bg,
@@ -1956,7 +1989,7 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
             Column(Modifier.fillMaxSize().padding(padding).background(P.bg)) {
                 if (tab != 1) Header(status = "Connected", live = true, mode = snap.mode, liveScope = snap.liveScope)
                 when (tab) {
-                    0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> }, oneTap)
+                    0 -> BookScreen(snap, {}, { _, _ -> }, {}, {}, { _, _ -> }, oneTap, orders = previewOrders)
                     1 -> TapeScreen(
                         events = snap.events,
                         positionCapUsd = snap.positionCapUsd,
@@ -1971,7 +2004,8 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                         headerLive = true,
                         mode = snap.mode,
                         liveScope = snap.liveScope,
-                        tapeQuotes = snap.tapeQuotes
+                        tapeQuotes = snap.tapeQuotes,
+                        tapeOrders = previewOrders
                     )
                     2 -> if (addPreview != null) {
                         AddCoinScreen(com.dirk.nightdesk.DeskRepository.get(LocalContext.current), snap, null, oneTap, preview = addPreview)
@@ -1984,3 +2018,22 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
         }
     }
 }
+
+/** v13.11 the order UI's view of the desk. */
+internal fun orderActionsFor(
+    snap: DeskSnapshot,
+    tapUsd: Double,
+    place: (String, String, String, Double, Boolean, Int?, Double?) -> Unit,
+    cancel: (String) -> Unit,
+    openFor: Pair<String, String>? = null
+): OrderActions = OrderActions(
+    orders = snap.orders,
+    liveArmed = snap.liveBook != null,
+    liveTradeUsd = snap.liveTradeUsd,
+    tapUsd = tapUsd,
+    stopLossPct = snap.stopLossPct,
+    place = place,
+    cancel = cancel,
+    openFor = openFor
+)
+

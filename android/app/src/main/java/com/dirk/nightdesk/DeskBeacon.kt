@@ -17,7 +17,7 @@ object DeskBeacon {
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFpdnF2d2xybXJnanBpcWd2bXp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIzMzM2MzYsImV4cCI6MjEwNzkwOTYzNn0.QZ5eaP0a-9masw5X8y24ivAoKoAvFisdz0OC8ThueOI"
     const val LAN_URL = "http://192.168.1.242:4721"
     /** Used when the beacon row is empty and nothing else has worked. */
-    const val DEFAULT_PUBLIC_URL = "https://deaths-fridge-portal-neck.trycloudflare.com"
+    const val DEFAULT_PUBLIC_URL = "https://fever-solved-permissions-variations.trycloudflare.com"
 
     private val http = OkHttpClient.Builder()
         .callTimeout(8, TimeUnit.SECONDS)

@@ -67,6 +67,20 @@ internal fun candidateUrls(saved: DeskLink, beaconUrl: String?, lastGood: String
     return out.map { (url, source) -> ResolvedDesk(url, source) }
 }
 
+private val TUNNEL_RE = Regex("""^https://[a-z0-9-]+\.trycloudflare\.com$""")
+
+/**
+ * v13.11 the saved Override URL to store after the desk reports its current tunnel, or null to
+ * keep it. A blank or old trycloudflare URL becomes the new tunnel. A LAN / custom URL is kept.
+ */
+internal fun upgradeSavedUrl(saved: String, reported: String): String? {
+    val now = reported.trim().trimEnd('/')
+    if (!TUNNEL_RE.matches(now)) return null
+    val old = saved.trim().trimEnd('/')
+    if (old == now) return null
+    return if (old.isEmpty() || TUNNEL_RE.matches(old)) now else null
+}
+
 /** The desk's own public tunnel URL from /api/health (v12.2 desks), or null. */
 internal fun parseHealthPublicUrl(body: String): String? = runCatching {
     val json = JSONObject(body)
@@ -349,7 +363,14 @@ class DeskRepository private constructor(private val context: Context) {
 
     private fun rememberDiscovered(url: String) {
         if (url.isBlank()) return
-        scope.launch { context.deskStore.edit { prefs -> prefs[KEY_DISCOVERED] = url } }
+        scope.launch {
+            context.deskStore.edit { prefs ->
+                prefs[KEY_DISCOVERED] = url
+                // v13.11: a saved trycloudflare Override URL follows the desk's new tunnel on its own,
+                // so a tunnel restart (or an APK update) never needs the URL typed again.
+                upgradeSavedUrl(prefs[KEY_URL].orEmpty(), url)?.let { prefs[KEY_URL] = it }
+            }
+        }
     }
 
     private suspend fun probe(url: String): Boolean = withContext(Dispatchers.IO) {
@@ -432,6 +453,43 @@ class DeskRepository private constructor(private val context: Context) {
                 DeskNotice(true, if (percent >= 100) "Closed." else "Sold $percent%$tail.")
             },
             onFailure = { err -> DeskNotice(false, err.message ?: "Sell failed.") }
+        )
+        _notice.value = notice
+        refresh()
+        notice
+    }
+
+    /** v13.11 place a limit buy / take profit / stop. The desk checks it against a fresh price; nothing fires now. */
+    suspend fun placeOrder(
+        side: String,
+        mint: String,
+        basis: String,
+        value: Double,
+        live: Boolean,
+        percent: Int? = null,
+        sizeUsd: Double? = null
+    ): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+        val body = JSONObject().put("side", side).put("mint", mint).put("basis", basis).put("value", value)
+            .put("book", if (live) "live" else "paper").put("idemKey", java.util.UUID.randomUUID().toString())
+        if (percent != null) body.put("percent", percent)
+        if (sizeUsd != null && sizeUsd.isFinite()) body.put("sizeUsd", sizeUsd)
+        val notice = post("$base/api/orders", body.toString()).fold(
+            onSuccess = { raw -> DeskNotice(true, runCatching { JSONObject(raw).optString("text") }.getOrNull().orEmpty().ifBlank { "Order placed." }) },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Order refused.") }
+        )
+        _notice.value = notice
+        refresh()
+        notice
+    }
+
+    suspend fun cancelOrder(id: String): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+        val notice = post("$base/api/orders/cancel", JSONObject().put("id", id).toString()).fold(
+            onSuccess = { DeskNotice(true, "Order canceled.") },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Cancel failed.") }
         )
         _notice.value = notice
         refresh()

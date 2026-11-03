@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { OpenOrdersCard, OrderChips, OrderTicket } from "./Orders";
 import { liveAgeMs, markFreshness, sourceAgeLabel, updatedLabel } from "../marks";
 import { api } from "../api";
 import { chartLinks, clock, px, signedPct, signedUsd, usd } from "../format";
@@ -73,6 +74,8 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
           ))}
         </div>
       )}
+
+      <OpenOrdersCard snap={snap} actions={actions} />
 
       <section className="card chart-card">
         <header>
@@ -188,6 +191,8 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
   const live = pos.book === "live";
   const valueUsd = pos.marketValueUsd;
   const stopDist = pos.markPrice > 0 ? pos.stopPrice / pos.markPrice - 1 : null;
+  // v13.11 order ticket on this position (take profit / stop).
+  const [ticket, setTicket] = useState<null | "take_profit" | "stop_sell">(null);
   return (
     <article className={`pos-card ${pos.pnlUsd >= 0 ? "is-up" : "is-down"}${live ? " live-pos" : ""}`}>
       <header>
@@ -257,6 +262,35 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
           {busy === `${pos.mint}:100` ? "Closing" : "Close"} 100%{live ? " LIVE" : ""}
         </button>
       </div>
+      {snap ? (
+        <>
+          <div className="order-bar" role="group" aria-label={`Orders on ${pos.symbol}`}>
+            <span className="ob-label">Orders{live ? " · LIVE" : ""}</span>
+            <button type="button" className={`ot-chip side-take_profit${ticket === "take_profit" ? " on" : ""}`} onClick={() => setTicket(ticket === "take_profit" ? null : "take_profit")}>
+              ▲ Take profit
+            </button>
+            <button type="button" className={`ot-chip side-stop_sell${ticket === "stop_sell" ? " on" : ""}`} onClick={() => setTicket(ticket === "stop_sell" ? null : "stop_sell")}>
+              ▼ Stop
+            </button>
+          </div>
+          <OrderChips snap={snap} actions={actions} mint={pos.mint} book={pos.book === "live" ? "live" : "paper"} />
+          {ticket ? (
+            <OrderTicket
+              key={ticket}
+              snap={snap}
+              actions={actions}
+              mint={pos.mint}
+              symbol={pos.symbol}
+              sides={ticket === "take_profit" ? ["take_profit", "stop_sell"] : ["stop_sell", "take_profit"]}
+              book={live ? "live" : "paper"}
+              mark={pos.markPrice > 0 ? pos.markPrice : null}
+              entry={pos.entryPrice > 0 ? pos.entryPrice : null}
+              stopPrice={pos.stopPrice}
+              onClose={() => setTicket(null)}
+            />
+          ) : null}
+        </>
+      ) : null}
       <div className="links">
         {chartLinks(pos.mint).map((link) => (
           <a key={link.label} className="ghost" href={link.href} target="_blank" rel="noopener noreferrer">
@@ -290,7 +324,7 @@ function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions:
       ) : (
         <div className="positions">
           {lb.positions.map((pos, index) => (
-            <PositionCard key={`live:${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} />
+            <PositionCard key={`live:${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} snap={snap} />
           ))}
         </div>
       )}

@@ -192,6 +192,30 @@ export function startServer(
         const result = await job;
         return json(res, statusOf(result), result);
       }
+      // v13.11 limit / take-profit / stop orders. Placing never fires; cancel works on open orders.
+      if (url.pathname === "/api/orders" && req.method === "GET") {
+        return json(res, 200, { ok: true, orders: desk.snapshot().orders ?? [] });
+      }
+      if (url.pathname === "/api/orders" && req.method === "POST") {
+        const body = await readJson(req);
+        const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+        const replay = idem.lookup("order", record.idemKey);
+        if (replay) {
+          const first = await replay;
+          return json(res, first.status, { ...first.body, replayed: true });
+        }
+        const job = Promise.resolve(desk.placeOrder(record));
+        idem.remember("order", record.idemKey, job, (r) => (r.ok ? 200 : 400));
+        const result = await job;
+        return json(res, result.ok ? 200 : 400, result);
+      }
+      if (url.pathname === "/api/orders/cancel" && req.method === "POST") {
+        const body = await readJson(req);
+        const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+        const id = typeof record.id === "string" ? record.id : url.searchParams.get("id") ?? "";
+        const result = desk.cancelOrder(id);
+        return json(res, result.ok ? 200 : result.error.startsWith("No order") ? 404 : 400, result);
+      }
       if (url.pathname === "/api/positions/sell-all" && req.method === "POST") {
         const body = await readJson(req);
         const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};

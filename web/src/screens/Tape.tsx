@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { OrderChips, OrderTicket } from "./Orders";
 import { countNewSince, initialTapeFollow, pausedLabel, stepTapeFollow, type TapeFollowState } from "../../../src/desk/tape-follow";
 import { api } from "../api";
 import { clock, signedUsd } from "../format";
@@ -391,6 +392,7 @@ export function TapeScreen({
 function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { coin: CoinRow; selected: boolean; busy: boolean; actions: DeskActions; onSelect: () => void; onBuy: () => void; snap?: DeskSnapshot }) {
   // v13.9: a coin the paper book holds gets LIVE BUY / LIVE SELL right on its Tape card.
   const paperPos = snap?.positions.find((pos) => pos.mint === coin.mint) ?? null;
+  const [limitOpen, setLimitOpen] = useState(false);
   const tone: Record<Verdict, "up" | "down" | "flat"> = { open: "up", bought: "up", trade: "up", near: "flat", killed: "down", seen: "flat" };
   const rank = coin.volRank;
   const top = rank != null && rank <= TOP_VOLUME;
@@ -443,6 +445,19 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
         {coin.verdict !== "open" ? (
           <span className="cc-buys">
             <TapBuyButton mint={coin.mint} symbol={coin.symbol} actions={actions} />
+            {snap ? (
+              <button
+                className={`tonal sm limit-btn${limitOpen ? " on" : ""}`}
+                type="button"
+                title="Limit buy: buy when the price falls to your target"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setLimitOpen(!limitOpen);
+                }}
+              >
+                Limit
+              </button>
+            ) : null}
             <button
               className="tonal sm"
               type="button"
@@ -472,6 +487,10 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
         )}
       </div>
       {paperPos && snap ? <LiveTapPair snap={snap} mint={coin.mint} symbol={coin.symbol} actions={actions} compact /> : null}
+      {snap ? <OrderChips snap={snap} actions={actions} mint={coin.mint} /> : null}
+      {snap && limitOpen ? (
+        <OrderTicket snap={snap} actions={actions} mint={coin.mint} symbol={coin.symbol} sides={["limit_buy"]} mark={coin.mark ?? null} entry={null} onClose={() => setLimitOpen(false)} />
+      ) : null}
     </article>
   );
 }

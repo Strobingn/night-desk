@@ -1,6 +1,7 @@
 package com.dirk.nightdesk
 
 import org.json.JSONObject
+import org.json.JSONArray
 
 data class AdviceNote(
     val id: String,
@@ -399,6 +400,8 @@ data class DeskSnapshot(
     val liveNotArmed: String? = null,
     /** v13.10 live price / volume / change per Tape coin. */
     val tapeQuotes: Map<String, TapeQuote> = emptyMap(),
+    /** v13.11 limit / take-profit / stop orders, open first. */
+    val orders: List<DeskOrder> = emptyList(),
     /** v13.7 saved toggle: AI auto-buys go live too (default off). */
     val liveAutoBuy: Boolean = false,
     /** v13 hero card. */
@@ -705,6 +708,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         liveBook = if (data.isNull("liveBook")) null else parseLiveBook(data.optJSONObject("liveBook"), receivedAt),
         liveNotArmed = if (data.isNull("liveNotArmed")) null else data.optText("liveNotArmed").ifBlank { null },
         tapeQuotes = parseTapeQuotes(data.optJSONObject("tapeQuotes")),
+        orders = parseOrders(data.optJSONArray("orders")),
         liveAutoBuy = prefs?.optBoolean("liveAutoBuy", false) ?: false,
         startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
         sessionPnlPct = data.optFinite("sessionPnlPct"),
@@ -885,6 +889,57 @@ internal fun parseTapeQuotes(obj: JSONObject?): Map<String, TapeQuote> {
             source = if (q.isNull("source")) null else q.optString("source").ifBlank { null },
             at = q.optLong("at"),
             why = if (q.isNull("why")) null else q.optString("why").ifBlank { null }
+        )
+    }
+    return out
+}
+
+/** v13.11 one limit buy / take profit / stop from /api/state `orders`. */
+data class DeskOrder(
+    val id: String,
+    val book: String,
+    val side: String,
+    val mint: String,
+    val symbol: String,
+    val triggerPrice: Double,
+    val fraction: Double?,
+    val sizeUsd: Double?,
+    val status: String,
+    val note: String?,
+    val waiting: String?,
+    val markUsd: Double?,
+    val distancePct: Double?,
+    val text: String
+) {
+    val isOpen: Boolean get() = status == "open" || status == "working"
+    val live: Boolean get() = book == "live"
+}
+
+/** Orders with no real trigger price are dropped (never shown as 0). */
+internal fun parseOrders(rows: JSONArray?): List<DeskOrder> {
+    if (rows == null) return emptyList()
+    val out = ArrayList<DeskOrder>()
+    fun JSONObject.num(key: String): Double? = if (!has(key) || isNull(key)) null else optDouble(key, Double.NaN).takeIf { it.isFinite() }
+    fun JSONObject.str(key: String): String? = if (!has(key) || isNull(key)) null else optString(key).ifBlank { null }
+    for (i in 0 until rows.length()) {
+        val o = rows.optJSONObject(i) ?: continue
+        val trigger = o.num("triggerPrice")?.takeIf { it > 0 } ?: continue
+        val id = o.str("id") ?: continue
+        out += DeskOrder(
+            id = id,
+            book = if (o.str("book") == "live") "live" else "paper",
+            side = o.str("side") ?: continue,
+            mint = o.str("mint") ?: continue,
+            symbol = o.str("symbol") ?: "",
+            triggerPrice = trigger,
+            fraction = o.num("fraction"),
+            sizeUsd = o.num("sizeUsd"),
+            status = o.str("status") ?: "open",
+            note = o.str("note"),
+            waiting = o.str("waiting"),
+            markUsd = o.num("markUsd")?.takeIf { it > 0 },
+            distancePct = o.num("distancePct"),
+            text = o.str("text") ?: ""
         )
     }
     return out
