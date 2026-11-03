@@ -719,3 +719,6 @@ input[type="range"]::-moz-range-progress { background: var(--accent); }
 .live-pair.unarmed .live-buy { background: #1f5e3a; color: #b8ffd4; }
 .live-pair.compact { margin: 6px 0 0; padding: 6px; }
 .live-pair.compact button { min-height: 38px; font-size: 13px; }
+
+/* v13.10 Tape: a short reason instead of a bare dash. */
+.coin-card b.why, .cc-chgbox b.why { font-size: 11px; font-weight: 700; color: var(--muted); white-space: nowrap; }

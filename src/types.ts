@@ -607,6 +607,8 @@ export interface DeskSnapshot {
   liveBook?: LiveBookView | null;
   /** v13.9 why the LIVE BUY / LIVE SELL buttons do nothing yet ("Live not armed: wallet key missing"). Null when armed. */
   liveNotArmed?: string | null;
+  /** v13.10 live price / 5m & 1h volume / 1h change per Tape coin (killed ones too). Missing value = null + `why`. */
+  tapeQuotes?: Record<string, import("./market/tape-quotes.js").TapeQuote>;
   /** v13.5 wallet card. */
   wallet?: WalletView;
   mode: "paper" | "live";

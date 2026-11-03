@@ -198,9 +198,9 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
             Spacer(Modifier.width(6.dp))
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    if (ch == null) "—" else (if (ch > 0) "+" else if (ch < 0) "−" else "") + "%.1f%%".format(Locale.US, kotlin.math.abs(ch)),
-                    color = chTint,
-                    fontSize = 19.sp,
+                    if (ch == null) com.dirk.nightdesk.tapeMissing(coin, "chg") else (if (ch > 0) "+" else if (ch < 0) "−" else "") + "%.1f%%".format(Locale.US, kotlin.math.abs(ch)),
+                    color = if (ch == null) P.muted else chTint,
+                    fontSize = if (ch == null) 12.sp else 19.sp,
                     fontWeight = FontWeight.Black,
                     maxLines = 1
                 )
@@ -209,9 +209,10 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
         }
         // 1h volume, 5m volume and price on one line, label then value.
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            TapeInline("1H VOL", coin.vol1h?.let { compact(it) } ?: "—", Modifier.weight(1f), big = true)
-            TapeInline("5M VOL", coin.vol5m?.let { compact(it) } ?: "—", Modifier.weight(0.9f))
-            TapeInline("PRICE", coin.mark?.let { com.dirk.nightdesk.TapeToolbar.shortPrice(it) } ?: "—", Modifier.weight(1.2f))
+            // v13.10: live values from the desk's Tape quotes; a short reason instead of a bare dash.
+            TapeInline("1H VOL", coin.vol1h?.let { compact(it) } ?: com.dirk.nightdesk.tapeMissing(coin, "vol"), Modifier.weight(1f), big = true, why = coin.vol1h == null)
+            TapeInline("5M VOL", coin.vol5m?.let { compact(it) } ?: com.dirk.nightdesk.tapeMissing(coin, "vol"), Modifier.weight(0.9f), why = coin.vol5m == null)
+            TapeInline("PRICE", coin.mark?.let { com.dirk.nightdesk.TapeToolbar.shortPrice(it) } ?: com.dirk.nightdesk.tapeMissing(coin, "price"), Modifier.weight(1.2f), why = coin.mark == null)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -255,11 +256,12 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
 }
 
 @Composable
-private fun TapeInline(label: String, value: String, modifier: Modifier, big: Boolean = false) {
+private fun TapeInline(label: String, value: String, modifier: Modifier, big: Boolean = false, why: Boolean = false) {
     Row(modifier, verticalAlignment = Alignment.Bottom) {
         Text(label, color = P.dim, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.3.sp, maxLines = 1, modifier = Modifier.padding(bottom = 2.dp))
         Spacer(Modifier.width(4.dp))
-        Text(value, color = P.ink, fontSize = if (big) 16.sp else 15.sp, fontWeight = if (big) FontWeight.Black else FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (why) Text(value, color = P.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 2.dp))
+        else Text(value, color = P.ink, fontSize = if (big) 16.sp else 15.sp, fontWeight = if (big) FontWeight.Black else FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -446,7 +448,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     headerStatus = status,
                     headerLive = live,
                     mode = snap?.mode ?: "paper",
-                    liveScope = snap?.liveScope
+                    liveScope = snap?.liveScope,
+                    tapeQuotes = snap?.tapeQuotes.orEmpty()
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -1200,7 +1203,8 @@ private fun TapeScreen(
     headerStatus: String = "Connected",
     headerLive: Boolean = true,
     mode: String = "paper",
-    liveScope: String? = null
+    liveScope: String? = null,
+    tapeQuotes: Map<String, com.dirk.nightdesk.TapeQuote> = emptyMap()
 ) {
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
@@ -1413,7 +1417,7 @@ private fun TapeScreen(
         }
         if (tapeView == "coins") {
             val coins = sortCoins(
-                remember(idKey, positionMints) { coinCards(events, positionMints) }
+                remember(idKey, positionMints, tapeQuotes) { coinCards(events, positionMints, quotes = tapeQuotes) }
                     .filter { coinFilter == "all" || it.verdict.name.lowercase() == coinFilter || (coinFilter == "trade" && it.verdict == Verdict.BOUGHT) },
                 tapeSort
             )
@@ -1966,7 +1970,8 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                         headerStatus = "Connected",
                         headerLive = true,
                         mode = snap.mode,
-                        liveScope = snap.liveScope
+                        liveScope = snap.liveScope,
+                        tapeQuotes = snap.tapeQuotes
                     )
                     2 -> if (addPreview != null) {
                         AddCoinScreen(com.dirk.nightdesk.DeskRepository.get(LocalContext.current), snap, null, oneTap, preview = addPreview)

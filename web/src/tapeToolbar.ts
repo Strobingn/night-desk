@@ -1,3 +1,4 @@
+import { tinyPx } from "./format";
 import type { DeskSnapshot } from "./types";
 
 type Source = NonNullable<DeskSnapshot["feed"]["sources"]>[number];
@@ -29,8 +30,9 @@ export function scoutSummary(sources: readonly Source[]): { text: string; badge:
 
 /** Compact card price: 4 significant digits. */
 export function shortPx(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return "—";
-  if (n === 0) return "0";
+  // v13.10: never a 0 price; tiny prices use the v13.8 subscript-zero format.
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (n < 0.0001) return tinyPx(n);
   if (n >= 1000) return n.toFixed(0);
   if (n >= 1) return n.toFixed(3);
   const digits = Math.max(0, -Math.floor(Math.log10(n)) + 3);

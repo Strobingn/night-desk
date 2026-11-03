@@ -1,4 +1,6 @@
-import type { FeedEvent } from "./types";
+import type { DeskSnapshot, FeedEvent } from "./types";
+
+type TapeQuotes = NonNullable<DeskSnapshot["tapeQuotes"]>;
 
 export type Verdict = "open" | "bought" | "trade" | "near" | "killed" | "seen";
 
@@ -18,6 +20,9 @@ export interface CoinRow {
   verdict: Verdict;
   reason?: string;
   codes: string[];
+  /** v13.10 short reason a live value is missing ("no pool yet"); where the price came from. */
+  why?: string;
+  quoteSource?: string;
   /** Internal while folding. */
   changeSeen?: number;
   firstMark?: number;
@@ -29,7 +34,25 @@ const RANK: Record<Verdict, number> = { seen: 0, killed: 1, near: 2, trade: 3, b
  * v13 Tape coin cards: fold the event stream into one card per mint, newest first.
  * Risk lines on open positions do not bump a coin to the top, so fresh pairs stay visible.
  */
-export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 60): CoinRow[] {
+const SUB_DIGITS = "₀₁₂₃₄₅₆₇₈₉";
+
+/**
+ * v13.10 reads a desk price string: plain ("0.0008014", "1.2e-7") or the v13.8 tiny format with
+ * subscript zeros ("0.0₅207" = 0.00000207). Returns undefined for 0, blanks or junk (never a 0 price).
+ */
+export function parsePxText(raw: string | undefined | null): number | undefined {
+  if (!raw) return undefined;
+  const sub = /^0\.0([₀-₉]+)(\d+)$/.exec(raw.trim());
+  let text = raw.trim();
+  if (sub) {
+    const zeros = Number([...sub[1]].map((c) => SUB_DIGITS.indexOf(c)).join(""));
+    text = `0.${"0".repeat(zeros)}${sub[2]}`;
+  }
+  const n = Number(text.replace(/,/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 60, quotes?: TapeQuotes): CoinRow[] {
   const map = new Map<string, CoinRow>();
   for (const e of events) {
     if (!e.mint) continue;
@@ -44,9 +67,9 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
       if (RANK[v] >= RANK[row!.verdict] || row!.verdict === "killed") row!.verdict = v;
     };
     if (e.stage === "scout") {
-      const m = /Mark ([0-9.eE-]+), 1h volume \$([0-9,.]+)/.exec(e.message);
+      const m = /Mark ([0-9.eE₀-₉+-]+), 1h volume \$([0-9,.]+)/.exec(e.message);
       if (m) {
-        const mark = Number(m[1]) || undefined;
+        const mark = parsePxText(m[1]) ?? row.mark;
         // No 1h change from the feed: fall back to the move since the first sighting on this tape.
         if (mark) {
           if (row.firstMark == null) row.firstMark = mark;
@@ -89,6 +112,20 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
     .sort((a, b) => b.lastTs - a.lastTs)
     .slice(0, limit);
   for (const row of rows) {
+    // v13.10: the desk's live Tape quote (batched DexScreener / pump.fun curve / Jupiter) wins over the
+    // first-sighting line, which is frozen at the moment the Scout saw the coin.
+    const q = quotes?.[row.mint];
+    if (q) {
+      if (q.priceUsd != null && q.priceUsd > 0 && Number.isFinite(q.priceUsd)) row.mark = q.priceUsd;
+      if (q.vol1hUsd != null && Number.isFinite(q.vol1hUsd)) row.vol1h = q.vol1hUsd;
+      if (q.vol5mUsd != null && Number.isFinite(q.vol5mUsd)) row.vol5m = q.vol5mUsd;
+      if (q.change1hPct != null && Number.isFinite(q.change1hPct)) {
+        row.change1h = q.change1hPct;
+        delete row.changeSeen;
+      }
+      if (q.why) row.why = q.why;
+      if (q.source) row.quoteSource = q.source;
+    }
     if (row.change1h == null && row.changeSeen != null && Number.isFinite(row.changeSeen)) row.change1h = row.changeSeen;
     delete row.changeSeen;
     delete row.firstMark;

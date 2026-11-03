@@ -219,7 +219,7 @@ export function TapeScreen({
   }
 
   const openMints = new Set(snap.positions.map((pos) => pos.mint));
-  const coins = view === "coins" ? sortCoins(coinCards(history, openMints).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")), sort) : [];
+  const coins = view === "coins" ? sortCoins(coinCards(history, openMints, 60, snap.tapeQuotes).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")), sort) : [];
 
   return (
     <div className="tape-screen">
@@ -420,22 +420,22 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
           </span>
         </div>
         <div className={`cc-chgbox ${chTone}`} title="1h price change">
-          <b>{ch == null || !Number.isFinite(ch) ? "—" : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}</b>
+          <b className={ch == null || !Number.isFinite(ch) ? "why" : undefined}>{ch == null || !Number.isFinite(ch) ? missingText(coin, "chg") : `${ch > 0 ? "+" : ch < 0 ? "−" : ""}${Math.abs(ch).toFixed(1)}%`}</b>
           <span className="k">1h chg</span>
         </div>
       </div>
       <div className="cc-stats inline">
         <div className="cc-stat vol">
           <span className="k">1h vol</span>
-          <b>{coin.vol1h != null ? compactUsd(coin.vol1h) : "—"}</b>
+          <b className={coin.vol1h != null ? undefined : "why"}>{coin.vol1h != null ? compactUsd(coin.vol1h) : missingText(coin, "vol")}</b>
         </div>
         <div className="cc-stat">
           <span className="k">5m vol</span>
-          <b>{coin.vol5m != null ? compactUsd(coin.vol5m) : "—"}</b>
+          <b className={coin.vol5m != null ? undefined : "why"}>{coin.vol5m != null ? compactUsd(coin.vol5m) : missingText(coin, "vol")}</b>
         </div>
         <div className="cc-stat">
           <span className="k">Price</span>
-          <b>{coin.mark ? shortPx(coin.mark) : "—"}</b>
+          <b className={coin.mark ? undefined : "why"} title={coin.quoteSource ? `price from ${coin.quoteSource}` : undefined}>{coin.mark ? shortPx(coin.mark) : missingText(coin, "price")}</b>
         </div>
       </div>
       <div className="cc-foot">
@@ -493,4 +493,11 @@ function Row({ event, selected, onSelect }: { event: FeedEvent; selected: boolea
       </div>
     </article>
   );
+}
+
+/** v13.10 a short reason in place of a bare dash when a Tape value is not available. */
+function missingText(coin: CoinRow, field: "price" | "vol" | "chg"): string {
+  if (field === "price") return coin.why ?? "checking…";
+  if (coin.why) return coin.why === "no trades yet" ? "no trades" : "not listed";
+  return coin.mark ? (coin.quoteSource === "pump.fun curve" ? "curve only" : "not listed") : "checking…";
 }

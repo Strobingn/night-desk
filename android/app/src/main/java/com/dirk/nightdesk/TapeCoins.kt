@@ -21,8 +21,45 @@ data class CoinCard(
     /** v13.1: 5m volume, 1h price change in percent, and 1-based rank by 1h volume. */
     val vol5m: Double? = null,
     val change1h: Double? = null,
-    val volRank: Int? = null
+    val volRank: Int? = null,
+    /** v13.10 short reason a live value is missing ("no pool yet"); where the live price came from. */
+    val why: String? = null,
+    val quoteSource: String? = null
 )
+
+/** v13.10 the desk's live Tape quote (snapshot `tapeQuotes`). Unknown values are null, never 0 for price. */
+data class TapeQuote(
+    val priceUsd: Double?,
+    val vol1hUsd: Double?,
+    val vol5mUsd: Double?,
+    val change1hPct: Double?,
+    val source: String?,
+    val at: Long,
+    val why: String?
+)
+
+private const val SUB_DIGITS = "₀₁₂₃₄₅₆₇₈₉"
+private val TINY_RE = Regex("""^0\.0([₀-₉]+)(\d+)$""")
+
+/** v13.10 a desk price string, plain or v13.8 subscript-zero ("0.0₅207" = 0.00000207). Null for 0 / junk. */
+fun parsePxText(raw: String?): Double? {
+    val t = raw?.trim().orEmpty()
+    if (t.isEmpty()) return null
+    val m = TINY_RE.find(t)
+    val plain = if (m != null) {
+        val zeros = m.groupValues[1].map { SUB_DIGITS.indexOf(it) }.joinToString("").toIntOrNull() ?: return null
+        "0." + "0".repeat(zeros) + m.groupValues[2]
+    } else t.replace(",", "")
+    return plain.toDoubleOrNull()?.takeIf { it > 0 && it.isFinite() }
+}
+
+/** v13.10 short text in place of a bare dash on a Tape card. */
+fun tapeMissing(coin: CoinCard, field: String): String = when {
+    field == "price" -> coin.why ?: "checking…"
+    coin.why != null -> if (coin.why == "no trades yet") "no trades" else "not listed"
+    coin.mark != null -> if (coin.quoteSource == "pump.fun curve") "curve only" else "not listed"
+    else -> "checking…"
+}
 
 /** v13.1 per-device Tape sort. Volume is the default. */
 enum class TapeSort(val label: String) { VOLUME("Volume"), NEWEST("Newest"), SCORE("Score");
@@ -49,9 +86,9 @@ fun sortCoins(rows: List<CoinCard>, mode: TapeSort): List<CoinCard> {
     }
 }
 
-private val SCOUT_RE = Regex("""Mark ([0-9.eE-]+), 1h volume \$([0-9,.]+)""")
+private val SCOUT_RE = Regex("""Mark ([0-9.eE₀-₉+-]+), 1h volume \$([0-9,.]+)""")
 
-fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60): List<CoinCard> {
+fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60, quotes: Map<String, TapeQuote> = emptyMap()): List<CoinCard> {
     class Acc(var symbol: String, val first: TapeEvent) {
         var lastTs = 0L
         var source: String? = null
@@ -82,12 +119,12 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60):
         when {
             e.stage == "scout" -> {
                 SCOUT_RE.find(e.message)?.let { m ->
-                    val mark = m.groupValues[1].toDoubleOrNull()?.takeIf { it > 0 && it.isFinite() }
+                    val mark = parsePxText(m.groupValues[1])
                     if (mark != null) {
                         val first = acc.firstMark
                         if (first == null) acc.firstMark = mark else acc.changeSeen = (mark / first - 1) * 100
+                        acc.mark = mark
                     }
-                    acc.mark = mark
                     acc.vol = money(m.groupValues[2])
                 }
                 V5_RE.find(e.message)?.let { m -> money(m.groupValues[1])?.let { acc.vol5m = it } }
@@ -117,7 +154,7 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60):
                 mint, a.symbol, a.lastTs, a.source, a.mark, a.vol, a.score, if (mint in openMints) Verdict.OPEN else a.verdict, a.reason, a.codes, a.event,
                 vol5m = a.vol5m,
                 change1h = a.change ?: a.changeSeen?.takeIf { it.isFinite() }
-            )
+            ).let { withQuote(it, quotes[mint]) }
         }
         .filter { it.lastTs > 0 || it.verdict == Verdict.OPEN }
         .sortedByDescending { it.lastTs }
@@ -128,6 +165,19 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60):
         .mapIndexed { i, c -> c.mint to (i + 1) }
         .toMap()
     return rows.map { it.copy(volRank = ranks[it.mint]) }
+}
+
+/** v13.10: the desk's live Tape quote wins over the first-sighting line (which is frozen at that moment). */
+private fun withQuote(c: CoinCard, q: TapeQuote?): CoinCard {
+    if (q == null) return c
+    return c.copy(
+        mark = q.priceUsd?.takeIf { it > 0 && it.isFinite() } ?: c.mark,
+        vol1h = q.vol1hUsd?.takeIf { it.isFinite() } ?: c.vol1h,
+        vol5m = q.vol5mUsd?.takeIf { it.isFinite() } ?: c.vol5m,
+        change1h = q.change1hPct?.takeIf { it.isFinite() } ?: c.change1h,
+        why = q.why,
+        quoteSource = q.source
+    )
 }
 
 /** Equity at the start of today (local), from the series; falls back to the book start. */
@@ -174,8 +224,8 @@ object TapeToolbar {
 
     /** Compact card price: 4 significant digits. */
     fun shortPrice(n: Double): String {
-        if (!n.isFinite() || n < 0) return "—"
-        if (n == 0.0) return "0"
+        // v13.10: never a 0 price.
+        if (!n.isFinite() || n <= 0) return "—"
         if (n >= 1000) return "%.0f".format(java.util.Locale.US, n)
         if (n >= 1) return "%.3f".format(java.util.Locale.US, n)
         if (n >= 0.0001) return java.math.BigDecimal(n).round(java.math.MathContext(4)).stripTrailingZeros().toPlainString()

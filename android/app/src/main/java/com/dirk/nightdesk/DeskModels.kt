@@ -397,6 +397,8 @@ data class DeskSnapshot(
     val liveBook: LiveBookInfo? = null,
     /** v13.9 why LIVE BUY / LIVE SELL do nothing yet ("Live not armed: wallet key missing."). Null when armed. */
     val liveNotArmed: String? = null,
+    /** v13.10 live price / volume / change per Tape coin. */
+    val tapeQuotes: Map<String, TapeQuote> = emptyMap(),
     /** v13.7 saved toggle: AI auto-buys go live too (default off). */
     val liveAutoBuy: Boolean = false,
     /** v13 hero card. */
@@ -702,6 +704,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         liveScope = data.optText("liveScope").ifBlank { null }?.takeIf { it != "null" },
         liveBook = if (data.isNull("liveBook")) null else parseLiveBook(data.optJSONObject("liveBook"), receivedAt),
         liveNotArmed = if (data.isNull("liveNotArmed")) null else data.optText("liveNotArmed").ifBlank { null },
+        tapeQuotes = parseTapeQuotes(data.optJSONObject("tapeQuotes")),
         liveAutoBuy = prefs?.optBoolean("liveAutoBuy", false) ?: false,
         startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
         sessionPnlPct = data.optFinite("sessionPnlPct"),
@@ -866,3 +869,24 @@ internal fun parseWallet(row: JSONObject?): WalletInfo? {
         liveScopeLine = row.optText("liveScopeLine").ifBlank { null }?.takeIf { it != "null" }
     )
 }
+
+/** v13.10 `tapeQuotes` from /api/state. A price of 0 or junk is dropped (never shown as 0). */
+internal fun parseTapeQuotes(obj: JSONObject?): Map<String, TapeQuote> {
+    if (obj == null) return emptyMap()
+    val out = HashMap<String, TapeQuote>()
+    fun JSONObject.num(key: String): Double? = if (!has(key) || isNull(key)) null else optDouble(key, Double.NaN).takeIf { it.isFinite() }
+    for (mint in obj.keys()) {
+        val q = obj.optJSONObject(mint) ?: continue
+        out[mint] = TapeQuote(
+            priceUsd = q.num("priceUsd")?.takeIf { it > 0 },
+            vol1hUsd = q.num("vol1hUsd")?.takeIf { it >= 0 },
+            vol5mUsd = q.num("vol5mUsd")?.takeIf { it >= 0 },
+            change1hPct = q.num("change1hPct"),
+            source = if (q.isNull("source")) null else q.optString("source").ifBlank { null },
+            at = q.optLong("at"),
+            why = if (q.isNull("why")) null else q.optString("why").ifBlank { null }
+        )
+    }
+    return out
+}
+

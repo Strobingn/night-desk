@@ -18,7 +18,7 @@ describe("v13.4 compact Tape toolbar", () => {
     expect(`⚡ ${tapUsdText(1223)} · slip ${slipText(0.085)}%`).toBe("⚡ $1223 · slip 8.5%");
     expect(tapUsdText(52)).toBe("$52.00");
     expect(slipText(0.03)).toBe("3");
-    expect(shortPx(0.0000037051234)).toBe("0.000003705");
+    expect(shortPx(0.0000037051234)).toBe("0.0₅3705");
     expect(shortPx(1.23456)).toBe("1.235");
     expect(shortPx(Number.NaN)).toBe("—");
   });

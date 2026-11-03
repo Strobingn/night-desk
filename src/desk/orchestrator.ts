@@ -2,6 +2,7 @@ import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
+import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
 import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire } from "../rules.js";
@@ -242,6 +243,9 @@ export class Desk {
   private readonly curveQueue = new Set<string>();
   private curveTimer: NodeJS.Timeout | null = null;
   private watchTimer: NodeJS.Timeout | null = null;
+  /** v13.10 live price / volume / change for every Tape coin (killed ones too). Live feed only. */
+  tape: TapeQuoter | null = null;
+  private tapeTimer: NodeJS.Timeout | null = null;
   private lastClientCrash: { at: number; version: string; brief: string } | null = null;
   private readonly lookupFetch: typeof fetch;
   private readonly depthFetch: typeof fetch | undefined;
@@ -327,6 +331,36 @@ export class Desk {
     this.config = config;
     // v13.8: re-read pool depth before a buy when the sighting has none. Live feeds only (tests inject).
     this.depthFetch = deps.depthFetch ?? (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch ? deps.lookupFetch ?? this.net.fetchAt(0) : undefined);
+    if (this.depthFetch) {
+      const fetchImpl = this.depthFetch;
+      this.tape = new TapeQuoter({
+        dex: (mints) => fetchDexTape(mints, fetchImpl),
+        curves: async (mints) => {
+          const prices = new Map<string, number>();
+          const missing = new Map<string, string>();
+          if (!this.chain) {
+            for (const m of mints) missing.set(m, "on-chain reads are off");
+            return { prices, missing };
+          }
+          const read = await this.chain.readCurves(mints);
+          for (const [m, why] of read.missing) missing.set(m, why);
+          if (read.quotes.size) {
+            const sol = await this.solUsd();
+            for (const q of read.quotes.values()) {
+              const usd = sol ? q.native * sol : NaN;
+              if (usd > 0 && Number.isFinite(usd)) prices.set(q.mint, usd);
+              else missing.set(q.mint, "no SOL/USD price to convert the curve");
+            }
+          }
+          return { prices, missing };
+        },
+        jupiter: async (mints) => {
+          const out = new Map<string, number>();
+          for (const [m, q] of await fetchJupiterQuotes(mints, fetchImpl)) if (q.priceUsd > 0) out.set(m, q.priceUsd);
+          return out;
+        }
+      });
+    }
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
@@ -524,6 +558,11 @@ export class Desk {
     if (this.config.feedMode !== "replay") {
       this.pricer.start();
       this.watchTimer = setInterval(() => void this.refreshWatchlist(), 20_000);
+      if (this.tape) {
+        const tape = this.tape;
+        this.tapeTimer = setInterval(() => void tape.tick().catch(() => undefined), TAPE_TICK_MS);
+        this.tapeTimer.unref?.();
+      }
       setTimeout(() => void this.refreshWatchlist(), 3_000);
     }
     this.equityTimer = setInterval(() => this.markEquity(), 2_000);
@@ -555,6 +594,7 @@ export class Desk {
     if (this.commentTimer) clearInterval(this.commentTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.watchTimer) clearInterval(this.watchTimer);
+    if (this.tapeTimer) clearInterval(this.tapeTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
     this.persist();
     this.advisor.save();
@@ -1533,6 +1573,7 @@ export class Desk {
       liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null,
       liveBook: this.liveBookView(),
       liveNotArmed: this.liveNotArmedReason(),
+      tapeQuotes: this.tape?.view() ?? {},
       wallet: this.walletView(),
       mode: this.config.mode,
       liveRequested: this.config.liveRequested,
@@ -1594,6 +1635,7 @@ export class Desk {
         message: `Scout found ${token.symbol} on ${token.source}. Mark ${price(token.priceUsd)}, 1h volume ${money(token.volume1hUsd)}${scoutExtras(token)}.`,
         detail: token.source
       });
+      this.tape?.note(token.mint, token.source);
       if (!(token.priceUsd > 0) && token.source === "pumpfun") this.queueCurvePrice(token.mint);
       const job = this.runFilter(token, prior);
       this.track(job);
