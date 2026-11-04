@@ -16,11 +16,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.journal.JournalScreen
+import com.dirk.nightdesk.journal.ReplayScreen
+import com.dirk.nightdesk.portfolio.PortfolioScreen
 import com.dirk.nightdesk.pump.alerts.AlertRulesScreen
 import com.dirk.nightdesk.pump.scanner.ScannerScreen
 import com.dirk.nightdesk.ui.P
 
-data class PumpFeature(val id: String, val label: String)
+data class PumpFeature(
+    val id: String,
+    val label: String,
+    val screen: (@Composable () -> Unit)? = null
+)
 
 /**
  * Pump tab registry. Later chunks append a line here.
@@ -28,7 +35,10 @@ data class PumpFeature(val id: String, val label: String)
  */
 val PUMP_FEATURES = listOf(
     PumpFeature("core", "Curve"),
-    PumpFeature("terminal", "Terminal"),
+    PumpFeature("terminal", "Terminal", { TerminalScreen() }),
+    PumpFeature("journal", "Journal", { JournalScreen() }),
+    PumpFeature("replay", "Replay", { ReplayScreen() }),
+    PumpFeature("portfolio", "Portfolio", { PortfolioScreen() }),
     PumpFeature("alerts", "Alerts"),
     PumpFeature("scanner", "Scanner")
 )
@@ -57,18 +67,20 @@ fun PumpScreen() {
             modifier = Modifier.padding(top = 6.dp, bottom = 12.dp)
         )
         PUMP_FEATURES.forEach { feature ->
+            val opens = feature.id == "alerts" || feature.id == "scanner"
             Text(
                 feature.label,
                 color = P.ink,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = 10.dp).clickable {
-                    if (feature.id == "alerts" || feature.id == "scanner") open = feature.id
-                }
+                modifier = Modifier
+                    .padding(top = 10.dp)
+                    .clickable(enabled = opens) { open = feature.id }
             )
-            when (feature.id) {
-                "terminal" -> TerminalScreen()
-                else -> Text(feature.id, color = P.dim, fontSize = 12.sp)
+            if (feature.screen != null) {
+                feature.screen.invoke()
+            } else if (!opens) {
+                Text(feature.id, color = P.dim, fontSize = 12.sp)
             }
         }
     }

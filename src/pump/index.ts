@@ -3,7 +3,7 @@ import { PublicKey } from "@solana/web3.js";
 import type { DatabaseSync } from "node:sqlite";
 import { CANONICAL_SOL_CURVE, curveState, reservesOf, solToReachMarketCap } from "./curve.js";
 import { tradeId } from "./events.js";
-import { PUMP_FEATURES } from "./features/index.js";
+import { dispatchPumpFeature, PUMP_FEATURES } from "./features/index.js";
 import { PumpFeed, type StreamKeys } from "./feed.js";
 import { IntentError, buildIntent, quoteMint, serializeUnsigned } from "./intents.js";
 import { solanaConnection, type PumpConnection } from "./rpc.js";
@@ -171,6 +171,8 @@ export class PumpCore {
     }
     const extra = await routePumpExtras(this, method, path, url, body, this.deskHost());
     if (extra) return extra;
+    const delegated = await dispatchPumpFeature({ db: this.store.db, now: () => this.now() }, method, url, body);
+    if (delegated) return delegated;
     return { status: 404, body: { ok: false, error: "Unknown pump route.", code: "NOT_FOUND" } };
   }
 

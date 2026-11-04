@@ -76,6 +76,10 @@ html[data-night="1"] { filter: brightness(var(--night-brightness, 0.55)); }
 .desk-rows li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
 .desk-rows li strong { flex: 0 0 96px; }
 .desk-rows li em { flex: 1; min-width: 0; font-style: normal; color: var(--muted); }
+.pump-features .scout-status { padding: 0; }
+.pump-features .scout-status li { display: flex; gap: 8px; align-items: baseline; }
+.pump-features .scout-status li strong { flex: 0 0 auto; }
+.pump-features .scout-status li em { flex: 1; min-width: 0; white-space: normal; font-style: normal; color: var(--muted); }
 html, body, #root { margin: 0; min-height: 100%; max-width: 100%; overflow-x: clip; }
 .alert-takeover { position: fixed; inset: 0; z-index: 80; background: #050505; color: #f7f7f7; display: grid; place-items: center; text-align: center; padding: 28px; }
 .alert-takeover h2 { font-size: 28px; margin-bottom: 16px; }
