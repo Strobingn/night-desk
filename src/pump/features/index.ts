@@ -2,8 +2,10 @@
  * Pump feature registry. Later chunks append an entry. They do not edit `core`.
  */
 import type { DatabaseSync } from "node:sqlite";
+import { ALERT_ROUTES } from "../alerts/routes.js";
 import { handleJournalPortfolio } from "../journal/http.js";
 import { PUMP_CORE_ROUTES } from "../routes.js";
+import { SCANNER_ROUTES } from "../scanner/routes.js";
 
 export interface PumpFeature {
   id: string;
@@ -31,6 +33,16 @@ export const PUMP_FEATURES: readonly PumpFeature[] = [
     id: "portfolio",
     title: "Desk portfolio",
     routes: ["/api/pump/portfolio", "/api/pump/portfolio/wallets", "/api/pump/portfolio/import", "/api/pump/portfolio/marks"]
+  },
+  {
+    id: "alerts",
+    title: "Desk alerts",
+    routes: ALERT_ROUTES
+  },
+  {
+    id: "scanner",
+    title: "Hot scanner",
+    routes: SCANNER_ROUTES
   }
 ];
 

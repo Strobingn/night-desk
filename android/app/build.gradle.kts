@@ -60,4 +60,15 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
+val injectedServices = System.getenv("GOOGLE_SERVICES_JSON")?.let { file(it) }
+val servicesJson = file("google-services.json")
+if (!servicesJson.exists() && injectedServices != null && injectedServices.exists()) {
+    injectedServices.copyTo(servicesJson, overwrite = false)
+}
+if (servicesJson.exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }
