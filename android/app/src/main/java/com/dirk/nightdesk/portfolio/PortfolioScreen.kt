@@ -8,6 +8,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dirk.nightdesk.journal.DeskCache
+import com.dirk.nightdesk.journal.JournalRefresh
 import com.dirk.nightdesk.journal.PumpApi
 import com.dirk.nightdesk.ui.P
 import com.dirk.nightdesk.wallet.MwaHost
@@ -34,7 +36,15 @@ fun PortfolioScreen() {
     var wallets by remember { mutableStateOf(PortfolioWallets.read(store)) }
     var manual by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
-    val fills = DeskCache.read(context).map {
+    var rows by remember { mutableStateOf(DeskCache.read(context)) }
+    LaunchedEffect(JournalRefresh.tick) {
+        runCatching { PumpApi(context).journal() }
+            .onSuccess {
+                DeskCache.write(context, it)
+                rows = it
+            }
+    }
+    val fills = rows.map {
         PortfolioMath.Fill(it.signature, it.wallet, it.mint, it.side, it.solLamports, it.tokenAmount, it.feeLamports, it.timestamp)
     }
     val positions = PortfolioMath.positions(fills)
@@ -84,7 +94,10 @@ fun PortfolioScreen() {
             TextButton(onClick = {
                 scope.launch {
                     runCatching { PumpApi(context).importChain(pubkey) }
-                        .onSuccess { note = "Imported chain history for ${pubkey.take(4)}…" }
+                        .onSuccess {
+                            note = "Imported chain history for ${pubkey.take(4)}…"
+                            JournalRefresh.bump()
+                        }
                         .onFailure { note = it.message ?: "Import failed." }
                 }
             }) { Text("Import chain history", color = P.accent) }

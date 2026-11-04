@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
+import { useFillRevision } from "../fillRevision";
 
 interface ReplayFrame {
   index: number;
@@ -17,6 +18,7 @@ export function ReplayScreen() {
   const [frames, setFrames] = useState<ReplayFrame[]>([]);
   const [index, setIndex] = useState(0);
   const [error, setError] = useState("");
+  const revision = useFillRevision();
 
   useEffect(() => {
     let gone = false;
@@ -33,7 +35,7 @@ export function ReplayScreen() {
     return () => {
       gone = true;
     };
-  }, []);
+  }, [revision]);
 
   const frame = frames[index] ?? null;
   const points = useMemo(() => chartPoints(frames), [frames]);

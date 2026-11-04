@@ -42,6 +42,10 @@ class JournalPortfolioTest {
         assertEquals(2, positions.size)
         assertEquals("420000000", PortfolioMath.aggregateRealized(positions))
         assertEquals("1010", positions.first { it.mint == mintA }.avgEntryLamportsPerToken)
+        val fractional = PortfolioMath.positions(
+            listOf(PortfolioMath.Fill("odd", walletA, mintA, "buy", "100", "3", "0", 1))
+        )
+        assertEquals("33.333333333333", fractional[0].avgEntryLamportsPerToken)
         assertEquals("600000", positions.first { it.mint == mintA }.tokenAmount)
         val score = PortfolioMath.score(fills, 1700043200000)
         assertEquals(30, score.score)

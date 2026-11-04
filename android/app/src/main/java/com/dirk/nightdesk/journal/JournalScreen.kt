@@ -30,7 +30,7 @@ fun JournalScreen() {
     var rows by remember { mutableStateOf(DeskCache.read(context)) }
     var note by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(JournalRefresh.tick) {
         runCatching { PumpApi(context).journal() }
             .onSuccess {
                 rows = it

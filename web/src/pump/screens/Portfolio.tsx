@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
+import { notifyFillsImported } from "../fillRevision";
 import { attachWalletStandard, browserHost, connectInjected, connectStandard, injectedChoices, type StandardWallet } from "../wallet/provider";
 
 interface Position {
@@ -77,6 +78,7 @@ export function PortfolioScreen() {
       return;
     }
     await refresh();
+    notifyFillsImported();
   }
 
   const totals = snap?.totals;

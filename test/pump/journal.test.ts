@@ -278,6 +278,19 @@ describe("pump journal routes", () => {
     expect((replay.body as { frame: { signature: string } }).frame.signature).toBe("deskBBuy");
     const png = await core.handle("GET", new URL("http://desk/api/pump/journal/report.png"), {});
     expect(String((png.body as { pngBase64: string }).pngBase64).length).toBeGreaterThan(20);
+    expect((png.body as { lines: string[] }).lines).toContain("TRADES 4");
+
+    const narrowed = new PumpCore({ db: memory(), rpcUrl: "http://127.0.0.1:1", now: () => book.now });
+    await narrowed.handle("POST", new URL("http://desk/api/pump/portfolio/wallets"), { pubkey: book.wallets[0]!.pubkey });
+    await narrowed.handle("POST", new URL("http://desk/api/pump/portfolio/import"), {
+      fills: book.wallets.flatMap((wallet) => wallet.fills),
+      marks: book.marks
+    });
+    const oneWallet = await narrowed.handle("GET", new URL("http://desk/api/pump/journal/report.png"), {});
+    const lines = (oneWallet.body as { lines: string[] }).lines;
+    expect(lines).toContain("TRADES 2");
+    expect(lines).toContain("WALLETS 1");
+    expect(lines).toContain("REALIZED +0.391 SOL");
   });
 });
 

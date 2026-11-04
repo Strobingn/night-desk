@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api";
+import { useFillRevision } from "../fillRevision";
 import { canvasPng, paintDeskReport, shareDeskReport } from "../report";
 
 const CACHE_KEY = "nightdesk.pump.journal";
@@ -27,6 +28,7 @@ export function JournalScreen() {
   const [rows, setRows] = useState<JournalRow[]>(() => readCache());
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const revision = useFillRevision();
 
   useEffect(() => {
     let gone = false;
@@ -43,7 +45,7 @@ export function JournalScreen() {
     return () => {
       gone = true;
     };
-  }, []);
+  }, [revision]);
 
   async function exportCsv() {
     const res = await api<{ csv?: string; filename?: string }>("/api/pump/journal/csv");

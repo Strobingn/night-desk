@@ -148,8 +148,17 @@ object PortfolioMath {
         if (unknown) {
             return Position(first.wallet, first.mint, tokens.toString(), null, UNKNOWN_BASIS, null)
         }
-        val avg = if (tokens > BigInteger.ZERO) cost.divide(tokens).toString() else null
+        val avg = if (tokens > BigInteger.ZERO) divDecimal(cost, tokens) else null
         return Position(first.wallet, first.mint, tokens.toString(), realized.toString(), null, avg)
+    }
+
+    /** Same 12-decimal lamports-per-token price as src/pump/portfolio/pnl.ts divDecimal. */
+    private fun divDecimal(numer: BigInteger, denom: BigInteger): String {
+        val scale = BigInteger("1000000000000")
+        val scaled = numer.multiply(scale).divide(denom)
+        val whole = scaled.divide(scale)
+        val frac = scaled.remainder(scale).toString().padStart(12, '0').trimEnd('0')
+        return if (frac.isEmpty()) whole.toString() else "$whole.$frac"
     }
 
     private class Lot(var tokens: BigInteger, val ts: Long)

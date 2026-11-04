@@ -29,7 +29,7 @@ fun ReplayScreen() {
     val context = LocalContext.current
     var rows by remember { mutableStateOf(DeskCache.read(context)) }
     var index by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(JournalRefresh.tick) {
         runCatching { PumpApi(context).journal() }.onSuccess {
             rows = it.sortedBy { row -> row.timestamp }
             DeskCache.write(context, rows)

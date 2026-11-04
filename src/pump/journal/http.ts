@@ -49,7 +49,9 @@ function route(ctx: JournalHttpContext, method: string, path: string, url: URL, 
   }
   if (path === "/api/pump/journal/report.png" && method === "GET") {
     const snap = portfolioOf(ctx.db, readMarks(ctx.db), ctx.now());
-    const report = buildDeskReport({ rows: journal.rows(), totals: snap.totals, score: snap.score, generatedAt: ctx.now() });
+    const connected = new Set(snap.wallets.map((wallet) => wallet.pubkey));
+    const rows = journal.rows().filter((row) => connected.size === 0 || connected.has(row.wallet));
+    const report = buildDeskReport({ rows, totals: snap.totals, score: snap.score, generatedAt: ctx.now() });
     const png = renderDeskReportPng(deskReportLines(report));
     return { status: 200, body: { ok: true, filename: "desk-report.png", contentType: "image/png", pngBase64: png.toString("base64"), lines: deskReportLines(report) } };
   }
