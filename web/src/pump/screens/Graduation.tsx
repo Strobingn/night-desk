@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
+import { approveIntent } from "../wallet/sign";
+import { attachWalletStandard, browserHost, connectInjected, connectStandard, injectedChoices, type ConnectedWallet, type StandardWallet } from "../wallet/provider";
 
 interface SniperJob {
   mint: string;
@@ -43,6 +45,25 @@ export function GraduationScreen() {
   const [job, setJob] = useState<SniperJob | null>(null);
   const [migration, setMigration] = useState<MigrationView | null>(null);
   const [note, setNote] = useState("Simulate-only until this process is armed. The wallet signs. One shot, no resubmit.");
+  const [connected, setConnected] = useState<ConnectedWallet | null>(null);
+  const [wallets, setWallets] = useState<StandardWallet[]>([]);
+  const [cap, setCap] = useState("1000000000");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const stop = attachWalletStandard(browserHost(), (found) => {
+      setWallets((prev) => (prev.some((item) => item.name === found.name) ? prev : [...prev, found]));
+    });
+    return stop;
+  }, []);
+
+  useEffect(() => {
+    void api<{ caps?: { tradeLamports?: string } }>("/api/pump/status").then((res) => {
+      if (res.body.caps?.tradeLamports) setCap(res.body.caps.tradeLamports);
+    });
+  }, []);
+
+  const injected = useMemo(() => injectedChoices(browserHost()), [wallets]);
 
   useEffect(() => {
     if (!mint.trim()) return;
@@ -81,6 +102,47 @@ export function GraduationScreen() {
     if (res.body.job) setJob(res.body.job);
   }
 
+  async function connectNamed(kind: "injected" | "standard", index: number) {
+    try {
+      const next =
+        kind === "standard"
+          ? wallets[index]
+            ? await connectStandard(wallets[index])
+            : null
+          : injected[index]
+            ? await connectInjected(injected[index].name, injected[index].provider)
+            : null;
+      if (!next) return;
+      setConnected(next);
+      setWallet(next.address);
+      setNote(`Connected ${next.name}. The wallet signs; Night Desk does not broadcast or retry.`);
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "Wallet connect failed.");
+    }
+  }
+
+  async function approve() {
+    if (!job?.unsignedTx || job.phase !== "sent" || job.simulateOnly !== false) return;
+    const payer = connected?.address || wallet.trim();
+    setBusy(true);
+    const approved = await approveIntent({
+      unsignedTx: job.unsignedTx,
+      wallet: payer,
+      amountLamports: BigInt(job.solLamports || "0"),
+      capLamports: BigInt(cap),
+      simulateOnly: false,
+      opener: connected && connected.address === payer ? connected : null
+    });
+    if (approved.code !== "SIGNED") {
+      setBusy(false);
+      setNote(approved.message);
+      return;
+    }
+    const ack = await api<{ error?: string }>("/api/pump/sniper/ack", { method: "POST", body: { mint: job.mint, result: "filled" } });
+    setBusy(false);
+    setNote(ack.body.error ?? "Signed. The desk will not build another buy for this graduation.");
+  }
+
   async function toggle() {
     const next = !buyArmed;
     setBuyArmed(next);
@@ -116,13 +178,28 @@ export function GraduationScreen() {
           <input value={minVolume} onChange={(event) => setMinVolume(event.target.value)} placeholder="off" style={{ width: 80, marginLeft: 6 }} />
         </label>
       </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
         <button type="button" onClick={() => void watch()}>
           Watch curve
         </button>
         <button type="button" onClick={() => void toggle()} className={buyArmed ? "on" : ""}>
           {buyArmed ? "Buy armed" : "Arm market buy"}
         </button>
+        {injected.map((item, index) => (
+          <button key={item.name} type="button" onClick={() => void connectNamed("injected", index)}>
+            Connect {item.name}
+          </button>
+        ))}
+        {wallets.map((item, index) => (
+          <button key={item.name} type="button" onClick={() => void connectNamed("standard", index)}>
+            Connect {item.name}
+          </button>
+        ))}
+        {job?.phase === "sent" && job.unsignedTx && job.simulateOnly === false ? (
+          <button type="button" disabled={busy} onClick={() => void approve()}>
+            {busy ? "Opening wallet…" : "Approve in wallet"}
+          </button>
+        ) : null}
       </div>
       {job ? (
         <p>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { PUMP_FEATURES, type PumpFeatureView } from "./registry";
+import { PUMP_FEATURES } from "./registry";
 
 interface PumpStatus {
   ok?: boolean;
@@ -37,8 +37,7 @@ export function PumpScreen() {
         {PUMP_FEATURES.map((feature) => (
           <li key={feature.id}>
             <strong>{feature.label}</strong>
-            <em>{feature.id}</em>
-            <FeatureScreen feature={feature} />
+            {feature.Panel ? <feature.Panel /> : <em>{feature.id}</em>}
           </li>
         ))}
       </ul>
@@ -51,10 +50,4 @@ function lamports(raw: string | undefined): string {
   const n = Number(raw) / 1_000_000_000;
   if (!Number.isFinite(n)) return raw;
   return n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
-}
-
-function FeatureScreen({ feature }: { feature: PumpFeatureView }) {
-  const Screen = feature.Screen;
-  if (!Screen) return null;
-  return <Screen />;
 }

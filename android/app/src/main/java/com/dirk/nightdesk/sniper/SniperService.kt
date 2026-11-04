@@ -90,7 +90,10 @@ class SniperService : Service() {
         val simulate = job.optBoolean("simulateOnly", true)
         if (phase == "sent" && !simulate && tx.isNotBlank() && tx != openedTx) {
             openedTx = tx
-            val approve = SniperApproveActivity.intent(this, mint, tx, link.baseUrl, link.token)
+            val wallet = job.optString("wallet", "")
+            val amount = job.optString("solLamports", "0")
+            val cap = tradeCap(link.baseUrl, link.token)
+            val approve = SniperApproveActivity.intent(this, mint, tx, link.baseUrl, link.token, wallet, amount, cap, simulate)
             approve.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(approve)
         }
@@ -160,6 +163,12 @@ fun sniperNotification(phase: String, mint: String, poolClass: String?, reason: 
     val label = if (poolClass == "non-canonical") " · non-canonical, not sniped" else ""
     val why = if (reason.isBlank()) "" else " · $reason"
     return "$phase $short$label$why"
+}
+
+private fun tradeCap(baseUrl: String, token: String): String {
+    val body = get(baseUrl.trimEnd('/') + "/api/pump/status", token)
+    val raw = body?.optJSONObject("caps")?.optString("tradeLamports", "").orEmpty()
+    return if (raw.isNotBlank() && raw.all { it.isDigit() }) raw else SniperApproveActivity.DEFAULT_CAP
 }
 
 private fun get(url: String, token: String): JSONObject? {
