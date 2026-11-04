@@ -41,6 +41,7 @@ export function PumpScreen() {
           </li>
         ))}
       </ul>
+      {PUMP_FEATURES.map((feature) => (feature.Panel ? <feature.Panel key={`${feature.id}-panel`} /> : null))}
     </section>
   );
 }

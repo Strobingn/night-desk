@@ -11,16 +11,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.journal.JournalScreen
+import com.dirk.nightdesk.journal.ReplayScreen
+import com.dirk.nightdesk.portfolio.PortfolioScreen
 import com.dirk.nightdesk.ui.P
 
-data class PumpFeature(val id: String, val label: String)
+data class PumpFeature(
+    val id: String,
+    val label: String,
+    val screen: (@Composable () -> Unit)? = null
+)
 
 /**
  * Pump tab registry. Later chunks append a line here.
  * NightDeskApp mounts a single Pump tab that reads this list.
  */
 val PUMP_FEATURES = listOf(
-    PumpFeature("core", "Curve")
+    PumpFeature("core", "Curve"),
+    PumpFeature("journal", "Journal", { JournalScreen() }),
+    PumpFeature("replay", "Replay", { ReplayScreen() }),
+    PumpFeature("portfolio", "Portfolio", { PortfolioScreen() })
 )
 
 @Composable
@@ -36,6 +46,7 @@ fun PumpScreen() {
         PUMP_FEATURES.forEach { feature ->
             Text(feature.label, color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp))
             Text(feature.id, color = P.dim, fontSize = 12.sp)
+            feature.screen?.invoke()
         }
     }
 }

@@ -1,6 +1,8 @@
 /**
  * Pump feature registry. Later chunks append an entry. They do not edit `core`.
  */
+import type { DatabaseSync } from "node:sqlite";
+import { handleJournalPortfolio } from "../journal/http.js";
 import { PUMP_CORE_ROUTES } from "../routes.js";
 
 export interface PumpFeature {
@@ -14,5 +16,30 @@ export const PUMP_FEATURES: readonly PumpFeature[] = [
     id: "core",
     title: "Pump core",
     routes: PUMP_CORE_ROUTES
+  },
+  {
+    id: "journal",
+    title: "Desk journal",
+    routes: ["/api/pump/journal", "/api/pump/journal/report", "/api/pump/journal/csv", "/api/pump/journal/replay", "/api/pump/journal/report.png"]
+  },
+  {
+    id: "portfolio",
+    title: "Desk portfolio",
+    routes: ["/api/pump/portfolio", "/api/pump/portfolio/wallets", "/api/pump/portfolio/import", "/api/pump/portfolio/marks"]
   }
 ];
+
+export interface PumpFeatureContext {
+  db: DatabaseSync;
+  now: () => number;
+}
+
+/** Feature routes PumpCore does not dispatch itself. Unknown paths return null. */
+export async function dispatchPumpFeature(
+  ctx: PumpFeatureContext,
+  method: string,
+  url: URL,
+  body: Record<string, unknown>
+): Promise<{ status: number; body: unknown } | null> {
+  return handleJournalPortfolio(ctx, method, url, body);
+}

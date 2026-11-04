@@ -1,0 +1,92 @@
+{
+  "now": 1700043200000,
+  "marks": [
+    {
+      "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "priceLamportsPerToken": "2000",
+      "marketCapLamports": "42000000000",
+      "progressPct": 12.5,
+      "venue": "curve"
+    }
+  ],
+  "wallets": [
+    {
+      "pubkey": "So11111111111111111111111111111111111111112",
+      "fills": [
+        {
+          "signature": "deskABuy",
+          "wallet": "So11111111111111111111111111111111111111112",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "symbol": "USDC",
+          "side": "buy",
+          "venue": "curve",
+          "source": "chain",
+          "solLamports": "1000000000",
+          "tokenAmount": "1000000",
+          "feeLamports": "10000000",
+          "marketCapLamports": "30000000000",
+          "timestamp": 1700000000000,
+          "confirmation": "confirmed"
+        },
+        {
+          "signature": "deskASell",
+          "wallet": "So11111111111111111111111111111111111111112",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "symbol": "USDC",
+          "side": "sell",
+          "venue": "curve",
+          "source": "chain",
+          "solLamports": "800000000",
+          "tokenAmount": "400000",
+          "feeLamports": "5000000",
+          "marketCapLamports": "36000000000",
+          "timestamp": 1700021600000,
+          "confirmation": "confirmed"
+        }
+      ]
+    },
+    {
+      "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "fills": [
+        {
+          "signature": "deskBBuy",
+          "wallet": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "symbol": "USDT",
+          "side": "buy",
+          "venue": "pumpswap",
+          "source": "chain",
+          "solLamports": "50000000",
+          "tokenAmount": "100",
+          "feeLamports": "0",
+          "marketCapLamports": "50000000000",
+          "timestamp": 1700003600000,
+          "confirmation": "confirmed"
+        },
+        {
+          "signature": "deskBSell",
+          "wallet": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "symbol": "USDT",
+          "side": "sell",
+          "venue": "pumpswap",
+          "source": "chain",
+          "solLamports": "80000000",
+          "tokenAmount": "100",
+          "feeLamports": "1000000",
+          "marketCapLamports": "51000000000",
+          "timestamp": 1700007200000,
+          "confirmation": "confirmed"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "realizedPnlLamports": "420000000",
+    "unrealizedPnlLamports": "594000000",
+    "positions": 2,
+    "score": 30,
+    "openAvgEntry": "1010",
+    "openTokens": "600000"
+  }
+}
