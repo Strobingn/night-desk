@@ -147,13 +147,7 @@ export function decodePool(p: PoolInfo, datas: Array<Uint8Array | null>): number
       const base = datas[0];
       const quote = datas[1];
       if (!base || !quote) return Number.NaN;
-      let virtual = 0n;
-      try {
-        virtual = BigInt(p.virtualQuoteRaw ?? "0");
-      } catch {
-        virtual = 0n;
-      }
-      return pumpSwapNative(tokenAmount(base), tokenAmount(quote), p.decimals, virtual, p.quoteIsSol !== false);
+      return pumpSwapNative(tokenAmount(base), tokenAmount(quote), p.decimals, pumpswapVirtual(p, datas[2]), p.quoteIsSol !== false);
     }
     case "raydium":
     case "cpmm": {
@@ -237,6 +231,22 @@ export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMi
     quoteVault: base58(data.subarray(171, 203))
   };
   return { ...manual, virtualQuoteReserves: signedVirtualQuote(data, manual) };
+}
+
+/**
+ * Virtual quote from this cycle's pool account (keys[2]), else the resolve-time snapshot.
+ * Fees move `virtual_quote_reserves` after every swap, so a snapshot goes stale.
+ */
+function pumpswapVirtual(p: PoolInfo, poolData: Uint8Array | null | undefined): bigint {
+  if (poolData && poolData.length >= 203) {
+    const parsed = parsePumpSwapPool(poolData);
+    if (parsed) return parsed.virtualQuoteReserves;
+  }
+  try {
+    return BigInt(p.virtualQuoteRaw ?? "0");
+  } catch {
+    return 0n;
+  }
 }
 
 /** SOL per whole coin. Virtual 0 keeps the historical vault ratio, so existing fixtures stay put. */
@@ -438,7 +448,7 @@ export class ChainMarkReader {
             decimals,
             baseVault: sides.tokenVault,
             quoteVault: sides.solVault,
-            keys: [sides.tokenVault, sides.solVault],
+            keys: kind === "pumpswap" ? [sides.tokenVault, sides.solVault, pair] : [sides.tokenVault, sides.solVault],
             ...(kind === "pumpswap"
               ? { virtualQuoteRaw: (parsed.virtualQuoteReserves ?? 0n).toString(), quoteIsSol: parsed.quoteMint === WSOL_MINT }
               : {})

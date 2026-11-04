@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.dirk.nightdesk.sniper.SniperService
 import com.dirk.nightdesk.ui.NightDeskApp
 import com.dirk.nightdesk.ui.NightTheme
 import com.dirk.nightdesk.wallet.MwaHost
@@ -27,6 +28,7 @@ class MainActivity : ComponentActivity() {
         com.dirk.nightdesk.ui.ThemeState.load(this)
         enableEdgeToEdge()
         DeskConnectionService.start(this)
+        SniperService.start(this)
         askForNotifications()
         askToIgnoreBatteryOptimizations()
         takeShare(intent)

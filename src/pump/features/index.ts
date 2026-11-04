@@ -79,7 +79,8 @@ export function attachPumpFeatures(host: PumpFeatureHost): void {
   attachSniper(host, {
     onPool: (job, observation) => {
       const quote = BigInt(observation.quoteLamports || "0");
-      tracker.noteLiquidity({ mint: job.mint, quoteLamports: quote, cumulativeSellLamports: BigInt(job.volumeLamports || "0"), at: observation.at ?? host.now() });
+      const sells = observation.cumulativeSellLamports ?? "0";
+      tracker.noteLiquidity({ mint: job.mint, quoteLamports: quote, cumulativeSellLamports: BigInt(sells || "0"), at: observation.at ?? host.now() });
     }
   });
 }

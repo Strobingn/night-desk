@@ -10,6 +10,7 @@ import { PUMP_SWAP_PROGRAM } from "../constants.js";
 import type { PumpFeatureHost } from "../features/host.js";
 import { buildIntent, serializeUnsigned } from "../intents.js";
 import { isCanonicalPumpPool } from "../migration/lp.js";
+import { LIQUIDITY_WINDOW_MS } from "../migration/tracker.js";
 import { decodePoolAccount } from "../pumpswap.js";
 import type { PumpConnection } from "../rpc.js";
 import { CapError } from "../safety.js";
@@ -29,6 +30,8 @@ export interface PoolObservation {
   baseRaw: string;
   /** When the pool became visible. The ready clock is the worker's now. */
   at?: number;
+  /** Cumulative sells observed for this mint. Buys are not included. */
+  cumulativeSellLamports?: string;
 }
 
 export interface PreparedBuy {
@@ -48,6 +51,7 @@ export interface SniperOptions {
 
 export class GraduationSniper {
   private readonly jobs = new Map<string, SniperJob>();
+  private readonly sellLamports = new Map<string, bigint>();
   private readonly inflight = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private tail: Promise<void> = Promise.resolve();
@@ -135,16 +139,17 @@ export class GraduationSniper {
     this.apply(job, { type: "curve", progressPct: state.progressPct, complete: state.complete });
   }
 
-  onTrade(event: { mint: string; solAmountLamports: string; timestamp: number }): void {
+  onTrade(event: { mint: string; solAmountLamports: string; timestamp: number; isBuy?: boolean }): void {
     const job = this.jobs.get(event.mint);
     if (!job) return;
+    if (event.isBuy === false) this.addSell(event.mint, event.solAmountLamports);
     this.apply(job, { type: "trade", solLamports: event.solAmountLamports, at: event.timestamp });
   }
 
   observePool(mint: string, observation: PoolObservation): SniperJob | null {
     const job = this.jobs.get(mint);
     if (!job) return null;
-    this.opts.onPool?.(job, observation);
+    this.opts.onPool?.(job, this.withSells(mint, observation));
     this.apply(job, {
       type: "pool",
       address: observation.address,
@@ -168,20 +173,15 @@ export class GraduationSniper {
     for (const mint of mints) {
       let job = this.jobs.get(mint);
       if (!job) continue;
-      if (job.phase === "watching" && job.hunting && job.poolSeenAt == null) {
+      if (this.shouldReadPool(job)) {
         try {
           const seen = await this.readPool(mint);
           job = this.jobs.get(mint) ?? job;
-          if (seen && job.phase === "watching") {
-            this.opts.onPool?.(job, seen);
-            this.apply(job, {
-              type: "pool",
-              address: seen.address,
-              canonical: seen.canonical,
-              quoteLamports: seen.quoteLamports,
-              baseRaw: seen.baseRaw,
-              at: seen.at ?? this.now()
-            });
+          if (seen && job.phase === "watching" && job.poolSeenAt == null) {
+            this.observePool(mint, seen);
+          } else if (seen) {
+            // Later quotes feed the liquidity watcher. They do not rebuild the snipe.
+            this.opts.onPool?.(job, this.withSells(mint, seen));
           }
         } catch {
           /* The next poll tries again. A read error is not a failed snipe. */
@@ -190,6 +190,30 @@ export class GraduationSniper {
       job = this.jobs.get(mint);
       if (job) this.apply(job, { type: "tick" });
     }
+  }
+
+  /** First liquidity, then one window of later quotes so a drop can be seen. */
+  private shouldReadPool(job: SniperJob): boolean {
+    if (job.phase === "watching" && job.hunting && job.poolSeenAt == null) return true;
+    return job.poolSeenAt != null && this.now() - job.poolSeenAt <= LIQUIDITY_WINDOW_MS;
+  }
+
+  private addSell(mint: string, raw: string): void {
+    let add = 0n;
+    try {
+      add = BigInt(raw);
+    } catch {
+      return;
+    }
+    if (add <= 0n) return;
+    this.sellLamports.set(mint, (this.sellLamports.get(mint) ?? 0n) + add);
+  }
+
+  private withSells(mint: string, observation: PoolObservation): PoolObservation {
+    return {
+      ...observation,
+      cumulativeSellLamports: observation.cumulativeSellLamports ?? (this.sellLamports.get(mint) ?? 0n).toString()
+    };
   }
 
   private apply(job: SniperJob, event: SniperEvent): void {

@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -34,7 +35,6 @@ import java.net.URL
 class SniperService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var loop: Job? = null
-    private var openedTx: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -44,11 +44,11 @@ class SniperService : Service() {
                 setShowBadge(false)
             }
         )
-        promote("Watching", "Waiting for a curve near graduation")
+        promote("Watching", "Waiting for a curve near graduation", openApp())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        promote("Watching", "Graduation sniper is on")
+        promote("Watching", "Graduation sniper is on", openApp())
         if (loop == null) {
             loop = scope.launch {
                 while (isActive) {
@@ -71,41 +71,64 @@ class SniperService : Service() {
     private fun refresh() {
         val link = DeskRepository.get(this).linkSnapshot()
         if (link.baseUrl.isBlank()) {
-            notify("Watching", "Desk URL is not set")
+            notify("Watching", "Desk URL is not set", openApp())
             return
         }
         val body = get(link.baseUrl.trimEnd('/') + "/api/pump/sniper", link.token) ?: return
         val jobs = body.optJSONArray("jobs") ?: return
         if (jobs.length() == 0) {
-            notify("Watching", "No coin armed")
+            notify("Watching", "No coin armed", openApp())
             return
         }
-        val job = jobs.getJSONObject(0)
+        val job = sentJob(jobs) ?: jobs.getJSONObject(0)
         val phase = job.optString("phase", "watching")
         val mint = job.optString("mint", "")
         val label = job.optString("poolClass", "")
         val text = sniperNotification(phase, mint, label.ifBlank { null }, job.optString("reason", ""))
-        notify(phase, text)
+        notify(phase, text, tapFor(job, link.baseUrl, link.token))
+    }
+
+    /** A live buy on any armed mint, not only the oldest watching job. */
+    private fun sentJob(jobs: JSONArray): JSONObject? {
+        for (i in 0 until jobs.length()) {
+            val job = jobs.getJSONObject(i)
+            if (job.optString("phase") == "sent" && !job.optBoolean("simulateOnly", true) && job.optString("unsignedTx").isNotBlank()) {
+                return job
+            }
+        }
+        return null
+    }
+
+    /**
+     * Tapping the ongoing notification opens the approve screen once a live buy is sent.
+     * A service cannot start that activity itself on Android 10+.
+     */
+    private fun tapFor(job: JSONObject, baseUrl: String, token: String): PendingIntent {
         val tx = job.optString("unsignedTx", "")
         val simulate = job.optBoolean("simulateOnly", true)
-        if (phase == "sent" && !simulate && tx.isNotBlank() && tx != openedTx) {
-            openedTx = tx
-            val wallet = job.optString("wallet", "")
-            val amount = job.optString("solLamports", "0")
-            val cap = tradeCap(link.baseUrl, link.token)
-            val approve = SniperApproveActivity.intent(this, mint, tx, link.baseUrl, link.token, wallet, amount, cap, simulate)
-            approve.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(approve)
-        }
+        if (job.optString("phase") != "sent" || simulate || tx.isBlank()) return openApp()
+        val approve = SniperApproveActivity.intent(
+            this,
+            job.optString("mint", ""),
+            tx,
+            baseUrl,
+            token,
+            job.optString("wallet", ""),
+            job.optString("solLamports", "0"),
+            tradeCap(baseUrl, token),
+            simulate
+        )
+        approve.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        return PendingIntent.getActivity(this, 3, approve, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    private fun notify(title: String, text: String) {
+    private fun notify(title: String, text: String, tap: PendingIntent) {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(ONGOING_ID, ongoing(title, text))
+        manager.notify(ONGOING_ID, ongoing(title, text, tap))
     }
 
-    private fun promote(title: String, text: String) {
-        val notification = ongoing(title, text)
+    private fun promote(title: String, text: String, tap: PendingIntent) {
+        val notification = ongoing(title, text, tap)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(ONGOING_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
@@ -113,14 +136,14 @@ class SniperService : Service() {
         }
     }
 
-    private fun ongoing(title: String, text: String): Notification {
+    private fun ongoing(title: String, text: String, tap: PendingIntent): Notification {
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Sniper · $title")
             .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setContentIntent(openApp())
+            .setContentIntent(tap)
             .build()
     }
 

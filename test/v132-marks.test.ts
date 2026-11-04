@@ -206,7 +206,7 @@ describe("v13.2 on-chain pool marks", () => {
     expect(calls.flat()).not.toContain("CURVE");
     const again = await reader.read([{ mint: MINT, pair: POOL }], 2_000);
     expect(again.get(MINT)?.native).toBeCloseTo(1.25e-6, 12);
-    expect(calls[calls.length - 1]).toEqual([BASE_VAULT, QUOTE_VAULT]);
+    expect(calls[calls.length - 1]).toEqual([BASE_VAULT, QUOTE_VAULT, POOL]);
   });
 
   it("does not show a PumpSwap mark until two agreeing samples calibrate it, and refuses a disagreeing set", async () => {
