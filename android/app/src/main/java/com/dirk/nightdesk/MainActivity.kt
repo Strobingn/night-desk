@@ -28,11 +28,17 @@ class MainActivity : ComponentActivity() {
         askForNotifications()
         askToIgnoreBatteryOptimizations()
         takeShare(intent)
+        com.dirk.nightdesk.pump.alerts.NightMode.apply(this)
         setContent {
             NightTheme {
                 NightDeskApp(desk)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        com.dirk.nightdesk.pump.alerts.NightMode.apply(this)
     }
 
     override fun onNewIntent(intent: Intent) {

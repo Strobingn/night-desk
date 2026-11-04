@@ -1,0 +1,19 @@
+{
+  "_comment": "Placeholder. Copy to google-services.json, or point GOOGLE_SERVICES_JSON at a real file, to enable FCM. The app builds and runs without it and keeps alerts on local rules.",
+  "project_info": {
+    "project_number": "000000000000",
+    "project_id": "night-desk-placeholder",
+    "storage_bucket": "night-desk-placeholder.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "android_client_info": { "package_name": "com.dirk.nightdesk" }
+      },
+      "api_key": [{ "current_key": "placeholder" }],
+      "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+    }
+  ],
+  "configuration_version": "1"
+}

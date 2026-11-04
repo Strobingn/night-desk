@@ -10,6 +10,7 @@ import { solanaConnection, type PumpConnection } from "./rpc.js";
 import { CapError, PumpSafety } from "./safety.js";
 import { PumpStore } from "./store.js";
 import type { AlertEvent, AlertKind, PumpCoin, TradeEvent, TradeIntent } from "./types.js";
+import { evaluateDesk, routePumpExtras } from "./features/extras.js";
 import { PumpTopics, type TopicSocket } from "./ws-topics.js";
 
 export interface PumpHttpResult {
@@ -23,10 +24,12 @@ export class PumpCore {
   readonly topics = new PumpTopics();
   readonly feed: PumpFeed;
   private readonly connection: PumpConnection;
+  private readonly rpcUrl: string;
   private readonly now: () => number;
 
   constructor(opts: { db: DatabaseSync; rpcUrl: string; stream?: StreamKeys | null; connection?: PumpConnection; now?: () => number }) {
     this.now = opts.now ?? Date.now;
+    this.rpcUrl = opts.rpcUrl;
     this.store = new PumpStore(opts.db);
     this.safety = new PumpSafety(this.store, this.now);
     this.connection = opts.connection ?? solanaConnection(opts.rpcUrl);
@@ -43,6 +46,16 @@ export class PumpCore {
           this.emitAlert({ kind: "graduation", mint: state.mint, message: `${state.mint} graduated`, data: { marketCapLamports: state.graduationMarketCapLamports } });
         }
         this.topics.publish(`pump.coin:${state.mint}`, state);
+        const quote = Number(state.virtualQuoteReserves);
+        const token = Number(state.virtualTokenReserves);
+        evaluateDesk(this, this.deskHost(), {
+          mint: state.mint,
+          at: this.now(),
+          marketCapLamports: Number(state.marketCapLamports),
+          progressPct: state.progressPct,
+          price: token > 0 ? quote / token : undefined,
+          graduated: state.complete
+        });
       }
     });
   }
@@ -156,7 +169,24 @@ export class PumpCore {
       this.feed.watchMint(mint);
       return { status: 200, body: { ok: true, mint } };
     }
+    const extra = await routePumpExtras(this, method, path, url, body, this.deskHost());
+    if (extra) return extra;
     return { status: 404, body: { ok: false, error: "Unknown pump route.", code: "NOT_FOUND" } };
+  }
+
+  private deskHost() {
+    return {
+      now: this.now,
+      db: this.store.db,
+      rpcUrl: this.rpcUrl,
+      safety: this.safety,
+      prepare: (body: Record<string, unknown>) => this.prepare(body),
+      listCoins: (limit: number) => this.store.listCoins(limit),
+      recentTrades: (limit: number, mint?: string) => this.store.recentTrades(limit, mint),
+      emitAlert: (input: { kind: AlertKind; mint?: string; message: string; data?: Record<string, unknown> }) => {
+        this.emitAlert(input);
+      }
+    };
   }
 
   private async prepare(body: Record<string, unknown>): Promise<TradeIntent> {
@@ -217,6 +247,18 @@ export class PumpCore {
     this.topics.publish("pump.trades", event);
     this.topics.publish(`pump.coin:${event.mint}`, event);
     this.emitAlert({ kind: "trade", mint: event.mint, message: `${event.isBuy ? "buy" : "sell"} ${event.solAmountLamports} lamports`, data: { signature: event.signature } });
+    const signature = event.signature || `${event.mint}:${event.timestamp}:${event.user}:${event.solAmountLamports}`;
+    const lamports = Number(event.solAmountLamports);
+    const coin = this.store.getCoin(event.mint);
+    evaluateDesk(this, this.deskHost(), {
+      mint: event.mint,
+      at: event.timestamp || this.now(),
+      marketCapLamports: coin?.curve ? Number(coin.curve.marketCapLamports) : undefined,
+      progressPct: coin?.curve?.progressPct,
+      graduated: coin?.complete,
+      buy: event.isBuy ? { lamports, signature } : undefined,
+      sell: event.isBuy ? undefined : { lamports, signature }
+    });
   }
 
   private ingestCoin(info: { mint: string; name?: string; symbol?: string; creator?: string; txType: string }): void {
@@ -224,6 +266,9 @@ export class PumpCore {
     const complete = info.txType === "migrate" ? true : (prev?.complete ?? false);
     this.store.upsertCoin(this.coinFrom(info.mint, { ...info, complete, curve: prev?.curve ?? null }));
     if (complete && !prev?.complete) this.emitAlert({ kind: "graduation", mint: info.mint, message: `${info.symbol ?? info.mint} migrated` });
+    if (complete && !prev?.complete) {
+      evaluateDesk(this, this.deskHost(), { mint: info.mint, at: this.now(), graduated: true });
+    }
   }
 
   private coinFrom(mint: string, patch: Partial<PumpCoin> & { complete?: boolean }): PumpCoin {

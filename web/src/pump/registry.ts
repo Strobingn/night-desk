@@ -7,5 +7,7 @@ export interface PumpFeatureView {
 }
 
 export const PUMP_FEATURES: readonly PumpFeatureView[] = [
-  { id: "core", label: "Curve" }
+  { id: "core", label: "Curve" },
+  { id: "alerts", label: "Alerts" },
+  { id: "scanner", label: "Scanner" }
 ];

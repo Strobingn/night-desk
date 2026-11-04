@@ -999,6 +999,20 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
+    /** Pump feature GET. Token header matches the rest of the desk. */
+    suspend fun pumpGet(path: String): Result<String> {
+        val base = link.baseUrl.ifBlank { _activeUrl.value }
+        if (base.isBlank()) return Result.failure(IllegalStateException("Desk URL is not set."))
+        return get(base.trimEnd('/') + path)
+    }
+
+    /** Pump feature POST. Callers pass a JSON body. */
+    suspend fun pumpPost(path: String, json: String): Result<String> {
+        val base = link.baseUrl.ifBlank { _activeUrl.value }
+        if (base.isBlank()) return Result.failure(IllegalStateException("Desk URL is not set."))
+        return post(base.trimEnd('/') + path, json)
+    }
+
     private suspend fun uploadCrash() {
         if (!CrashLog.needsUpload(context)) return
         val base = link.baseUrl
