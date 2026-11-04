@@ -21,6 +21,8 @@ export interface DeskConfig {
   port: number;
   host: string;
   rpcUrl: string;
+  /** Optional websocket override (Helius `wss://…`). Otherwise derived from `rpcUrl`. */
+  rpcWsUrl?: string;
   pumpWsUrl: string;
   rugcheckUrl: string;
   bitqueryKey?: string;
@@ -90,7 +92,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     port: Number(env.PORT) > 0 ? Number(env.PORT) : 4721,
     host: env.HOST?.trim() || "0.0.0.0",
     rpcUrl,
-    pumpWsUrl: env.PUMP_WS_URL?.trim() || "wss://pumpportal.fun/api/data",
+    rpcWsUrl: env.SOLANA_RPC_WS_URL?.trim() || undefined,
+    pumpWsUrl: pumpPortalUrl(env),
     rugcheckUrl: env.RUGCHECK_API_URL?.trim() || "https://api.rugcheck.xyz/v1",
     bitqueryKey: env.BITQUERY_API_KEY?.trim() || undefined,
     walletKeypairPath,
@@ -107,6 +110,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     enrichQueueCap: clampEnvInt(env.SCOUT_ENRICH_QUEUE, 160, 8, 2000),
     holderPagesMax: clampEnvInt(env.HOLDER_PAGES_MAX, 3, 0, 20)
   };
+}
+
+/** Existing Scout socket only. The key is never logged. */
+function pumpPortalUrl(env: NodeJS.ProcessEnv): string {
+  const base = env.PUMP_WS_URL?.trim() || "wss://pumpportal.fun/api/data";
+  const key = env.PUMPPORTAL_API_KEY?.trim();
+  if (!key) return base;
+  try {
+    const url = new URL(base);
+    if (!url.searchParams.has("api-key")) url.searchParams.set("api-key", key);
+    return url.toString();
+  } catch {
+    return base;
+  }
 }
 
 function clampEnvInt(raw: string | undefined, fallback: number, min: number, max: number): number {

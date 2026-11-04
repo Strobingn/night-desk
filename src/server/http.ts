@@ -255,6 +255,11 @@ export function startServer(
       if (url.pathname === "/api/recap") {
         return json(res, 200, desk.recap(url.searchParams.get("since")));
       }
+      if (url.pathname === "/api/pump" || url.pathname.startsWith("/api/pump/")) {
+        const body = req.method === "GET" || req.method === "HEAD" ? {} : await readJson(req);
+        const result = await desk.pump.handle(req.method ?? "GET", url, body);
+        return json(res, result.status, result.body);
+      }
       if (url.pathname === "/api/client-crash" && req.method === "POST") {
         const body = await readJson(req, 64_000);
         const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
@@ -304,8 +309,12 @@ export function startServer(
     sockets.add(socket);
     alive.set(socket, true);
     socket.on("pong", () => alive.set(socket, true));
+    socket.on("message", (buf) => desk.pump.onClientMessage(socket, buf.toString()));
     socket.send(JSON.stringify({ type: "snapshot", data: desk.snapshot() }));
-    socket.on("close", () => sockets.delete(socket));
+    socket.on("close", () => {
+      sockets.delete(socket);
+      desk.pump.detachSocket(socket);
+    });
     socket.on("error", () => sockets.delete(socket));
   });
   // Server heartbeat: drop sockets that stopped answering so they do not pile up behind a dead tunnel.

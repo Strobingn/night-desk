@@ -42,6 +42,10 @@ type SocketLike = Pick<WebSocket, "send" | "close" | "on" | "readyState">;
 export class ChainStream {
   private ws: SocketLike | null = null;
   private wanted = new Set<string>();
+  /** Held-pool keys from the pricer. */
+  private base = new Set<string>();
+  /** Pump curve / pool keys. Kept when the pricer replaces `base`. */
+  private extra = new Set<string>();
   /** key → subscription id */
   private readonly subs = new Map<string, number>();
   /** subscription id → key */
@@ -71,7 +75,26 @@ export class ChainStream {
   /** The accounts to watch now. Diffed against the open subscriptions. */
   setKeys(keys: Iterable<string>): void {
     if (this.stopped) return;
-    const next = new Set([...keys].slice(0, this.opts.maxSubs ?? STREAM_MAX_SUBS));
+    const cap = this.opts.maxSubs ?? STREAM_MAX_SUBS;
+    this.base = new Set([...keys].slice(0, cap));
+    this.reconcile();
+  }
+
+  /**
+   * Extra accounts (pump bonding curves and PumpSwap pools) that survive a later `setKeys`
+   * from the position pricer. One RPC socket, shared. Room left after `base` is the cap.
+   */
+  setExtraKeys(keys: Iterable<string>): void {
+    if (this.stopped) return;
+    const cap = this.opts.maxSubs ?? STREAM_MAX_SUBS;
+    const room = Math.max(0, cap - this.base.size);
+    this.extra = new Set([...keys].filter((key) => !this.base.has(key)).slice(0, room));
+    this.reconcile();
+  }
+
+  private reconcile(): void {
+    const cap = this.opts.maxSubs ?? STREAM_MAX_SUBS;
+    const next = new Set([...this.base, ...this.extra].slice(0, cap));
     const same = next.size === this.wanted.size && [...next].every((k) => this.wanted.has(k));
     if (same) return;
     const removed = [...this.wanted].filter((k) => !next.has(k));

@@ -108,6 +108,11 @@ export interface ScoutOptions {
   pumpSocketFactory?: (url: string) => PumpSocket;
   /** Test hook. Default PUMP_STALE_MS. */
   pumpStaleMs?: number;
+  /**
+   * Every raw PumpPortal frame, on the socket Scout already opened.
+   * Pump core listens here. It must not open a second PumpPortal socket.
+   */
+  onPumpFrame?: (text: string) => void;
 }
 
 /**
@@ -294,6 +299,13 @@ export class Scout {
     }
   }
 
+  private pumpFrameHook: ((text: string) => void) | null = null;
+
+  /** Swap the pump-frame listener after construction (the desk builds the feed later). */
+  setPumpFrameHook(fn: ((text: string) => void) | null): void {
+    this.pumpFrameHook = fn;
+  }
+
   /** Exposed for tests: the Pump stream socket currently in use. */
   get pumpSocket(): PumpSocket | null {
     return this.pump;
@@ -323,8 +335,14 @@ export class Scout {
     ws.on("message", (buf) => {
       if (this.pump !== ws) return;
       this.notePumpMessage();
+      const raw = buf.toString();
       try {
-        const msg = JSON.parse(buf.toString()) as {
+        (this.pumpFrameHook ?? this.opts.onPumpFrame)?.(raw);
+      } catch {
+        /* the pump tab never takes the scout feed down with it */
+      }
+      try {
+        const msg = JSON.parse(raw) as {
           mint?: string;
           symbol?: string;
           name?: string;
