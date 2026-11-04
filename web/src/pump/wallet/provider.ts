@@ -36,7 +36,7 @@ export interface WalletHost {
   solflare?: InjectedProvider;
   addEventListener?(type: string, cb: Listener): void;
   removeEventListener?(type: string, cb: Listener): void;
-  dispatchEvent?(event: { type: string }): boolean;
+  dispatchEvent?(event: { type: string; detail?: unknown }): boolean;
 }
 
 export interface ConnectedWallet {
@@ -58,9 +58,10 @@ export function attachWalletStandard(host: WalletHost, onWallet: (wallet: Standa
     (detail as (api: { register(wallet: StandardWallet): void }) => void)({ register: onWallet });
   };
   host.addEventListener?.("wallet-standard:register-wallet", handler);
-  const Ctor = (globalThis as { Event?: new (type: string) => { type: string } }).Event;
-  if (Ctor) host.dispatchEvent?.(new Ctor("wallet-standard:app-ready"));
-  else host.dispatchEvent?.({ type: "wallet-standard:app-ready" });
+  const api = { register: onWallet };
+  const Custom = (globalThis as { CustomEvent?: new (type: string, eventInitDict?: { detail?: unknown }) => { type: string } }).CustomEvent;
+  if (Custom) host.dispatchEvent?.(new Custom("wallet-standard:app-ready", { detail: api }));
+  else host.dispatchEvent?.({ type: "wallet-standard:app-ready", detail: api });
   return () => host.removeEventListener?.("wallet-standard:register-wallet", handler);
 }
 

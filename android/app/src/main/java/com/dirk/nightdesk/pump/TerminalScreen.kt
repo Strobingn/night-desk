@@ -104,6 +104,13 @@ fun TerminalScreen() {
         }
     }
 
+    LaunchedEffect(active) {
+        curve = null
+        points.clear()
+        tape.clear()
+        lastTick = 0L
+    }
+
     LaunchedEffect(active, tick) {
         if (active.isBlank()) return@LaunchedEffect
         val repo = DeskRepository.get(context)
@@ -128,7 +135,7 @@ fun TerminalScreen() {
         val prints = api.trades(base, link.token, active)
         if (prints.isNotEmpty()) {
             tape.clear()
-            tape.addAll(prints.take(40))
+            tape.addAll(prints.asReversed().take(40))
             lastTick = System.currentTimeMillis()
         }
     }
@@ -144,7 +151,11 @@ fun TerminalScreen() {
             val base = repo.activeUrl.value.ifBlank { link.baseUrl }
             if (base.isBlank() || !alive.get()) return@launch
             val socket = PumpApi().openCurveSocket(base, link.token, active) { text ->
-                main.post { applyFrame(text, points, tape, { curve = it }, { lastTick = it }) }
+                if (!alive.get()) return@openCurveSocket
+                main.post {
+                    if (!alive.get()) return@post
+                    applyFrame(text, points, tape, { curve = it }, { lastTick = it })
+                }
             }
             if (!alive.get()) socket.close(1000, null) else holder[0] = socket
         }

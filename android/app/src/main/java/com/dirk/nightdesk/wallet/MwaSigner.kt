@@ -63,11 +63,21 @@ object MwaHost {
         private set
 
     fun attach(activity: ComponentActivity) {
-        if (session == null) session = AndroidMwaSession(ActivityResultSender(activity))
+        val sender = ActivityResultSender(activity)
+        val current = session
+        if (current is AndroidMwaSession) current.rebind(sender)
+        else session = AndroidMwaSession(sender)
     }
 }
 
-class AndroidMwaSession(private val sender: ActivityResultSender) : WalletSession {
+class AndroidMwaSession(initial: ActivityResultSender) : WalletSession {
+    @Volatile
+    private var sender: ActivityResultSender = initial
+
+    fun rebind(next: ActivityResultSender) {
+        sender = next
+    }
+
     private val adapter = MobileWalletAdapter(
         ConnectionIdentity(
             Uri.parse("https://nightdesk.app"),

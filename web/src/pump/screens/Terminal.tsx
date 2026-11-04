@@ -96,32 +96,37 @@ export function Terminal() {
       return;
     }
     setBusy(true);
-    const prepared = await api<{ intent?: TradeIntent }>("/api/pump/prepare", {
-      body: {
-        wallet: payer,
-        mint: curve.mint,
-        side: "buy",
-        solLamports: reverse.solNeededLamports,
-        venue: "curve",
-        live: live && armed
+    try {
+      const prepared = await api<{ intent?: TradeIntent }>("/api/pump/prepare", {
+        body: {
+          wallet: payer,
+          mint: curve.mint,
+          side: "buy",
+          solLamports: reverse.solNeededLamports,
+          venue: "curve",
+          live: live && armed
+        }
+      });
+      const intent = prepared.body.intent;
+      if (!prepared.ok || !intent) {
+        setNote(prepared.body.error ?? "Prepare failed.");
+        return;
       }
-    });
-    setBusy(false);
-    const intent = prepared.body.intent;
-    if (!prepared.ok || !intent) {
-      setNote(prepared.body.error ?? "Prepare failed.");
-      return;
+      const approved = await approveIntent({
+        unsignedTx: intent.unsignedTx,
+        wallet: payer,
+        amountLamports: BigInt(intent.solLamports),
+        capLamports: BigInt(cap),
+        simulateOnly: intent.simulateOnly || intent.mode === "simulate" || !live,
+        opener: wallet
+      });
+      const sim = intent.simulation?.ok === false ? ` Simulation: ${intent.simulation.err ?? "failed"}.` : intent.simulation ? " Simulation ok." : "";
+      setNote(`${past}${approved.message}${sim}`);
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "Wallet approval failed.");
+    } finally {
+      setBusy(false);
     }
-    const approved = await approveIntent({
-      unsignedTx: intent.unsignedTx,
-      wallet: payer,
-      amountLamports: BigInt(intent.solLamports),
-      capLamports: BigInt(cap),
-      simulateOnly: intent.simulateOnly || intent.mode === "simulate" || !live,
-      opener: wallet
-    });
-    const sim = intent.simulation?.ok === false ? ` Simulation: ${intent.simulation.err ?? "failed"}.` : intent.simulation ? " Simulation ok." : "";
-    setNote(`${past}${approved.message}${sim}`);
   }
 
   return (

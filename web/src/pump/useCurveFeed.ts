@@ -40,7 +40,7 @@ export function useCurveFeed(mint: string): CurveFeed {
       if (stopped) return;
       if (curve.ok && curve.body.curve) apply(curve.body.curve);
       if (trades.ok && trades.body.trades) {
-        for (const trade of [...trades.body.trades].reverse()) apply(trade);
+        for (const trade of trades.body.trades) apply(trade);
       }
       if (!curve.ok && curve.status !== 404) setError(curve.body.error ?? "Curve request failed.");
     };
