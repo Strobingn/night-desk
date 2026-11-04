@@ -37,11 +37,10 @@ export function PumpScreen() {
         {PUMP_FEATURES.map((feature) => (
           <li key={feature.id}>
             <strong>{feature.label}</strong>
-            <em>{feature.id}</em>
+            {feature.Panel ? <feature.Panel /> : <em>{feature.id}</em>}
           </li>
         ))}
       </ul>
-      {PUMP_FEATURES.map((feature) => (feature.Panel ? <feature.Panel key={`${feature.id}-panel`} /> : null))}
     </section>
   );
 }

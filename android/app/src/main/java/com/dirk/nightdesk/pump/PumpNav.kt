@@ -28,6 +28,7 @@ data class PumpFeature(
  */
 val PUMP_FEATURES = listOf(
     PumpFeature("core", "Curve"),
+    PumpFeature("terminal", "Terminal", { TerminalScreen() }),
     PumpFeature("journal", "Journal", { JournalScreen() }),
     PumpFeature("replay", "Replay", { ReplayScreen() }),
     PumpFeature("portfolio", "Portfolio", { PortfolioScreen() })
@@ -45,8 +46,7 @@ fun PumpScreen() {
         )
         PUMP_FEATURES.forEach { feature ->
             Text(feature.label, color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp))
-            Text(feature.id, color = P.dim, fontSize = 12.sp)
-            feature.screen?.invoke()
+            if (feature.screen != null) feature.screen.invoke() else Text(feature.id, color = P.dim, fontSize = 12.sp)
         }
     }
 }

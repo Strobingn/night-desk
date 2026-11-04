@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.dirk.nightdesk.ui.NightDeskApp
 import com.dirk.nightdesk.ui.NightTheme
+import com.dirk.nightdesk.wallet.MwaHost
 
 class MainActivity : ComponentActivity() {
     private val desk by lazy { DeskRepository.get(applicationContext) }
@@ -22,6 +23,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        MwaHost.attach(this)
         com.dirk.nightdesk.ui.ThemeState.load(this)
         enableEdgeToEdge()
         DeskConnectionService.start(this)
