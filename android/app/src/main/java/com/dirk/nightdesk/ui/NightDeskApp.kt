@@ -113,6 +113,7 @@ import com.dirk.nightdesk.markFreshness
 import com.dirk.nightdesk.MarkFreshness
 import com.dirk.nightdesk.updatedLabel
 import com.dirk.nightdesk.feedLabel
+import com.dirk.nightdesk.pump.PumpScreen
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import kotlinx.coroutines.launch
@@ -122,7 +123,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** v13 bottom nav: label to icon. Link stays as the sixth tab. */
-private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Add coin" to "add", "Recap" to "recap", "Settings" to "settings", "Link" to "link")
+private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Add coin" to "add", "Recap" to "recap", "Settings" to "settings", "Link" to "link", "Pump" to "radar")
 
 private fun stageColor(stage: String): Color = when (stage) {
     "filter" -> P.down
@@ -476,6 +477,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
                 4 -> SettingsScreen(snap) { patch -> scope.launch { desk.saveSettings(patch) } }
+                6 -> PumpScreen()
                 else -> LinkScreen(desk)
             }
         }

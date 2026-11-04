@@ -33,6 +33,7 @@ import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from ".
 import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
+import { PumpCore } from "../pump/index.js";
 import { DeskStore } from "../store/db.js";
 import type {
   AnalystReport,
@@ -192,6 +193,8 @@ export class Desk {
   readonly bus = new EventBus<DeskEvents>();
   readonly book: PaperBook;
   readonly store: DeskStore;
+  /** Pump core. Real SOL stays simulate-only until `pump.safety` is armed, and a restart clears that arm. */
+  readonly pump: PumpCore;
   readonly config: DeskConfig;
   private readonly scout: Scout;
   private readonly replay: ReplayFeed;
@@ -484,8 +487,19 @@ export class Desk {
         ? new ChainMarkReader(config.walletRpcUrl || config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
         : undefined;
     // v13.8: the same RPC's websocket endpoint pushes every held pool change. Poll stays as fallback.
-    const wsUrl = this.chain && !deps.chainFetch ? wsUrlFor(config.walletRpcUrl || config.rpcUrl) : null;
-    this.stream = wsUrl ? new ChainStream(wsUrl, (key, data, at) => this.pricer.onStreamAccount(key, data, at)) : undefined;
+    const wsUrl = this.chain && !deps.chainFetch ? config.rpcWsUrl || wsUrlFor(config.walletRpcUrl || config.rpcUrl) : null;
+    this.stream = wsUrl
+      ? new ChainStream(wsUrl, (key, data, at) => {
+          this.pricer.onStreamAccount(key, data, at);
+          this.pump.onAccount(key, data);
+        })
+      : undefined;
+    this.pump = new PumpCore({
+      db: this.store.db,
+      rpcUrl: config.walletRpcUrl || config.rpcUrl,
+      stream: this.stream
+    });
+    this.scout.setPumpFrameHook((text) => this.pump.onPumpFrame(text));
     this.pricer = new PositionPricer({
       heldMints: () => [
         ...new Set([...this.book.positions.values(), ...(this.liveBook?.positions.values() ?? [])].filter((pos) => pos.source !== "replay").map((pos) => pos.mint))

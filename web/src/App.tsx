@@ -12,6 +12,7 @@ import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
 import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
+import { PumpScreen } from "./pump/PumpScreen";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
 export const TABS = [
@@ -19,7 +20,8 @@ export const TABS = [
   { id: "tape", label: "Tape", icon: "tape" },
   { id: "add", label: "Add coin", icon: "add" },
   { id: "recap", label: "Recap", icon: "recap" },
-  { id: "settings", label: "Settings", icon: "settings" }
+  { id: "settings", label: "Settings", icon: "settings" },
+  { id: "pump", label: "Pump", icon: "radar" }
 ] as const;
 export type TabId = (typeof TABS)[number]["id"];
 
@@ -469,6 +471,7 @@ export function App() {
         {tab === "add" ? <AddCoinScreen snap={snap} actions={actions} query={addQuery} busy={busy} /> : null}
         {tab === "recap" ? <RecapScreen /> : null}
         {tab === "settings" ? <SettingsScreen snap={snap} actions={actions} /> : null}
+        {tab === "pump" ? <PumpScreen /> : null}
       </main>
 
       {buyAsk ? <BuyModal ask={buyAsk} snap={snap} onCancel={() => setBuyAsk(null)} onConfirm={(ask) => {
