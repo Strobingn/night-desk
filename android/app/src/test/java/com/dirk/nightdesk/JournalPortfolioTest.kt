@@ -12,9 +12,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 import java.io.File
 
 /** Journal CSV offsets, fixture PnL, desk score, and the share-sheet intent. */
+@RunWith(RobolectricTestRunner::class)
 class JournalPortfolioTest {
     private val walletA = "So11111111111111111111111111111111111111112"
     private val walletB = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
