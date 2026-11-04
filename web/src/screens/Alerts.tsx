@@ -126,7 +126,7 @@ export function Alerts() {
           <input type="range" min={0.2} max={1} step={0.05} value={night.brightness} onChange={(event) => saveSchedule({ ...night, brightness: Number(event.target.value) })} />
         </label>
       </div>
-      <ul className="scout-status">
+      <ul className="desk-rows">
         {rules.map((rule) => (
           <li key={rule.id}>
             <strong>{rule.kind}</strong>

@@ -33,7 +33,7 @@ export function PumpScreen() {
           Caps {lamports(caps.tradeLamports)} SOL / trade, {lamports(caps.dayLamports)} SOL / day. Used today {lamports(caps.dayUsedLamports)} SOL.
         </p>
       ) : null}
-      <ul className="scout-status">
+      <ul className="pump-features">
         {PUMP_FEATURES.map((feature) => (
           <li key={feature.id}>
             <strong>{feature.label}</strong>

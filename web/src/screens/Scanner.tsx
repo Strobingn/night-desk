@@ -113,7 +113,7 @@ export function Scanner() {
     <section className="card" aria-label="Hot scanner">
       <h2>Hot scanner</h2>
       <p className="dim">Ranked by volume, curve progress, buy/sell ratio, unique buyers, holder growth, and age. A rug flag scores 0. Refreshes every 5 seconds.</p>
-      <ul className="scout-status">
+      <ul className="desk-rows">
         {rows.length === 0 ? <li className="dim">No new coins in the book yet.</li> : null}
         {rows.map((row) => (
           <li key={row.mint}>
