@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Alerts } from "../screens/Alerts";
-import { Scanner } from "../screens/Scanner";
 import { PUMP_FEATURES } from "./registry";
 
 interface PumpStatus {
@@ -14,7 +12,6 @@ interface PumpStatus {
 /** One Pump tab. What it shows comes from the registry, so other chunks only append there. */
 export function PumpScreen() {
   const [status, setStatus] = useState<PumpStatus | null>(null);
-  const [tab, setTab] = useState(PUMP_FEATURES[0]?.id ?? "core");
   useEffect(() => {
     let gone = false;
     void api<PumpStatus>("/api/pump/status").then((res) => {
@@ -36,15 +33,14 @@ export function PumpScreen() {
           Caps {lamports(caps.tradeLamports)} SOL / trade, {lamports(caps.dayLamports)} SOL / day. Used today {lamports(caps.dayUsedLamports)} SOL.
         </p>
       ) : null}
-      <div className="chips">
+      <ul className="scout-status">
         {PUMP_FEATURES.map((feature) => (
-          <button key={feature.id} type="button" className={tab === feature.id ? "primary sm" : "ghost sm"} onClick={() => setTab(feature.id)}>
-            {feature.label}
-          </button>
+          <li key={feature.id}>
+            <strong>{feature.label}</strong>
+            {feature.Panel ? <feature.Panel /> : <em>{feature.id}</em>}
+          </li>
         ))}
-      </div>
-      {tab === "alerts" ? <Alerts /> : null}
-      {tab === "scanner" ? <Scanner /> : null}
+      </ul>
     </section>
   );
 }

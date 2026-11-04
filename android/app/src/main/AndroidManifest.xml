@@ -15,6 +15,12 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="solana-wallet" />
+        </intent>
+        <package android:name="app.phantom" />
+        <package android:name="com.solflare.mobile" />
     </queries>
 
     <application

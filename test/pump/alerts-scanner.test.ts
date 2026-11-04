@@ -19,6 +19,7 @@ import { PumpSafety } from "../../src/pump/safety.js";
 import { PumpStore } from "../../src/pump/store.js";
 import type { PumpConnection } from "../../src/pump/rpc.js";
 import { rankCoins, scoreCoin, type ScanInput } from "../../src/pump/scanner/score.js";
+import { approveIntent } from "../../web/src/pump/wallet/sign.js";
 import { autoBuyBest, AUTO_BUY_COOLDOWN_MS, HotScanner, SCAN_INTERVAL_MS, SCAN_TOP_N } from "../../src/pump/scanner/scanner.js";
 import type { TradeIntent } from "../../src/pump/types.js";
 
@@ -310,6 +311,25 @@ describe("pump alert routes", () => {
     expect((sim.body as { reason: string }).reason).toBe("prepared");
     expect(first.simulateOnly).toBe(true);
     expect(first.mode).toBe("simulate");
+    let opens = 0;
+    const opener = {
+      address: wallet.toBase58(),
+      open: async (bytes: Uint8Array) => {
+        opens += 1;
+        return bytes;
+      }
+    };
+    const closed = await approveIntent({
+      unsignedTx: first.unsignedTx,
+      wallet: first.wallet,
+      amountLamports: BigInt(first.solLamports),
+      capLamports: 5_000_000n,
+      simulateOnly: first.simulateOnly,
+      opener
+    });
+    expect(closed.code).toBe("SIMULATED");
+    expect(closed.opened).toBe(false);
+    expect(opens).toBe(0);
     const tx = Transaction.from(Buffer.from(first.unsignedTx!, "base64"));
     expect(tx.signatures.every((entry) => entry.signature == null)).toBe(true);
 
@@ -334,6 +354,18 @@ describe("pump alert routes", () => {
     expect(armedIntent.simulateOnly).toBe(false);
     expect(armedIntent.mode).toBe("live");
     expect(Transaction.from(Buffer.from(armedIntent.unsignedTx!, "base64")).signatures.every((entry) => entry.signature == null)).toBe(true);
+    const signed = await approveIntent({
+      unsignedTx: armedIntent.unsignedTx,
+      wallet: armedIntent.wallet,
+      amountLamports: BigInt(armedIntent.solLamports),
+      capLamports: 5_000_000n,
+      simulateOnly: armedIntent.simulateOnly,
+      opener
+    });
+    expect(signed.code).toBe("SIGNED");
+    expect(signed.opened).toBe(true);
+    expect(opens).toBe(1);
+    expect(signed.message).toContain("does not broadcast");
   });
 
   it("evaluates a posted holder page without trusting total", async () => {

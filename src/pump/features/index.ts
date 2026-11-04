@@ -18,6 +18,11 @@ export const PUMP_FEATURES: readonly PumpFeature[] = [
     routes: PUMP_CORE_ROUTES
   },
   {
+    id: "terminal",
+    title: "Bonding curve terminal",
+    routes: ["/api/pump/curve", "/api/pump/reverse", "/api/pump/prepare", "/api/pump/trades", "/api/pump/watch"]
+  },
+  {
     id: "alerts",
     title: "Desk alerts",
     routes: ALERT_ROUTES
