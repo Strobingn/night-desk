@@ -84,13 +84,24 @@ export class PumpStore {
     return row ? (JSON.parse(row.payload) as TradeIntent) : null;
   }
 
-  insertIntent(intent: TradeIntent, idemKey?: string): void {
+  /** `reservedLamports` is the SOL this row holds against the day cap. Sells pass "0". */
+  insertIntent(intent: TradeIntent, idemKey?: string, reservedLamports?: string): void {
     this.db
       .prepare(
         `INSERT INTO pump_intents (id, idem_key, wallet, mint, sol_lamports, mode, status, created_at, payload)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(intent.id, idemKey ?? null, intent.wallet, intent.mint, intent.solLamports, intent.mode, intent.status, intent.createdAt, JSON.stringify(intent));
+      .run(
+        intent.id,
+        idemKey ?? null,
+        intent.wallet,
+        intent.mint,
+        reservedLamports ?? intent.solLamports,
+        intent.mode,
+        intent.status,
+        intent.createdAt,
+        JSON.stringify(intent)
+      );
   }
 
   /** Reserved unsigned intents in the window. Rejected rows are not written. */

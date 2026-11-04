@@ -21,6 +21,7 @@ import {
   buyQuoteInput,
   canonicalPumpPoolPda,
   getFeeRecipient,
+  sellBaseInput,
   type BondingCurve,
   type Global,
   type SwapSolanaState
@@ -103,18 +104,22 @@ export async function quoteMint(
   const pool = await loadPool(connection, mint);
   if (!pool) throw new IntentError(422, "MARKET_MISSING", "No bonding curve or PumpSwap pool for that mint.");
   const fees = await readPoolFees(connection, pool.pool, pool.base, pool.effective, pool.supply);
-  const feeBps = fees ? fees.lpFeeBps + fees.protocolFeeBps + fees.creatorFeeBps : null;
+  const creatorBps = fees && !pool.pool.coinCreator.equals(PublicKey.default) ? fees.creatorFeeBps : 0n;
+  const feeBps = fees ? fees.lpFeeBps + fees.protocolFeeBps + creatorBps : null;
+  const shownBps = feeBps == null ? null : Number(feeBps);
   if (input.side === "buy") {
     if (input.solLamports == null) throw new IntentError(400, "AMOUNT", "solLamports is required.");
-    const tokens = poolTokensForSol(pool, input.solLamports);
+    const priced = await pricePoolSwap(connection, mint, pool, "buy", input.solLamports);
+    if (fees && !priced) throw new IntentError(422, "QUOTE_ZERO", "Pool fees were read but the swap could not be priced.");
+    const tokens = priced ? priced.tokenAmount : poolTokensForSol(pool, input.solLamports);
     return {
       quote: {
         venue: "pumpswap",
         side: "buy",
         solLamports: input.solLamports.toString(),
         tokenAmount: tokens.toString(),
-        feeBps: feeBps == null ? null : Number(feeBps),
-        feeLamports: "0",
+        feeBps: shownBps,
+        feeLamports: (priced?.feeLamports ?? 0n).toString(),
         feeSource: fees ? "chain" : "none"
       },
       curve: null,
@@ -122,15 +127,17 @@ export async function quoteMint(
     };
   }
   if (input.tokenAmount == null) throw new IntentError(400, "AMOUNT", "tokenAmount is required.");
-  const sol = poolSolForTokens(pool, input.tokenAmount);
+  const priced = await pricePoolSwap(connection, mint, pool, "sell", input.tokenAmount);
+  if (fees && !priced) throw new IntentError(422, "QUOTE_ZERO", "Pool fees were read but the swap could not be priced.");
+  const sol = priced ? priced.solLamports : poolSolForTokens(pool, input.tokenAmount);
   return {
     quote: {
       venue: "pumpswap",
       side: "sell",
       solLamports: sol.toString(),
       tokenAmount: input.tokenAmount.toString(),
-      feeBps: feeBps == null ? null : Number(feeBps),
-      feeLamports: "0",
+      feeBps: shownBps,
+      feeLamports: (priced?.feeLamports ?? 0n).toString(),
       feeSource: fees ? "chain" : "none"
     },
     curve: null,
@@ -181,7 +188,7 @@ async function loadPool(connection: PumpConnection, mint: PublicKey): Promise<Lo
   return { pool, address: address.toBase58(), base, quoteVault, effective, supply, state, baseProgram };
 }
 
-/** Constant product on effective quote reserves (vault + signed virtual). Fees stay in `readPoolFees`. */
+/** Fee-free constant product. Used only when the PumpSwap global config cannot be read. */
 function poolTokensForSol(pool: LoadedPool, solIn: bigint): bigint {
   if (solIn <= 0n || pool.effective <= 0n) return 0n;
   return (solIn * pool.base) / (pool.effective + solIn);
@@ -192,13 +199,95 @@ function poolSolForTokens(pool: LoadedPool, tokens: bigint): bigint {
   return (tokens * pool.effective) / (pool.base - tokens) + 1n;
 }
 
+/** Same fee split `buyQuoteInput` / `sellBaseInput` write into the unsigned swap. Null when global config is missing. */
+async function pricePoolSwap(
+  connection: PumpConnection,
+  mint: PublicKey,
+  pool: LoadedPool,
+  side: "buy" | "sell",
+  amount: bigint
+): Promise<{ solLamports: bigint; tokenAmount: bigint; feeLamports: bigint } | null> {
+  const globalRaw = await connection.getAccountInfo(GLOBAL_CONFIG_PDA.toBase58());
+  if (!globalRaw) return null;
+  let globalConfig;
+  try {
+    globalConfig = PUMP_AMM_SDK.decodeGlobalConfig(accountInfo(globalRaw.data, globalRaw.owner || PUMP_SWAP_PROGRAM.toBase58()));
+  } catch {
+    return null;
+  }
+  const feeRaw = await connection.getAccountInfo(SWAP_FEE_CONFIG.toBase58());
+  let feeConfig = null;
+  if (feeRaw) {
+    try {
+      feeConfig = PUMP_AMM_SDK.decodeFeeConfig(accountInfo(feeRaw.data, PUMP_FEE_PROGRAM.toBase58()));
+    } catch {
+      feeConfig = null;
+    }
+  }
+  const mintRaw = await connection.getAccountInfo(mint.toBase58());
+  if (!mintRaw) return null;
+  let unpacked;
+  try {
+    unpacked = unpackMint(mint, accountInfo(mintRaw.data, mintRaw.owner), tokenProgramId(pool.baseProgram));
+  } catch {
+    return null;
+  }
+  const baseMintAccount: RawMint = {
+    mintAuthorityOption: unpacked.mintAuthority ? 1 : 0,
+    mintAuthority: unpacked.mintAuthority ?? PublicKey.default,
+    supply: unpacked.supply,
+    decimals: unpacked.decimals,
+    isInitialized: unpacked.isInitialized,
+    freezeAuthorityOption: unpacked.freezeAuthority ? 1 : 0,
+    freezeAuthority: unpacked.freezeAuthority ?? PublicKey.default
+  };
+  const shared = {
+    baseReserve: new BN(pool.base.toString(10)),
+    quoteReserve: new BN(pool.effective.toString(10)),
+    virtualQuoteReserves: new BN(0),
+    globalConfig,
+    baseMintAccount,
+    baseMint: mint,
+    coinCreator: pool.pool.coinCreator,
+    creator: pool.pool.creator,
+    feeConfig,
+    quoteMint: pool.pool.quoteMint,
+    isMayhemMode: pool.pool.isMayhemMode,
+    creatorFeeBps: pool.pool.creatorFeeBps
+  };
+  try {
+    if (side === "buy") {
+      const bought = buyQuoteInput({ ...shared, quote: new BN(amount.toString(10)), slippage: 0 });
+      const net = BigInt(bought.internalQuoteWithoutFees.toString(10));
+      return { solLamports: amount, tokenAmount: BigInt(bought.base.toString(10)), feeLamports: amount > net ? amount - net : 0n };
+    }
+    const sold = sellBaseInput({ ...shared, base: new BN(amount.toString(10)), slippage: 0 });
+    const gross = BigInt(sold.internalQuoteAmountOut.toString(10));
+    const net = BigInt(sold.uiQuote.toString(10));
+    return { solLamports: net, tokenAmount: amount, feeLamports: gross > net ? gross - net : 0n };
+  } catch (err) {
+    throw new IntentError(422, "QUOTE_ZERO", err instanceof Error ? err.message : "Pool quote failed.");
+  }
+}
+
 export interface BuiltIntent {
   venue: "curve" | "pumpswap";
+  /** Buy budget, or SOL the seller receives. Not the cap figure. */
   solLamports: bigint;
+  /** Worst-case lamports that can leave the wallet. 0 on a sell. */
+  spendLamports: bigint;
   tokenAmount: bigint;
   feeBps: number | null;
   instructions: TransactionInstruction[];
   quote: TradeQuote;
+}
+
+/** Slippage is 0–100% (0–10_000 bps). Missing means the 1% default. Above that, `minSol` goes negative and `maxSol` blows the cap. */
+export function clampSlippageBps(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : 100;
+  if (n < 0) return 0;
+  if (n > 10_000) return 10_000;
+  return n;
 }
 
 export async function buildIntent(
@@ -207,7 +296,7 @@ export async function buildIntent(
 ): Promise<BuiltIntent> {
   const user = new PublicKey(input.wallet);
   const mint = new PublicKey(input.mint);
-  const slip = BigInt(input.slippageBps ?? 100);
+  const slip = BigInt(clampSlippageBps(input.slippageBps));
   const kind = await tokenProgramFor(connection, input.mint);
   const tokenProgram = tokenProgramId(kind);
   const loaded = input.venue === "pumpswap" ? null : await loadCurve(connection, mint);
@@ -261,6 +350,7 @@ async function buildCurve(
     return {
       venue: "curve",
       solLamports: args.solLamports,
+      spendLamports: maxSol,
       tokenAmount: bought.tokens,
       feeBps: fees ? Number(bought.feeBps) : null,
       instructions: ixs,
@@ -285,6 +375,7 @@ async function buildCurve(
   return {
     venue: "curve",
     solLamports: sold.lamports,
+    spendLamports: 0n,
     tokenAmount: args.tokenAmount,
     feeBps: fees ? Number(sold.feeBps) : null,
     instructions: ixs,
@@ -372,9 +463,11 @@ async function buildPool(
       creatorFeeBps: loaded.pool.creatorFeeBps
     });
     const ixs = await PUMP_AMM_SDK.buyInstructions(state, priced.base, priced.maxQuote);
+    const net = BigInt(priced.internalQuoteWithoutFees.toString(10));
     return {
       venue: "pumpswap",
       solLamports: args.solLamports,
+      spendLamports: BigInt(priced.maxQuote.toString(10)),
       tokenAmount: BigInt(priced.base.toString(10)),
       feeBps: null,
       instructions: ixs,
@@ -384,18 +477,35 @@ async function buildPool(
         solLamports: args.solLamports.toString(),
         tokenAmount: priced.base.toString(10),
         feeBps: null,
-        feeLamports: "0",
+        feeLamports: (args.solLamports > net ? args.solLamports - net : 0n).toString(),
         feeSource: feeConfig ? "chain" : "none"
       }
     };
   }
   if (args.tokenAmount == null) throw new IntentError(400, "AMOUNT", "tokenAmount is required.");
-  const sol = poolSolForTokens(loaded, args.tokenAmount);
-  const min = (sol * (10_000n - args.slip)) / 10_000n;
-  const ixs = await PUMP_AMM_SDK.sellInstructions(state, new BN(args.tokenAmount.toString(10)), new BN(min.toString(10)));
+  const sold = sellBaseInput({
+    base: new BN(args.tokenAmount.toString(10)),
+    slippage: Number(args.slip) / 100,
+    baseReserve: state.poolBaseAmount,
+    quoteReserve: state.poolQuoteAmount,
+    virtualQuoteReserves: new BN(0),
+    globalConfig,
+    baseMintAccount,
+    baseMint: args.mint,
+    coinCreator: loaded.pool.coinCreator,
+    creator: loaded.pool.creator,
+    feeConfig,
+    quoteMint: loaded.pool.quoteMint,
+    isMayhemMode: loaded.pool.isMayhemMode,
+    creatorFeeBps: loaded.pool.creatorFeeBps
+  });
+  const sol = BigInt(sold.uiQuote.toString(10));
+  const gross = BigInt(sold.internalQuoteAmountOut.toString(10));
+  const ixs = await PUMP_AMM_SDK.sellInstructions(state, new BN(args.tokenAmount.toString(10)), sold.minQuote);
   return {
     venue: "pumpswap",
     solLamports: sol,
+    spendLamports: 0n,
     tokenAmount: args.tokenAmount,
     feeBps: null,
     instructions: ixs,
@@ -405,7 +515,7 @@ async function buildPool(
       solLamports: sol.toString(),
       tokenAmount: args.tokenAmount.toString(),
       feeBps: null,
-      feeLamports: "0",
+      feeLamports: (gross > sol ? gross - sol : 0n).toString(),
       feeSource: feeConfig ? "chain" : "none"
     }
   };

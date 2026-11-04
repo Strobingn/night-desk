@@ -77,13 +77,25 @@ interface PortalFrame {
   pool?: string;
 }
 
+/**
+ * PumpPortal `solAmount` / `vSolInBondingCurve` are SOL. A whole number such as
+ * `30` is 30 SOL — JSON drops the decimal — not 30 lamports.
+ */
 function solToLamports(value: number | string | undefined): string {
   if (value == null || value === "") return "0";
-  const text = String(value);
-  if (/^\d+$/.test(text)) return text;
-  const n = Number(text);
-  if (!Number.isFinite(n) || n < 0) return "0";
-  return BigInt(Math.round(n * 1_000_000_000)).toString();
+  let text = typeof value === "number" ? (Number.isFinite(value) && value >= 0 ? value.toFixed(9) : "") : String(value).trim();
+  if (!text) return "0";
+  if (/e/i.test(text)) {
+    const n = Number(text);
+    if (!Number.isFinite(n) || n < 0) return "0";
+    text = n.toFixed(9);
+  }
+  if (!/^\d+(\.\d+)?$/.test(text)) return "0";
+  const [whole, frac = ""] = text.split(".");
+  const digits = (frac + "000000000").slice(0, 10);
+  let lamports = BigInt(whole) * 1_000_000_000n + BigInt(digits.slice(0, 9));
+  if (digits[9]! >= "5") lamports += 1n;
+  return lamports.toString();
 }
 
 function tokenRaw(value: number | string | undefined): string {

@@ -300,10 +300,28 @@ export class Scout {
   }
 
   private pumpFrameHook: ((text: string) => void) | null = null;
+  /** Mints whose trades should arrive on this socket. Create/migrate subscriptions do not include them. */
+  private tradeMints: string[] = [];
 
   /** Swap the pump-frame listener after construction (the desk builds the feed later). */
   setPumpFrameHook(fn: ((text: string) => void) | null): void {
     this.pumpFrameHook = fn;
+  }
+
+  /**
+   * `subscribeTokenTrade` / `unsubscribeTokenTrade` on the socket Scout already holds.
+   * PumpPortal only emits buy/sell frames for mints named here.
+   */
+  setTradeMints(mints: readonly string[]): void {
+    const next = [...new Set(mints)];
+    const prev = new Set(this.tradeMints);
+    const nextSet = new Set(next);
+    const added = next.filter((mint) => !prev.has(mint));
+    const removed = this.tradeMints.filter((mint) => !nextSet.has(mint));
+    this.tradeMints = next;
+    if (!this.pump || !this.status.pumpConnected) return;
+    if (added.length) this.pump.send(JSON.stringify({ method: "subscribeTokenTrade", keys: added }));
+    if (removed.length) this.pump.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: removed }));
   }
 
   /** Exposed for tests: the Pump stream socket currently in use. */
@@ -331,6 +349,7 @@ export class Scout {
       ws.send(JSON.stringify({ method: "subscribeNewToken" }));
       // v13.3: graduations to PumpSwap ride the same free socket.
       ws.send(JSON.stringify({ method: "subscribeMigration" }));
+      if (this.tradeMints.length) ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: this.tradeMints }));
     });
     ws.on("message", (buf) => {
       if (this.pump !== ws) return;

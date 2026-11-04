@@ -324,6 +324,7 @@ describe("pump intents", () => {
         mint: mint.toBase58(),
         side: "buy",
         solLamports: sol,
+        slippageBps: 0,
         live
       });
 
@@ -367,6 +368,7 @@ describe("pump intents", () => {
       mint: mint.toBase58(),
       side: "buy",
       solLamports: "1000000",
+      slippageBps: 0,
       live: true
     });
     expect(again.status).toBe(200);

@@ -497,7 +497,8 @@ export class Desk {
     this.pump = new PumpCore({
       db: this.store.db,
       rpcUrl: config.walletRpcUrl || config.rpcUrl,
-      stream: this.stream
+      stream: this.stream,
+      subscribeTrades: (mints) => this.scout.setTradeMints(mints)
     });
     this.scout.setPumpFrameHook((text) => this.pump.onPumpFrame(text));
     this.pricer = new PositionPricer({

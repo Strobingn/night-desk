@@ -5,7 +5,7 @@ import { CANONICAL_SOL_CURVE, curveState, reservesOf, solToReachMarketCap } from
 import { tradeId } from "./events.js";
 import { PUMP_FEATURES } from "./features/index.js";
 import { PumpFeed, type StreamKeys } from "./feed.js";
-import { IntentError, buildIntent, quoteMint, serializeUnsigned } from "./intents.js";
+import { IntentError, buildIntent, clampSlippageBps, quoteMint, serializeUnsigned } from "./intents.js";
 import { solanaConnection, type PumpConnection } from "./rpc.js";
 import { CapError, PumpSafety } from "./safety.js";
 import { PumpStore } from "./store.js";
@@ -25,16 +25,29 @@ export class PumpCore {
   private readonly connection: PumpConnection;
   private readonly now: () => number;
 
-  constructor(opts: { db: DatabaseSync; rpcUrl: string; stream?: StreamKeys | null; connection?: PumpConnection; now?: () => number }) {
+  constructor(opts: {
+    db: DatabaseSync;
+    rpcUrl: string;
+    stream?: StreamKeys | null;
+    connection?: PumpConnection;
+    now?: () => number;
+    /** Mints the feed is watching. Scout sends `subscribeTokenTrade` for these on its one socket. */
+    subscribeTrades?: (mints: readonly string[]) => void;
+  }) {
     this.now = opts.now ?? Date.now;
     this.store = new PumpStore(opts.db);
     this.safety = new PumpSafety(this.store, this.now);
     this.connection = opts.connection ?? solanaConnection(opts.rpcUrl);
     this.feed = new PumpFeed({
       stream: opts.stream,
+      subscribeTrades: opts.subscribeTrades,
       now: this.now,
       onTrade: (event) => this.ingestTrade(event),
       onCoin: (info) => this.ingestCoin(info),
+      onPool: (mint, pool) => {
+        this.store.upsertCoin(this.coinFrom(mint, { pool }));
+        this.topics.publish(`pump.coin:${mint}`, pool);
+      },
       onCurve: (state) => {
         const prev = this.store.getCoin(state.mint);
         const coin = this.coinFrom(state.mint, { curve: state, complete: state.complete, creator: state.creator });
@@ -183,31 +196,37 @@ export class PumpCore {
       side,
       solLamports: optionalLamports(body.solLamports),
       tokenAmount: optionalLamports(body.tokenAmount),
-      slippageBps: typeof body.slippageBps === "number" ? body.slippageBps : undefined,
+      slippageBps: clampSlippageBps(body.slippageBps),
       venue: body.venue === "pumpswap" || body.venue === "curve" ? body.venue : undefined
     });
-    this.safety.assertRoom(built.solLamports);
-    const blockhash = await this.connection.getLatestBlockhash();
-    const unsigned = serializeUnsigned(wallet, blockhash, built.instructions);
-    const simulationRaw = await this.connection.simulateTransaction(unsigned.tx);
-    const intent: TradeIntent = {
-      id: randomUUID(),
-      mint,
-      side,
-      venue: built.venue,
-      wallet,
-      solLamports: built.solLamports.toString(),
-      tokenAmount: built.tokenAmount.toString(),
-      mode: simulateOnly ? "simulate" : "live",
-      simulateOnly,
-      unsignedTx: unsigned.base64,
-      feePayer: unsigned.tx.feePayer?.toBase58() ?? wallet,
-      simulation: { ok: simulationRaw.err == null, err: simulationRaw.err ?? undefined, units: simulationRaw.units, logs: simulationRaw.logs },
-      createdAt: this.now(),
-      status: "reserved"
-    };
-    this.store.insertIntent(intent, idem || undefined);
-    return intent;
+    // Sells return SOL. The cap is real-SOL outlay, including the buy's on-chain slippage ceiling.
+    const spend = built.spendLamports;
+    if (spend > 0n) this.safety.assertRoom(spend);
+    try {
+      const blockhash = await this.connection.getLatestBlockhash();
+      const unsigned = serializeUnsigned(wallet, blockhash, built.instructions);
+      const simulationRaw = await this.connection.simulateTransaction(unsigned.tx);
+      const intent: TradeIntent = {
+        id: randomUUID(),
+        mint,
+        side,
+        venue: built.venue,
+        wallet,
+        solLamports: built.solLamports.toString(),
+        tokenAmount: built.tokenAmount.toString(),
+        mode: simulateOnly ? "simulate" : "live",
+        simulateOnly,
+        unsignedTx: unsigned.base64,
+        feePayer: unsigned.tx.feePayer?.toBase58() ?? wallet,
+        simulation: { ok: simulationRaw.err == null, err: simulationRaw.err ?? undefined, units: simulationRaw.units, logs: simulationRaw.logs },
+        createdAt: this.now(),
+        status: "reserved"
+      };
+      this.store.insertIntent(intent, idem || undefined, spend.toString());
+      return intent;
+    } finally {
+      if (spend > 0n) this.safety.release(spend);
+    }
   }
 
   private ingestTrade(event: TradeEvent): void {

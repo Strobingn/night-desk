@@ -89,18 +89,30 @@ export class PumpSafety {
     return this.caps();
   }
 
-  /** Throws CapError (HTTP 409) when the notional breaks a cap. Does not reserve. */
+  /**
+   * SOL already checked out by a prepare that has not inserted its row yet.
+   * Concurrent prepares otherwise both read the same `dayUsedLamports`.
+   */
+  private pending = 0n;
+
+  /** Throws CapError (HTTP 409) when the worst-case SOL outlay breaks a cap. Holds `pending` until `release`. */
   assertRoom(solLamports: bigint): void {
     const caps = this.caps();
     const trade = BigInt(caps.tradeLamports);
     const day = BigInt(caps.dayLamports);
-    const used = BigInt(caps.dayUsedLamports);
+    const used = BigInt(caps.dayUsedLamports) + this.pending;
     if (solLamports > trade) {
       throw new CapError("CAP_TRADE", `Trade is ${sol(solLamports)} SOL. The per-trade cap is ${sol(trade)} SOL.`);
     }
     if (used + solLamports > day) {
       throw new CapError("CAP_DAY", `That trade would put the rolling day at ${sol(used + solLamports)} SOL. The day cap is ${sol(day)} SOL.`);
     }
+    this.pending += solLamports;
+  }
+
+  /** Drop a hold from `assertRoom` once the row is inserted (the table counts it) or the prepare fails. */
+  release(solLamports: bigint): void {
+    this.pending = this.pending > solLamports ? this.pending - solLamports : 0n;
   }
 
   private read(): SavedCaps {

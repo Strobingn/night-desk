@@ -34,6 +34,7 @@ export const PUMP_AMM_FEE_CONFIG_PDA = swap.PUMP_AMM_FEE_CONFIG_PDA;
 export const GLOBAL_CONFIG_PDA = swap.GLOBAL_CONFIG_PDA;
 export const poolMarketCap = swap.poolMarketCap;
 export const buyQuoteInput = swap.buyQuoteInput;
+export const sellBaseInput = swap.sellBaseInput;
 export const poolFeesBps = swap.computeFeesBps;
 
 export type { BondingCurve, Global, Pool, SwapSolanaState };
