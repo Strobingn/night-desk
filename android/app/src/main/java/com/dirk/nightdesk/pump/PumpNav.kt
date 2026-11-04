@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.graduation.MigrationCard
 import com.dirk.nightdesk.ui.P
 
 data class PumpFeature(val id: String, val label: String)
@@ -20,7 +21,8 @@ data class PumpFeature(val id: String, val label: String)
  * NightDeskApp mounts a single Pump tab that reads this list.
  */
 val PUMP_FEATURES = listOf(
-    PumpFeature("core", "Curve")
+    PumpFeature("core", "Curve"),
+    PumpFeature("graduation", "Graduation")
 )
 
 @Composable
@@ -37,5 +39,6 @@ fun PumpScreen() {
             Text(feature.label, color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp))
             Text(feature.id, color = P.dim, fontSize = 12.sp)
         }
+        MigrationCard(null)
     }
 }

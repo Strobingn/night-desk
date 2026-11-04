@@ -3,7 +3,9 @@ import { PublicKey } from "@solana/web3.js";
 import type { DatabaseSync } from "node:sqlite";
 import { CANONICAL_SOL_CURVE, curveState, reservesOf, solToReachMarketCap } from "./curve.js";
 import { tradeId } from "./events.js";
-import { PUMP_FEATURES } from "./features/index.js";
+import { PUMP_FEATURES, attachPumpFeatures, handlePumpFeature } from "./features/index.js";
+import type { PumpFeatureHost } from "./features/host.js";
+import { sniperFor } from "./sniper/sniper.js";
 import { PumpFeed, type StreamKeys } from "./feed.js";
 import { IntentError, buildIntent, quoteMint, serializeUnsigned } from "./intents.js";
 import { solanaConnection, type PumpConnection } from "./rpc.js";
@@ -24,16 +26,29 @@ export class PumpCore {
   readonly feed: PumpFeed;
   private readonly connection: PumpConnection;
   private readonly now: () => number;
+  private readonly extras: PumpFeatureHost;
 
   constructor(opts: { db: DatabaseSync; rpcUrl: string; stream?: StreamKeys | null; connection?: PumpConnection; now?: () => number }) {
     this.now = opts.now ?? Date.now;
     this.store = new PumpStore(opts.db);
     this.safety = new PumpSafety(this.store, this.now);
     this.connection = opts.connection ?? solanaConnection(opts.rpcUrl);
+    this.extras = {
+      safety: this.safety,
+      store: this.store,
+      connection: this.connection,
+      now: () => this.now(),
+      emitAlert: (input) => this.emitAlert(input),
+      publish: (topic, data) => this.topics.publish(topic, data)
+    };
+    attachPumpFeatures(this.extras);
     this.feed = new PumpFeed({
       stream: opts.stream,
       now: this.now,
-      onTrade: (event) => this.ingestTrade(event),
+      onTrade: (event) => {
+        this.ingestTrade(event);
+        sniperFor(this.extras).onTrade(event);
+      },
       onCoin: (info) => this.ingestCoin(info),
       onCurve: (state) => {
         const prev = this.store.getCoin(state.mint);
@@ -43,6 +58,7 @@ export class PumpCore {
           this.emitAlert({ kind: "graduation", mint: state.mint, message: `${state.mint} graduated`, data: { marketCapLamports: state.graduationMarketCapLamports } });
         }
         this.topics.publish(`pump.coin:${state.mint}`, state);
+        sniperFor(this.extras).onCurve(state);
       }
     });
   }
@@ -156,6 +172,8 @@ export class PumpCore {
       this.feed.watchMint(mint);
       return { status: 200, body: { ok: true, mint } };
     }
+    const extra = await handlePumpFeature(this.extras, method, url, body);
+    if (extra) return extra;
     return { status: 404, body: { ok: false, error: "Unknown pump route.", code: "NOT_FOUND" } };
   }
 

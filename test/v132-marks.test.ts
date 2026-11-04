@@ -187,7 +187,7 @@ describe("v13.2 on-chain pool marks", () => {
     expect(curve?.complete).toBe(false);
     expect(parseCurve(curveData(0n, 1n), 6)).toBeNull();
     const pool = parsePumpSwapPool(poolData());
-    expect(pool).toEqual({ baseMint: MINT, quoteMint: WSOL_MINT, baseVault: BASE_VAULT, quoteVault: QUOTE_VAULT });
+    expect(pool).toEqual({ baseMint: MINT, quoteMint: WSOL_MINT, baseVault: BASE_VAULT, quoteVault: QUOTE_VAULT, virtualQuoteReserves: 0n });
     expect(tokenAmount(tokenAccount(123n))).toBe(123);
   });
 
