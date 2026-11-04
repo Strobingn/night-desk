@@ -3,7 +3,7 @@
  * PumpCore calls this for paths it does not own. State is per core instance.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { AlertEngine, type DeskAlert } from "../alerts/engine.js";
+import { AlertEngine, type DeskAlert, type LiquidityDropNote } from "../alerts/engine.js";
 import { sendFcm } from "../alerts/fcm.js";
 import { countOwners, readPagedHolderCount, type HolderPage } from "../alerts/holders.js";
 import { DEFAULT_NIGHT, inNightWindow, parseNight, type NightWindow } from "../alerts/night.js";
@@ -141,6 +141,32 @@ export async function routePumpExtras(
 /** Feed hook. Curve updates and trades evaluate the armed rules. */
 export function evaluateDesk(core: object, host: PumpHost, sample: AlertSample): DeskAlert[] {
   return publish(stateFor(core, host), host, sample);
+}
+
+/** One unmatched liquidity drop, latched by the desk alert engine and stored on the core alert log. */
+export function pageLiquidityDrop(core: object, host: PumpHost, input: LiquidityDropNote): boolean {
+  const alert = stateFor(core, host).engine.noteLiquidityDrop(input);
+  if (!alert) return false;
+  host.emitAlert({
+    kind: alert.coreKind,
+    mint: alert.mint,
+    message: alert.message,
+    data: {
+      type: "liquidity-drop",
+      dropPct: input.dropPct,
+      quoteBefore: input.quoteBefore,
+      quoteAfter: input.quoteAfter,
+      sellLamports: input.sellLamports,
+      windowMs: input.windowMs,
+      peakAt: input.peakAt,
+      delivery: alert.delivery,
+      ruleId: alert.ruleId,
+      value: alert.value,
+      threshold: alert.threshold,
+      desk: true
+    }
+  });
+  return true;
 }
 
 function publish(state: ExtraState, host: PumpHost, sample: AlertSample): DeskAlert[] {

@@ -10,7 +10,7 @@ import { type AlertRule, type AlertSample, DEFAULT_RULES } from "./rules.js";
 export interface DeskAlert {
   id: string;
   ruleId: string;
-  kind: AlertRule["kind"];
+  kind: AlertRule["kind"] | "liquidity_drop";
   mint: string;
   at: number;
   message: string;
@@ -19,6 +19,18 @@ export interface DeskAlert {
   threshold: number;
   /** Core feed kind, so the existing alerts table can store the fire. */
   coreKind: AlertKind;
+}
+
+/** One unmatched pool-liquidity drop. The engine latches on the peak so it pages once. */
+export interface LiquidityDropNote {
+  mint: string;
+  at: number;
+  dropPct: number;
+  peakAt: number;
+  quoteBefore: string;
+  quoteAfter: string;
+  sellLamports: string;
+  windowMs: number;
 }
 
 interface StepLatch {
@@ -79,6 +91,31 @@ export class AlertEngine {
       if (hit) fired.push(hit);
     }
     return fired;
+  }
+
+  /**
+   * Pages one liquidity-drop alert. The same peak stays quiet after the first fire.
+   * This is not a threshold rule: the migration tracker decides the drop, and the
+   * engine owns the latch and the desk alert shape.
+   */
+  noteLiquidityDrop(input: LiquidityDropNote): DeskAlert | null {
+    const latch = this.latch(`liquidity-drop\n${input.mint}\n${input.peakAt}`);
+    if (latch.high) return null;
+    latch.high = true;
+    latch.lastFiredAt = input.at;
+    const pct = Number.isFinite(input.dropPct) ? input.dropPct.toFixed(1) : "0.0";
+    return {
+      id: `liquidity-drop:${input.mint}:${input.peakAt}`,
+      ruleId: "liquidity-drop",
+      kind: "liquidity_drop",
+      mint: input.mint,
+      at: input.at,
+      message: `Liquidity in ${input.mint} fell ${pct}% within 5 min without matching sells`,
+      delivery: "fullscreen",
+      value: input.dropPct,
+      threshold: 30,
+      coreKind: "custom"
+    };
   }
 
   private evalSteps(rule: AlertRule, sample: AlertSample, value: number): DeskAlert[] {

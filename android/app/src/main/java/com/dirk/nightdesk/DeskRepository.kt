@@ -154,6 +154,8 @@ class DeskRepository private constructor(private val context: Context) {
     private var networkRegistered = false
     private var lastPersistAt = 0L
 
+    fun linkSnapshot(): DeskLink = link
+
     suspend fun currentLink(): DeskLink {
         val prefs = context.deskStore.data.first()
         return DeskLink(

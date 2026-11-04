@@ -4,6 +4,7 @@
 import type { ComponentType } from "react";
 import { Alerts } from "../screens/Alerts";
 import { Scanner } from "../screens/Scanner";
+import { GraduationScreen } from "./screens/Graduation";
 import { JournalScreen } from "./screens/Journal";
 import { PortfolioScreen } from "./screens/Portfolio";
 import { ReplayScreen } from "./screens/Replay";
@@ -22,5 +23,6 @@ export const PUMP_FEATURES: readonly PumpFeatureView[] = [
   { id: "replay", label: "Replay", Panel: ReplayScreen },
   { id: "portfolio", label: "Portfolio", Panel: PortfolioScreen },
   { id: "alerts", label: "Alerts", Panel: Alerts },
-  { id: "scanner", label: "Scanner", Panel: Scanner }
+  { id: "scanner", label: "Scanner", Panel: Scanner },
+  { id: "graduation", label: "Graduation", Panel: GraduationScreen }
 ];

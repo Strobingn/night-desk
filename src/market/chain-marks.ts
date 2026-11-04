@@ -10,11 +10,15 @@
  *   A migrated DBC pool / complete pump curve is followed to its new pool (one getProgramAccounts
  *   per mint, at most every 10 minutes). Anything else is unsupported and simply not read.
  *
- * These are SOL-per-token reserve ratios, not USD, and not the same number DexScreener
- * or Jupiter print (PumpSwap reads ~11% under them). The pricer calibrates them, and the
- * desk uses them for the live display and to pull a stop confirmation forward. They never
- * move the stop, the peak, or a fill on their own.
+ * These are SOL-per-token reserve ratios, not USD. PumpSwap's price is the quote vault
+ * plus the pool's signed virtual_quote_reserves (the same figure PUMP_AMM_SDK.decodePool
+ * exposes). Leaving that reserve out mis-prices the pool by about the reserve/vault ratio,
+ * which is ~11% once protocol and creator fees have accrued. The pricer calibrates the
+ * SOL ratio into USD, and the desk uses it for the live display and to pull a stop
+ * confirmation forward. Marks never move the stop, the peak, or a fill on their own.
  */
+import { PublicKey, type AccountInfo } from "@solana/web3.js";
+import { PUMP_AMM_SDK } from "../pump/sdk.js";
 import { SourceGate } from "./source-gate.js";
 import { pumpReserveAddresses } from "./exclusions.js";
 
@@ -95,6 +99,10 @@ export interface PoolInfo {
   keys: string[];
   /** v13.8 sqrt / bin pools: the coin is token A (x, 0). */
   coinIsA?: boolean;
+  /** Signed PumpSwap virtual quote reserves, base-10. Absent means 0 (price = vault ratio). */
+  virtualQuoteRaw?: string;
+  /** False when WSOL is the pool base and the coin is the quote (virtual reserve sits on the coin). */
+  quoteIsSol?: boolean;
 }
 
 /** v13.8 one sqrt-price (Q64.64) pool: A-in-B price → SOL per coin. */
@@ -135,7 +143,18 @@ export function decodePool(p: PoolInfo, datas: Array<Uint8Array | null>): number
       if (!parsed || parsed.complete) return "gone";
       return parsed.native;
     }
-    case "pumpswap":
+    case "pumpswap": {
+      const base = datas[0];
+      const quote = datas[1];
+      if (!base || !quote) return Number.NaN;
+      let virtual = 0n;
+      try {
+        virtual = BigInt(p.virtualQuoteRaw ?? "0");
+      } catch {
+        virtual = 0n;
+      }
+      return pumpSwapNative(tokenAmount(base), tokenAmount(quote), p.decimals, virtual, p.quoteIsSol !== false);
+    }
     case "raydium":
     case "cpmm": {
       const base = datas[0];
@@ -203,15 +222,64 @@ export function parseCurve(data: Uint8Array, decimals: number): { native: number
  */
 export const CURVE_MIN_REAL_SOL = 0.01;
 
-/** PumpSwap pool: 8 disc, bump u8, index u16, creator, base mint @43, quote mint @75, lp @107, base vault @139, quote vault @171. */
-export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string } | null {
+/**
+ * PumpSwap pool: 8 disc, bump u8, index u16, creator, base mint @43, quote mint @75,
+ * lp mint @107, base vault @139, quote vault @171, signed virtual_quote_reserves i128 @245.
+ * Price uses quote vault + that signed reserve. The SDK decode is preferred; a short or
+ * pre-discriminator fixture falls back to the same offsets.
+ */
+export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string; virtualQuoteReserves: bigint } | null {
   if (data.length < 203) return null;
-  return {
+  const manual = {
     baseMint: base58(data.subarray(43, 75)),
     quoteMint: base58(data.subarray(75, 107)),
     baseVault: base58(data.subarray(139, 171)),
     quoteVault: base58(data.subarray(171, 203))
   };
+  return { ...manual, virtualQuoteReserves: signedVirtualQuote(data, manual) };
+}
+
+/** SOL per whole coin. Virtual 0 keeps the historical vault ratio, so existing fixtures stay put. */
+export function pumpSwapNative(coinRaw: number, solRaw: number, decimals: number, virtualQuote: bigint, quoteIsSol: boolean): number {
+  if (virtualQuote === 0n) {
+    const baseAmt = coinRaw / 10 ** decimals;
+    const quoteAmt = solRaw / 1e9;
+    return baseAmt > 0 && quoteAmt > 0 ? quoteAmt / baseAmt : Number.NaN;
+  }
+  let coin = BigInt(Math.trunc(coinRaw));
+  let sol = BigInt(Math.trunc(solRaw));
+  if (quoteIsSol) sol += virtualQuote;
+  else coin += virtualQuote;
+  if (coin <= 0n || sol <= 0n) return Number.NaN;
+  const scale = 10n ** BigInt(decimals);
+  const scaled = (sol * scale * 1_000_000_000_000n) / (coin * 1_000_000_000n);
+  return Number(scaled) / 1e12;
+}
+
+function signedVirtualQuote(data: Uint8Array, manual: { baseMint: string; quoteMint: string }): bigint {
+  try {
+    const info = {
+      data: Buffer.from(data),
+      executable: false,
+      lamports: 0,
+      owner: new PublicKey(PUMPSWAP_PROGRAM)
+    } as AccountInfo<Buffer>;
+    const pool = PUMP_AMM_SDK.decodePool(info);
+    if (pool.baseMint.toBase58() === manual.baseMint && pool.quoteMint.toBase58() === manual.quoteMint) {
+      return BigInt(pool.virtualQuoteReserves.toString(10));
+    }
+  } catch {
+    /* Fixture bytes are not a real pool account. The i128 at the IDL offset is the reserve. */
+  }
+  return readI128LE(data, 245);
+}
+
+function readI128LE(data: Uint8Array, offset: number): bigint {
+  if (data.length < offset + 16) return 0n;
+  let n = 0n;
+  for (let i = 15; i >= 0; i -= 1) n = (n << 8n) + BigInt(data[offset + i] ?? 0);
+  if (n >= 1n << 127n) n -= 1n << 128n;
+  return n;
 }
 
 /** Raydium AMM v4: base vault @336, quote vault @368, base mint @400, quote mint @432 (752 bytes). */
@@ -353,16 +421,28 @@ export class ChainMarkReader {
         this.pools.set(pair, { kind: "curve", pair, mint, decimals, keys: [pair] });
         return;
       }
-      const amm: Array<[string, PoolKind, (d: Uint8Array) => ReturnType<typeof parsePumpSwapPool>]> = [
+      const amm: Array<[string, PoolKind, (d: Uint8Array) => { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string; virtualQuoteReserves?: bigint } | null]> = [
         [PUMPSWAP_PROGRAM, "pumpswap", parsePumpSwapPool],
         [RAYDIUM_AMM_V4, "raydium", parseRaydiumV4],
         [RAYDIUM_CPMM, "cpmm", parseCpmm]
       ];
       for (const [owner, kind, parse] of amm) {
         if (acc.owner !== owner) continue;
-        const sides = solSides(parse(data), mint);
-        if (sides) {
-          this.pools.set(pair, { kind, pair, mint, decimals, baseVault: sides.tokenVault, quoteVault: sides.solVault, keys: [sides.tokenVault, sides.solVault] });
+        const parsed = parse(data);
+        const sides = solSides(parsed, mint);
+        if (sides && parsed) {
+          this.pools.set(pair, {
+            kind,
+            pair,
+            mint,
+            decimals,
+            baseVault: sides.tokenVault,
+            quoteVault: sides.solVault,
+            keys: [sides.tokenVault, sides.solVault],
+            ...(kind === "pumpswap"
+              ? { virtualQuoteRaw: (parsed.virtualQuoteReserves ?? 0n).toString(), quoteIsSol: parsed.quoteMint === WSOL_MINT }
+              : {})
+          });
           return;
         }
       }

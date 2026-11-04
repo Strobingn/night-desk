@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.graduation.MigrationCard
 import com.dirk.nightdesk.journal.JournalScreen
 import com.dirk.nightdesk.journal.ReplayScreen
 import com.dirk.nightdesk.portfolio.PortfolioScreen
@@ -40,7 +41,8 @@ val PUMP_FEATURES = listOf(
     PumpFeature("replay", "Replay", { ReplayScreen() }),
     PumpFeature("portfolio", "Portfolio", { PortfolioScreen() }),
     PumpFeature("alerts", "Alerts"),
-    PumpFeature("scanner", "Scanner")
+    PumpFeature("scanner", "Scanner"),
+    PumpFeature("graduation", "Graduation", { MigrationCard(null) })
 )
 
 @Composable

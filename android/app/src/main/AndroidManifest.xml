@@ -54,6 +54,17 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Live trading desk connection for the paper book and price feed." />
         </service>
+        <service
+            android:name=".sniper.SniperService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Graduation sniper watches a pump curve and prepares one wallet-signed buy when the canonical pool appears." />
+        </service>
+        <activity
+            android:name=".sniper.SniperApproveActivity"
+            android:exported="false" />
         <receiver
             android:name=".DeskReconnectReceiver"
             android:exported="false" />
