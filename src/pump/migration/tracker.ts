@@ -2,6 +2,7 @@
  * After graduation the coin is viewed on its PumpSwap or Raydium pool.
  * A 30%+ quote drop inside 5 minutes that sells do not explain emits an AlertEvent.
  */
+import { AlertEngine, type LiquidityDropNote } from "../alerts/engine.js";
 import type { PumpFeatureHost } from "../features/host.js";
 import { assessLp, stillLocked, type LpAssessment, type LpHolder, type PoolVenue } from "./lp.js";
 
@@ -87,6 +88,8 @@ export function displayVenue(input: { complete: boolean; migration: { venue: Poo
 
 export class MigrationTracker {
   private readonly tracked = new Map<string, Tracked>();
+  /** Used when the host has no shared desk engine. Same latch rules as that engine. */
+  private readonly drops = new AlertEngine();
 
   constructor(private readonly host: PumpFeatureHost | null = null) {}
 
@@ -135,20 +138,43 @@ export class MigrationTracker {
     let alerted = false;
     if (decision.alert && row.alertedPeakAt !== decision.peakAt) {
       row.alertedPeakAt = decision.peakAt;
-      alerted = true;
-      this.host?.emitAlert({
-        kind: "custom",
+      const note: LiquidityDropNote = {
         mint: input.mint,
-        message: `Liquidity in ${input.mint} fell ${decision.dropPct.toFixed(1)}% within 5 min without matching sells`,
-        data: {
-          type: "liquidity-drop",
-          dropPct: decision.dropPct,
-          quoteBefore: decision.quoteBefore.toString(),
-          quoteAfter: decision.quoteAfter.toString(),
-          sellLamports: decision.sellLamports.toString(),
-          windowMs: LIQUIDITY_WINDOW_MS
+        at: input.at,
+        dropPct: decision.dropPct,
+        peakAt: decision.peakAt,
+        quoteBefore: decision.quoteBefore.toString(),
+        quoteAfter: decision.quoteAfter.toString(),
+        sellLamports: decision.sellLamports.toString(),
+        windowMs: LIQUIDITY_WINDOW_MS
+      };
+      if (this.host?.pageLiquidityDrop) {
+        alerted = this.host.pageLiquidityDrop(note);
+      } else {
+        const alert = this.drops.noteLiquidityDrop(note);
+        if (alert) {
+          alerted = true;
+          this.host?.emitAlert({
+            kind: alert.coreKind,
+            mint: alert.mint,
+            message: alert.message,
+            data: {
+              type: "liquidity-drop",
+              dropPct: note.dropPct,
+              quoteBefore: note.quoteBefore,
+              quoteAfter: note.quoteAfter,
+              sellLamports: note.sellLamports,
+              windowMs: note.windowMs,
+              peakAt: note.peakAt,
+              delivery: alert.delivery,
+              ruleId: alert.ruleId,
+              value: alert.value,
+              threshold: alert.threshold,
+              desk: true
+            }
+          });
         }
-      });
+      }
     }
     row.view = { ...row.view, quoteLamports: input.quoteLamports.toString(), updatedAt: input.at };
     this.tracked.set(input.mint, row);

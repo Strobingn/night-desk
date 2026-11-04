@@ -113,7 +113,9 @@ object ThemeState {
     var pref by mutableStateOf(ThemePref.DARK)
     /** Last value the UI saw from the OS dark-mode setting (used by System). */
     var systemDark by mutableStateOf(true)
-    val palette: DeskPalette get() = resolve(pref, systemDark)
+    /** Night schedule forces the dark palette without writing the saved preference. */
+    var nightForced by mutableStateOf(false)
+    val palette: DeskPalette get() = if (nightForced) Palettes.Dark else resolve(pref, systemDark)
 
     fun load(context: Context) {
         pref = parse(context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(KEY, null))
@@ -133,7 +135,7 @@ object ThemeState {
         ThemePref.SYSTEM -> ThemePref.DARK
     }
 
-    fun resolve(p: ThemePref, systemDark: Boolean): DeskPalette = when (p) {
+    fun resolve(p: ThemePref, systemDark: Boolean): DeskPalette = if (nightForced) Palettes.Dark else when (p) {
         ThemePref.DARK -> Palettes.Dark
         ThemePref.LIGHT -> Palettes.Light
         ThemePref.SYSTEM -> if (systemDark) Palettes.Dark else Palettes.Light
@@ -167,7 +169,7 @@ private fun type(p: DeskPalette) = Typography(
 fun NightTheme(content: @Composable () -> Unit) {
     val systemDark = isSystemInDarkTheme()
     SideEffect { if (ThemeState.systemDark != systemDark) ThemeState.systemDark = systemDark }
-    val p = ThemeState.resolve(ThemeState.pref, systemDark)
+    val p = ThemeState.palette
     val scheme = if (p.isDark) {
         darkColorScheme(
             primary = p.accent, onPrimary = p.onAccent, secondary = p.up, background = p.bg, surface = p.card,
