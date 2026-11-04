@@ -47,13 +47,13 @@ val PUMP_FEATURES = listOf(
 fun PumpScreen() {
     var open by remember { mutableStateOf<String?>(null) }
     if (open == "alerts") {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
             AlertRulesScreen { open = null }
         }
         return
     }
     if (open == "scanner") {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
             ScannerScreen { open = null }
         }
         return

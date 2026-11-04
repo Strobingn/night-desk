@@ -13,6 +13,7 @@ import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
 import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
 import { PumpScreen } from "./pump/PumpScreen";
+import { startNightMode } from "./pump/night";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
 export const TABS = [
@@ -124,6 +125,8 @@ export function App() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, [theme]);
+
+  useEffect(() => startNightMode(), []);
 
   const setTab = useCallback((next: TabId) => {
     setTabState(next);

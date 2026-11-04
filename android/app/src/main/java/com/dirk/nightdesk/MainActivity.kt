@@ -31,6 +31,7 @@ class MainActivity : ComponentActivity() {
         askToIgnoreBatteryOptimizations()
         takeShare(intent)
         com.dirk.nightdesk.pump.alerts.NightMode.apply(this)
+        com.dirk.nightdesk.pump.alerts.FcmTokenSync.sync(this)
         setContent {
             NightTheme {
                 NightDeskApp(desk)

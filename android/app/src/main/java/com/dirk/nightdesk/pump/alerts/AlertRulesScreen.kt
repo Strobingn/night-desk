@@ -2,6 +2,7 @@ package com.dirk.nightdesk.pump.alerts
 
 import android.app.Activity
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -29,7 +30,7 @@ fun AlertRulesScreen(onBack: () -> Unit) {
     val fullScreen = remember { FullScreenGate.canUse(context) }
     var note by remember { mutableStateOf(if (fcm) "FCM is configured." else "Local rules only. Firebase is not configured, so a swiped-away app will not get a push until google-services.json is added.") }
 
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(4.dp)) {
         Text("Desk alerts", color = P.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text(note, color = P.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp, bottom = 8.dp))
         Text(

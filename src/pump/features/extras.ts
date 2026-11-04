@@ -9,7 +9,7 @@ import { countOwners, readPagedHolderCount, type HolderPage } from "../alerts/ho
 import { DEFAULT_NIGHT, inNightWindow, parseNight, type NightWindow } from "../alerts/night.js";
 import { DEFAULT_RULES, parseRules, type AlertRule, type AlertSample } from "../alerts/rules.js";
 import { webPushPayload } from "../alerts/webpush.js";
-import { HotScanner, rowsFromBook } from "../scanner/scanner.js";
+import { HotScanner, readMintAuthorities, rowsFromBook } from "../scanner/scanner.js";
 import type { PumpSafety } from "../safety.js";
 import type { PumpCoin, TradeEvent, TradeIntent } from "../types.js";
 import type { ScanInput } from "../scanner/score.js";
@@ -27,6 +27,8 @@ export interface PumpHost {
   prepare: (body: Record<string, unknown>) => Promise<TradeIntent>;
   listCoins: (limit: number) => PumpCoin[];
   recentTrades: (limit: number, mint?: string) => TradeEvent[];
+  /** Mint account bytes. Live ranking uses this for mint and freeze authority. */
+  getAccountInfo?: (address: string) => Promise<{ data: Buffer; owner: string } | null>;
   emitAlert: (input: { kind: DeskAlert["coreKind"]; mint?: string; message: string; data?: Record<string, unknown> }) => void;
 }
 
@@ -93,9 +95,9 @@ export async function routePumpExtras(
       writeJson(host.db, "pumpFcmToken", token);
     }
     const sample = sampleOf(body.sample, host.now());
-    const alerts = sample ? publish(state, host, sample) : [];
+    const alerts = sample ? publish(state, host, sample, false) : [];
     const target = token || state.fcmToken;
-    const serverKey = process.env.FCM_SERVER_KEY || process.env.FIREBASE_SERVER_KEY || "";
+    const serverKey = fcmServerKey();
     const sent = [];
     for (const alert of alerts) {
       sent.push({ id: alert.id, ...(await sendFcm(alert, { token: target, serverKey })) });
@@ -109,7 +111,7 @@ export async function routePumpExtras(
     state.scanner.noteHolders(mint, count);
     return { status: 200, body: { ok: true, mint, count } };
   }
-  if (path === "/api/pump/scanner" && method === "GET") return { status: 200, body: { ok: true, ...refresh(state, host) } };
+  if (path === "/api/pump/scanner" && method === "GET") return { status: 200, body: { ok: true, ...(await refresh(state, host)) } };
   if (path === "/api/pump/scanner" && method === "POST") {
     const coins = Array.isArray(body.coins) ? (body.coins as ScanInput[]) : null;
     if (!coins) return { status: 400, body: { ok: false, error: "coins must be a list", code: "BAD_REQUEST" } };
@@ -117,7 +119,7 @@ export async function routePumpExtras(
     return { status: 200, body: { ok: true, coins: ranked, intervalMs: 5_000 } };
   }
   if (path === "/api/pump/scanner/auto-buy" && method === "POST") {
-    refresh(state, host);
+    await refresh(state, host);
     const wallet = str(body.wallet);
     const sol = lamports(body.solLamports);
     if (!wallet || sol == null) return { status: 400, body: { ok: false, error: "wallet and solLamports are required", code: "BAD_REQUEST" } };
@@ -143,8 +145,9 @@ export function evaluateDesk(core: object, host: PumpHost, sample: AlertSample):
   return publish(stateFor(core, host), host, sample);
 }
 
-function publish(state: ExtraState, host: PumpHost, sample: AlertSample): DeskAlert[] {
+function publish(state: ExtraState, host: PumpHost, sample: AlertSample, deliver = true): DeskAlert[] {
   const alerts = state.engine.evaluate(sample);
+  const serverKey = fcmServerKey();
   for (const alert of alerts) {
     host.emitAlert({
       kind: alert.coreKind,
@@ -152,13 +155,24 @@ function publish(state: ExtraState, host: PumpHost, sample: AlertSample): DeskAl
       message: alert.message,
       data: { delivery: alert.delivery, ruleId: alert.ruleId, value: alert.value, threshold: alert.threshold, desk: true }
     });
+    if (deliver) void sendFcm(alert, { token: state.fcmToken, serverKey }).catch(() => undefined);
   }
   return alerts;
 }
 
-function refresh(state: ExtraState, host: PumpHost): { coins: ReturnType<HotScanner["top"]>; intervalMs: number } {
+function fcmServerKey(): string {
+  return process.env.FCM_SERVER_KEY || process.env.FIREBASE_SERVER_KEY || "";
+}
+
+async function refresh(state: ExtraState, host: PumpHost): Promise<{ coins: ReturnType<HotScanner["top"]>; intervalMs: number }> {
   if (state.scanner.due(host.now()) || state.scanner.top().length === 0) {
-    const rows = rowsFromBook(host.listCoins(200), host.recentTrades(500), state.scanner.holderGrowth(), host.now());
+    const coins = host.listCoins(200);
+    const trades = host.recentTrades(500);
+    const growth = state.scanner.holderGrowth();
+    const now = host.now();
+    const preview = rowsFromBook(coins, trades, growth, now);
+    const authorities = host.getAccountInfo && preview.length ? await readMintAuthorities(preview.map((row) => row.mint), host.getAccountInfo) : undefined;
+    const rows = authorities ? rowsFromBook(coins, trades, growth, now, authorities) : preview;
     if (rows.length) state.scanner.replace(rows, host.now());
     else if (state.scanner.due(host.now())) state.scanner.replace(state.scanner.top(), host.now());
   }

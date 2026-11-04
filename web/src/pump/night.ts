@@ -64,8 +64,9 @@ export function applyNight(schedule: NightWindow, date: Date = new Date(), root?
   return false;
 }
 
-export function startNightMode(schedule: NightWindow = readNight(), now: () => Date = () => new Date()): () => void {
-  const tick = () => applyNight(schedule, now());
+/** Re-reads the saved schedule each tick unless the caller pinned one. */
+export function startNightMode(schedule?: NightWindow, now: () => Date = () => new Date()): () => void {
+  const tick = () => applyNight(schedule ?? readNight(), now());
   tick();
   const timer = setInterval(tick, 30_000);
   return () => clearInterval(timer);

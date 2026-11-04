@@ -2,15 +2,14 @@
  * FCM HTTP payload for a desk alert.
  * Delivery needs `FCM_SERVER_KEY` and a device token. Without them the call
  * reports `local-only` and the phone evaluates rules itself.
- * A data message still reaches a swiped-away app when Firebase is configured;
- * this process cannot prove that without a real device and a server key.
+ * Data-only: a `notification` block is drawn by the system tray and never
+ * reaches FcmService after the app is swiped away. The phone posts the alert.
  */
 import type { DeskAlert } from "./engine.js";
 
 export interface FcmPayload {
   to: string;
   priority: "normal" | "high";
-  notification: { title: string; body: string; sound?: string };
   data: {
     id: string;
     kind: string;
@@ -19,6 +18,8 @@ export interface FcmPayload {
     fullscreen: "0" | "1";
     value: string;
     threshold: string;
+    title: string;
+    body: string;
   };
 }
 
@@ -27,11 +28,6 @@ export function fcmPayload(alert: DeskAlert, token: string): FcmPayload {
   return {
     to: token,
     priority: silent ? "normal" : "high",
-    notification: {
-      title: alert.delivery === "fullscreen" ? "Night Desk" : "Night Desk",
-      body: alert.message,
-      sound: silent ? undefined : "default"
-    },
     data: {
       id: alert.id,
       kind: alert.kind,
@@ -39,7 +35,9 @@ export function fcmPayload(alert: DeskAlert, token: string): FcmPayload {
       delivery: alert.delivery,
       fullscreen: alert.delivery === "fullscreen" ? "1" : "0",
       value: String(alert.value),
-      threshold: String(alert.threshold)
+      threshold: String(alert.threshold),
+      title: "Night Desk",
+      body: alert.message
     }
   };
 }
@@ -53,7 +51,6 @@ export async function sendFcm(
   if (!token || !serverKey) return { delivered: false, reason: "local-only" };
   const fetchImpl = opts.fetchImpl ?? fetch;
   const payload = fcmPayload(alert, token);
-  if (payload.notification.sound == null) delete payload.notification.sound;
   const res = await fetchImpl("https://fcm.googleapis.com/fcm/send", {
     method: "POST",
     headers: { authorization: `key=${serverKey}`, "content-type": "application/json" },

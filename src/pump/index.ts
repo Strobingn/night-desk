@@ -185,6 +185,7 @@ export class PumpCore {
       prepare: (body: Record<string, unknown>) => this.prepare(body),
       listCoins: (limit: number) => this.store.listCoins(limit),
       recentTrades: (limit: number, mint?: string) => this.store.recentTrades(limit, mint),
+      getAccountInfo: (address: string) => this.connection.getAccountInfo(address),
       emitAlert: (input: { kind: AlertKind; mint?: string; message: string; data?: Record<string, unknown> }) => {
         this.emitAlert(input);
       }

@@ -4,8 +4,22 @@
  * or submits. The wallet approves the unsigned transaction.
  * There is no in-tree wallet signer yet, so an unarmed session always stays on simulate.
  */
+import { PublicKey } from "@solana/web3.js";
 import type { PumpCoin, TradeEvent, TradeIntent } from "../types.js";
+import { isTokenProgram } from "../constants.js";
 import { rankCoins, type ScanInput, type ScoredCoin } from "./score.js";
+
+const UNKNOWN_WALLET = "11111111111111111111111111111111";
+
+export interface MintAuthorities {
+  mintAuthority: string | null;
+  freezeAuthority: string | null;
+}
+
+export interface AccountBytes {
+  data: Buffer;
+  owner: string;
+}
 
 export const SCAN_INTERVAL_MS = 5_000;
 export const SCAN_TOP_N = 20;
@@ -33,7 +47,13 @@ export interface AutoBuyResult {
   simulateOnly: boolean;
 }
 
-export function rowsFromBook(coins: readonly PumpCoin[], trades: readonly TradeEvent[], growth: ReadonlyMap<string, number>, now: number): ScanInput[] {
+export function rowsFromBook(
+  coins: readonly PumpCoin[],
+  trades: readonly TradeEvent[],
+  growth: ReadonlyMap<string, number>,
+  now: number,
+  authorities?: ReadonlyMap<string, MintAuthorities>
+): ScanInput[] {
   const byMint = new Map<string, TradeEvent[]>();
   for (const trade of trades) {
     const list = byMint.get(trade.mint) ?? [];
@@ -63,6 +83,8 @@ export function rowsFromBook(coins: readonly PumpCoin[], trades: readonly TradeE
         if (coin.creator && trade.user === coin.creator) dumping = true;
       }
     }
+    const held = holdingsOf(list, coin.creator, coin.curve?.tokenTotalSupply);
+    const auth = authorities?.get(coin.mint);
     rows.push({
       mint: coin.mint,
       symbol: coin.symbol,
@@ -73,10 +95,71 @@ export function rowsFromBook(coins: readonly PumpCoin[], trades: readonly TradeE
       sellLamports: sell,
       uniqueBuyers: buyers.size,
       holderGrowth: growth.get(coin.mint) ?? 0,
+      devHoldingPct: held?.devHoldingPct,
+      top10HoldingPct: held?.top10HoldingPct,
+      mintAuthority: auth ? auth.mintAuthority : undefined,
+      freezeAuthority: auth ? auth.freezeAuthority : undefined,
       creatorDumping: dumping
     });
   }
   return rows;
+}
+
+/**
+ * SPL mint authority words. Option 0 means revoked. A live authority is any other pubkey.
+ * Holding concentration is the net tape balance over curve supply, so the 10% and 30% gates
+ * see a number instead of "missing".
+ */
+export function authoritiesFromMint(data: Buffer, owner: string): MintAuthorities | null {
+  if (!isTokenProgram(owner) || data.length < 82) return null;
+  const mintOption = data.readUInt32LE(0);
+  const freezeOption = data.readUInt32LE(46);
+  return {
+    mintAuthority: mintOption === 0 ? null : new PublicKey(data.subarray(4, 36)).toBase58(),
+    freezeAuthority: freezeOption === 0 ? null : new PublicKey(data.subarray(50, 82)).toBase58()
+  };
+}
+
+export async function readMintAuthorities(
+  mints: readonly string[],
+  read: (address: string) => Promise<AccountBytes | null>
+): Promise<Map<string, MintAuthorities>> {
+  const map = new Map<string, MintAuthorities>();
+  await Promise.all(
+    mints.map(async (mint) => {
+      try {
+        const raw = await read(mint);
+        if (!raw) return;
+        const parsed = authoritiesFromMint(raw.data, raw.owner);
+        if (parsed) map.set(mint, parsed);
+      } catch {
+        /* a missing mint leaves the authority fields unset for this pass */
+      }
+    })
+  );
+  return map;
+}
+
+function holdingsOf(
+  trades: readonly TradeEvent[],
+  creator: string | undefined,
+  supplyRaw: string | undefined
+): { devHoldingPct: number; top10HoldingPct: number } | null {
+  const supply = Number(supplyRaw);
+  if (!Number.isFinite(supply) || supply <= 0) return null;
+  const balances = new Map<string, number>();
+  for (const trade of trades) {
+    if (!trade.user || trade.user === UNKNOWN_WALLET) continue;
+    const tokens = Number(trade.tokenAmount);
+    if (!Number.isFinite(tokens) || tokens === 0) continue;
+    balances.set(trade.user, (balances.get(trade.user) ?? 0) + (trade.isBuy ? tokens : -tokens));
+  }
+  const devUser = creator && creator !== UNKNOWN_WALLET ? creator : "";
+  const dev = devUser ? Math.max(0, balances.get(devUser) ?? 0) : 0;
+  const ranked = [...balances.values()].map((value) => Math.max(0, value)).sort((a, b) => b - a);
+  let top = 0;
+  for (const value of ranked.slice(0, 10)) top += value;
+  return { devHoldingPct: dev / supply, top10HoldingPct: top / supply };
 }
 
 export class HotScanner {
