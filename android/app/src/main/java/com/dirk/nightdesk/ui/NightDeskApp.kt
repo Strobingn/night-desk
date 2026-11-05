@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import com.dirk.nightdesk.AdviceNote
 import com.dirk.nightdesk.DeskRepository
 import com.dirk.nightdesk.DeskSnapshot
+import com.dirk.nightdesk.KellyHint
 import com.dirk.nightdesk.MarkPoint
 import com.dirk.nightdesk.PositionRow
 import com.dirk.nightdesk.TapeEvent
