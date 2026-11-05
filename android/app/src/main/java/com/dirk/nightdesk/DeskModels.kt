@@ -1,5 +1,6 @@
 package com.dirk.nightdesk
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class AdviceNote(
@@ -9,11 +10,22 @@ data class AdviceNote(
     val symbol: String?
 )
 
+data class MarkPoint(
+    val t: Long,
+    val priceUsd: Double
+)
+
 data class PositionRow(
     val mint: String,
     val symbol: String,
     val pnlUsd: Double,
     val pnlPct: Double,
+    val netPnlUsd: Double?,
+    val netPnlPct: Double?,
+    val exitSlippage: Double?,
+    val entrySlippage: Double?,
+    val markStale: Boolean,
+    val marks: List<MarkPoint>,
     val markPrice: Double,
     val stopPrice: Double,
     val entryPrice: Double,
@@ -80,6 +92,12 @@ fun parseDeskPayload(raw: String): DeskSnapshot? {
                         symbol = row.optString("symbol", "—"),
                         pnlUsd = row.optDouble("pnlUsd"),
                         pnlPct = row.optDouble("pnlPct"),
+                        netPnlUsd = row.optFinite("netPnlUsd"),
+                        netPnlPct = row.optFinite("netPnlPct"),
+                        exitSlippage = row.optFinite("exitSlippage"),
+                        entrySlippage = row.optFinite("entrySlippage"),
+                        markStale = row.optBoolean("markStale", false),
+                        marks = parseMarks(row.optJSONArray("marks")),
                         markPrice = row.optDouble("markPrice"),
                         stopPrice = row.optDouble("stopPrice"),
                         entryPrice = row.optDouble("entryPrice"),
@@ -116,4 +134,22 @@ fun parseDeskPayload(raw: String): DeskSnapshot? {
         positions = book,
         events = tape
     )
+}
+
+/** Null, missing, or non-finite stays null so the card cannot paint a made-up net. */
+private fun JSONObject.optFinite(key: String): Double? {
+    if (!has(key) || isNull(key)) return null
+    val n = optDouble(key)
+    return if (n.isFinite()) n else null
+}
+
+private fun parseMarks(array: JSONArray?): List<MarkPoint> {
+    if (array == null) return emptyList()
+    return buildList {
+        for (i in 0 until array.length()) {
+            val point = array.optJSONObject(i) ?: continue
+            val price = point.optDouble("priceUsd")
+            if (price.isFinite() && price > 0) add(MarkPoint(point.optLong("t"), price))
+        }
+    }
 }

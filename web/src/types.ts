@@ -67,6 +67,12 @@ export interface PositionView {
   marketValueUsd: number;
   pnlUsd: number;
   pnlPct: number;
+  netPnlUsd: number | null;
+  netPnlPct: number | null;
+  exitSlippage: number | null;
+  entrySlippage: number | null;
+  markStale: boolean;
+  marks: { t: number; priceUsd: number }[];
   peakPrice: number;
   trailArmed: boolean;
   stopPrice: number;

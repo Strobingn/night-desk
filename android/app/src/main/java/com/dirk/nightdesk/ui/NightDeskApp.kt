@@ -2,6 +2,7 @@ package com.dirk.nightdesk.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -42,7 +43,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import com.dirk.nightdesk.AdviceNote
 import com.dirk.nightdesk.DeskRepository
 import com.dirk.nightdesk.DeskSnapshot
+import com.dirk.nightdesk.MarkPoint
 import com.dirk.nightdesk.PositionRow
 import com.dirk.nightdesk.TapeEvent
 import kotlinx.coroutines.launch
@@ -252,7 +258,9 @@ private fun PositionCard(pos: PositionRow, onClose: (String) -> Unit) {
             Text(pos.symbol, style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
             Text(signed(pos.pnlUsd), color = if (pos.pnlUsd >= 0) Mint else Coral, fontFamily = FontFamily.Monospace)
         }
-        Text("${pct(pos.pnlPct)}  ·  score ${"%.2f".format(pos.score)}", color = Dim, fontSize = 12.sp)
+        Text("mark ${pct(pos.pnlPct)}  ·  score ${"%.2f".format(pos.score)}", color = Dim, fontSize = 12.sp)
+        NetLine(pos)
+        Sparkline(pos.marks)
         Text("Hard stop ${fmtPx(pos.stopPrice)}  ·  ${"%.1f".format(pos.stopDistancePct)}% under the mark", color = Ink, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
         val context = LocalContext.current
         FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -263,6 +271,59 @@ private fun PositionCard(pos: PositionRow, onClose: (String) -> Unit) {
             }
         }
         TextButton(onClick = { onClose(pos.mint) }) { Text("Close", color = Coral) }
+    }
+}
+
+@Composable
+private fun NetLine(pos: PositionRow) {
+    val net = pos.netPnlUsd
+    val netPct = pos.netPnlPct
+    if (net == null || netPct == null || !net.isFinite() || !netPct.isFinite()) {
+        Text(if (pos.markStale) "net —  stale mark" else "net —", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        return
+    }
+    val slip = pos.exitSlippage?.takeIf { it.isFinite() }?.let { "  ·  slip ${"%.2f".format(it * 100)}%" } ?: ""
+    Text(
+        "net ${signed(net)}  ${pct(netPct)}$slip",
+        color = if (net >= 0) Mint else Coral,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 12.sp
+    )
+    val paid = pos.entrySlippage?.takeIf { it.isFinite() }
+    if (paid != null) {
+        Text("buy slip ${"%.2f".format(paid * 100)}% already in cost", color = Dim, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun Sparkline(marks: List<MarkPoint>) {
+    val prices = marks.map { it.priceUsd }.filter { it.isFinite() && it > 0 }
+    if (prices.isEmpty()) return
+    val up = prices.last() >= prices.first()
+    val stroke = if (up) Lime else Coral
+    Canvas(Modifier.fillMaxWidth().height(36.dp).padding(top = 6.dp)) {
+        var min = prices[0]
+        var max = prices[0]
+        for (price in prices) {
+            if (price < min) min = price
+            if (price > max) max = price
+        }
+        val span = (max - min).takeIf { it > 0 } ?: (kotlin.math.abs(max) * 0.02).coerceAtLeast(1e-12)
+        val w = size.width
+        val h = size.height
+        fun yOf(price: Double): Float {
+            val y = h - ((price - min) / span).toFloat() * (h - 8f) - 4f
+            return y.coerceIn(2f, h - 2f)
+        }
+        val path = Path()
+        prices.forEachIndexed { index, price ->
+            val x = if (prices.size == 1) w / 2f else index / (prices.size - 1).toFloat() * w
+            val y = yOf(price)
+            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(path, color = stroke, style = Stroke(width = 2.5f, cap = StrokeCap.Round))
+        val lastX = if (prices.size == 1) w / 2f else w
+        drawCircle(color = Ink, radius = 3.2f, center = Offset(lastX, yOf(prices.last())))
     }
 }
 
