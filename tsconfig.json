@@ -9,7 +9,11 @@
     "types": ["node"],
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "next/server": ["./src/shims/next-server.ts"]
+    }
   },
-  "include": ["src", "test"]
+  "include": ["src", "lib", "app", "test"]
 }

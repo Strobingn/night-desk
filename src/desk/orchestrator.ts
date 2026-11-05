@@ -88,7 +88,7 @@ export class Desk {
       this.config.rules.minVolume1hUsd = clampVolumeUsd(saved.minVolume1hUsd);
     }
     this.rugs = new LayeredRugRegistry(new StaticRugRegistry(loadRugWalletMap(config.rugWalletsFile)));
-    const restored = config.resetPaper ? null : this.store.loadBook();
+    const restored = config.resetPaper ? null : this.store.loadBook(config.mode);
     const starting =
       restored && restored.startingBalanceUsd > 0 ? restored.startingBalanceUsd : config.startingBalanceUsd;
     this.config.startingBalanceUsd = starting;
@@ -498,6 +498,10 @@ export class Desk {
     }
 
     if (this.config.mode === "live") {
+      if (token.source === "replay") {
+        this.skipLive(token, report.score, "LIVE_SWAP_FAILED: refusing replay fixture in live mode.");
+        return;
+      }
       if (!this.config.walletKeypairPath) {
         this.skipLive(token, report.score, "Live mode lost its keypair path.");
         return;
@@ -509,6 +513,7 @@ export class Desk {
           mint: token.mint,
           sizeUsd: plan.sizeUsd,
           decimals: token.decimals,
+          liquidityUsd: token.liquidityUsd,
           keypairPath: this.config.walletKeypairPath,
           rpcUrl: this.config.rpcUrl,
           quoteUrl: this.config.jupiterQuoteUrl,
@@ -889,14 +894,17 @@ export class Desk {
   }
 
   private persist(): void {
-    this.store.saveBook({
-      cashUsd: this.book.cashUsd,
-      startingBalanceUsd: this.config.startingBalanceUsd,
-      startedAt: this.startedAt,
-      positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
-      cooldowns: [...this.cooldowns.entries()],
-      lastPrices: [...this.book.lastPrice.entries()]
-    });
+    this.store.saveBook(
+      {
+        cashUsd: this.book.cashUsd,
+        startingBalanceUsd: this.config.startingBalanceUsd,
+        startedAt: this.startedAt,
+        positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
+        cooldowns: [...this.cooldowns.entries()],
+        lastPrices: [...this.book.lastPrice.entries()]
+      },
+      this.config.mode
+    );
   }
 
   private log(event: Omit<FeedEvent, "id" | "ts">, payload?: unknown): void {

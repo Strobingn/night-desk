@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { HARD_RULES } from "../rules.js";
+import { calculateDynamicSlippageBps } from "../sniper.js";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
@@ -11,6 +12,8 @@ export interface LiveSwapRequest {
   /** Token qty on a sell. */
   qty?: number;
   decimals?: number | null;
+  liquidityUsd?: number;
+  slippageBps?: number;
   keypairPath: string;
   rpcUrl: string;
   quoteUrl: string;
@@ -61,14 +64,33 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   }
   if (!(amount > 0)) throw new Error("LIVE_SWAP_FAILED: amount rounded to zero");
 
+  const computedSlippageBps =
+    req.slippageBps ??
+    (req.liquidityUsd && req.liquidityUsd > 0 && req.sizeUsd
+      ? Math.min(
+          300,
+          Math.max(
+            25,
+            calculateDynamicSlippageBps({
+              priceImpactRatio: req.sizeUsd / (req.liquidityUsd * HARD_RULES.poolSideShare)
+            })
+          )
+        )
+      : 100);
+
   const quoteEndpoint = new URL(req.quoteUrl);
   quoteEndpoint.searchParams.set("inputMint", inputMint);
   quoteEndpoint.searchParams.set("outputMint", outputMint);
   quoteEndpoint.searchParams.set("amount", String(amount));
-  quoteEndpoint.searchParams.set("slippageBps", "100");
+  quoteEndpoint.searchParams.set("slippageBps", String(computedSlippageBps));
   const quoteRes = await fetch(quoteEndpoint, { signal: AbortSignal.timeout(8000) });
   if (!quoteRes.ok) throw new Error(`LIVE_SWAP_FAILED: quote HTTP ${quoteRes.status}`);
-  const quote = (await quoteRes.json()) as { outAmount?: string; inAmount?: string; error?: string };
+  const quote = (await quoteRes.json()) as {
+    outAmount?: string;
+    inAmount?: string;
+    priceImpactPct?: string | number;
+    error?: string;
+  };
   if (!quote.outAmount || quote.error) throw new Error(`LIVE_SWAP_FAILED: ${quote.error ?? "empty quote"}`);
 
   const swapRes = await fetch(req.swapUrl, {
@@ -107,6 +129,11 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     fillPriceUsd = qty > 0 ? notionalUsd / qty : 0;
   }
   const feeUsd = notionalUsd * (HARD_RULES.feeBps / 10_000);
+  const quotedImpact =
+    quote.priceImpactPct != null && Number.isFinite(Number(quote.priceImpactPct)) && Number(quote.priceImpactPct) > 0
+      ? Math.abs(Number(quote.priceImpactPct))
+      : null;
+  const effectiveSlippage = quotedImpact ?? (Math.abs(inAmount - amount) / amount || computedSlippageBps / 10_000);
   console.log(`[executor] live ${req.side} ${req.mint} owner ${owner} sig ${signature}`);
   return {
     signature,
@@ -114,6 +141,6 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     qty,
     notionalUsd,
     feeUsd,
-    slippage: Math.abs(inAmount - amount) / amount || 0.01
+    slippage: effectiveSlippage
   };
 }

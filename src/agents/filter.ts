@@ -28,6 +28,12 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
           ? "Mint authority is still active and can inflate supply."
           : "Mint authority could not be verified as revoked. Fail closed."
     });
+  } else if (token.freezeAuthorityRevoked === false) {
+    checks.push({
+      code: "MINT_AUTHORITY_ACTIVE",
+      pass: false,
+      message: "Freeze authority is still active (honeypot vector)."
+    });
   } else {
     checks.push({
       code: "MINT_AUTHORITY_ACTIVE",
@@ -66,6 +72,8 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
 
   const holderPct = token.top10HolderPct;
   const holdersKnown = typeof holderPct === "number" && Number.isFinite(holderPct);
+  const entropy = token.shannonEntropyNormalized;
+  const bundleRatio = token.blockZeroBundleRatio;
   if (!holdersKnown) {
     checks.push({
       code: "HOLDER_CONCENTRATION",
@@ -77,6 +85,24 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
       code: "HOLDER_CONCENTRATION",
       pass: false,
       message: `Top 10 holders control ${pct(holderPct)} of supply (limit ${pct(rules.maxTop10Pct)}).`
+    });
+  } else if (typeof bundleRatio === "number" && bundleRatio > 0.22) {
+    checks.push({
+      code: "HOLDER_CONCENTRATION",
+      pass: false,
+      message: `Block-0 dev bundle sniped ${pct(bundleRatio)} of total supply (limit 22.0%).`
+    });
+  } else if (typeof entropy === "number" && (token.holderCount ?? 0) >= 15 && entropy > 0.985) {
+    checks.push({
+      code: "HOLDER_CONCENTRATION",
+      pass: false,
+      message: `Sybil bundle detected: uniform holder Shannon entropy (${entropy.toFixed(3)} > 0.985).`
+    });
+  } else if (typeof entropy === "number" && (token.holderCount ?? 0) >= 5 && entropy < 0.45) {
+    checks.push({
+      code: "HOLDER_CONCENTRATION",
+      pass: false,
+      message: `Whale anomaly detected: low holder Shannon entropy (${entropy.toFixed(3)} < 0.45).`
     });
   } else {
     checks.push({

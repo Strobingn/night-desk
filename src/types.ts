@@ -56,6 +56,8 @@ export interface CandidateToken {
   ageSeconds: number;
   /** null = could not verify. Treated as not revoked. */
   mintAuthorityRevoked: boolean | null;
+  /** Optional freeze authority status. false = active honeypot freeze vector. */
+  freezeAuthorityRevoked?: boolean | null;
   /**
    * null = could not verify.
    * Fail closed, except while `onBondingCurve` is true (no pool LP exists yet).
@@ -68,6 +70,12 @@ export interface CandidateToken {
   /** Fraction of supply, 0–1. null = could not verify. */
   top10HolderPct: number | null;
   holderCount: number | null;
+  /** Optional Normalized Shannon Entropy H_norm in [0, 1] across top non-LP holders. */
+  shannonEntropyNormalized?: number | null;
+  /** Optional fraction of supply sniped in Block 0 (genesis slot). */
+  blockZeroBundleRatio?: number | null;
+  /** Optional bonding curve completion percentage [0, 100] from zero-RPC binary decode. */
+  bondingCurveCompletionPct?: number | null;
   devWallet?: string | null;
   /** Populated when an upstream report already links the deployer to rugs. */
   devRug?: { rugged: boolean; evidence?: string } | null;
@@ -284,6 +292,8 @@ export interface RawSighting {
   source: "pumpfun" | "raydium";
   devWallet?: string;
   observedAt: number;
+  /** Optional raw 49-byte Pump.fun bonding curve buffer from Geyser stream (zero-RPC decode). */
+  bondingCurveBuffer?: Uint8Array;
 }
 
 export type RugLookup =

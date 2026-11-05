@@ -5,7 +5,8 @@ import path from "node:path";
 import { WebSocketServer } from "ws";
 import type { Desk } from "../desk/orchestrator.js";
 import { buildRecap, formatRecap, parseSince } from "../desk/recap.js";
-import { deskSessionCookie, requestAuthorized } from "./auth.js";
+import { deskSessionCookie, headerToken, requestAuthorized } from "./auth.js";
+import { processIdempotentSolanaWebhook, verifyMcpRequest } from "./mcp-webhook.js";
 
 const DEFAULT_DIST = path.resolve("web/dist");
 
@@ -20,6 +21,30 @@ export function startServer(
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      if (url.pathname === "/api/mcp" && req.method === "POST") {
+        const rawPayload = await readText(req);
+        const result = verifyMcpRequest({
+          rawPayload,
+          publicKeyStr: headerToken(req.headers["x-wallet-pubkey"]),
+          signatureStr: headerToken(req.headers["x-wallet-signature"]),
+          timestampStr: headerToken(req.headers["x-request-timestamp"])
+        });
+        return json(res, result.status, result.body);
+      }
+      if (url.pathname === "/api/webhooks/solana" && req.method === "POST") {
+        let events: unknown;
+        try {
+          events = await readJson(req);
+        } catch {
+          return json(res, 400, { error: "Invalid payload format" });
+        }
+        const result = processIdempotentSolanaWebhook({
+          authHeader: headerToken(req.headers.authorization),
+          expectedSecret: process.env.HELIUS_WEBHOOK_SECRET,
+          events
+        });
+        return json(res, result.status, result.body);
+      }
       if (!requestAuthorized(deskToken, req, url)) return unauthorized(res);
       if (deskToken) res.setHeader("set-cookie", deskSessionCookie(deskToken));
       if (url.pathname === "/api/health") return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now() });
@@ -127,6 +152,18 @@ export function startServer(
     console.log(`[desk] terminal http://127.0.0.1:${shown} (${gate})`);
   });
   return server;
+}
+
+async function readText(req: http.IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buf.length;
+    if (size > 64_000) throw new Error("body too large");
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {

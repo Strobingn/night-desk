@@ -1,7 +1,9 @@
 import { isReserveHolder, pumpReserveAddresses } from "./exclusions.js";
+import { calculateNormalizedShannonEntropy } from "../risk/analyzer.js";
 
 export interface ParsedMint {
   mintAuthorityRevoked: boolean | null;
+  freezeAuthorityRevoked: boolean | null;
   supplyUi: number | null;
   decimals: number | null;
 }
@@ -10,10 +12,21 @@ export interface ParsedMint {
 export function parseMintAccount(result: unknown): ParsedMint {
   const info = (
     result as {
-      value?: { data?: { parsed?: { info?: { mintAuthority?: string | null; supply?: string; decimals?: number } } } };
+      value?: {
+        data?: {
+          parsed?: {
+            info?: {
+              mintAuthority?: string | null;
+              freezeAuthority?: string | null;
+              supply?: string;
+              decimals?: number;
+            };
+          };
+        };
+      };
     }
   )?.value?.data?.parsed?.info;
-  if (!info) return { mintAuthorityRevoked: null, supplyUi: null, decimals: null };
+  if (!info) return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
   const decimals = typeof info.decimals === "number" ? info.decimals : null;
   let supplyUi: number | null = null;
   if (info.supply != null && decimals != null) {
@@ -21,7 +34,8 @@ export function parseMintAccount(result: unknown): ParsedMint {
     supplyUi = Number.isFinite(raw) ? raw / 10 ** decimals : null;
   }
   const revoked = info.mintAuthority == null;
-  return { mintAuthorityRevoked: revoked, supplyUi, decimals };
+  const freezeRevoked = info.freezeAuthority == null;
+  return { mintAuthorityRevoked: revoked, freezeAuthorityRevoked: freezeRevoked, supplyUi, decimals };
 }
 
 export interface LargestHolderRow {
@@ -44,7 +58,12 @@ export function parseTop10Pct(
   result: unknown,
   supplyUi: number | null,
   exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {}
-): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number } {
+): {
+  top10HolderPct: number | null;
+  holderCount: number | null;
+  excludedReserves: number;
+  shannonEntropyNormalized?: number | null;
+} {
   const rows = (result as { value?: LargestHolderRow[] })?.value;
   if (!Array.isArray(rows) || !(supplyUi && supplyUi > 0)) {
     return { top10HolderPct: null, holderCount: null, excludedReserves: 0 };
@@ -54,9 +73,27 @@ export function parseTop10Pct(
   }
   const retail = rows.filter((row) => !isReserveRow(row, exclude));
   const excludedReserves = rows.length - retail.length;
-  const amounts = retail.slice(0, 10).map(rowAmount);
+
+  // Aggregate by owner when owner is known so a single wallet splitting across multiple token accounts is summed
+  const byOwner = new Map<string, number>();
+  retail.forEach((row, idx) => {
+    const key = row.owner || row.address || `idx-${idx}`;
+    const amt = rowAmount(row);
+    byOwner.set(key, (byOwner.get(key) ?? 0) + amt);
+  });
+
+  const sortedBalances = [...byOwner.values()].sort((a, b) => b - a);
+  const amounts = sortedBalances.slice(0, 10);
   const sum = amounts.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: retail.length, excludedReserves };
+  const shannonEntropyNormalized =
+    sortedBalances.length > 1 ? calculateNormalizedShannonEntropy(sortedBalances.slice(0, 25)) : null;
+
+  return {
+    top10HolderPct: sum / supplyUi,
+    holderCount: byOwner.size,
+    excludedReserves,
+    shannonEntropyNormalized,
+  };
 }
 
 export interface TokenAccountRow {

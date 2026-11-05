@@ -1,5 +1,6 @@
 import type { CandidateToken, RawSighting } from "../types.js";
 import { inferOnBondingCurve, pumpReserveAddresses, RESERVE_OWNER_SET } from "./exclusions.js";
+import { decodePumpCurveBinary } from "../indexer/geyser.js";
 import {
   attachTokenOwners,
   parseDexPair,
@@ -94,6 +95,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   if (deps.rpcUrl) {
     const mint = parseMintAccount(mintInfo);
     if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
+    if (mint.freezeAuthorityRevoked != null) token.freezeAuthorityRevoked = mint.freezeAuthorityRevoked;
     if (mint.decimals != null) token.decimals = mint.decimals;
     const reserves = new Set([...pumpReserveAddresses(raw.mint), ...RESERVE_OWNER_SET]);
     const exclude = { addresses: reserves, owners: RESERVE_OWNER_SET };
@@ -150,6 +152,18 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   }
 
   token.onBondingCurve = inferOnBondingCurve({ source: token.source, dex: token.dex, riskText });
+
+  // Zero-RPC binary bonding curve decode when raw Geyser buffer is available (Fixes PERF-02)
+  if (raw.bondingCurveBuffer && raw.bondingCurveBuffer.byteLength >= 49) {
+    try {
+      const curveState = decodePumpCurveBinary(raw.bondingCurveBuffer);
+      token.onBondingCurve = !curveState.complete;
+      token.bondingCurveCompletionPct = curveState.completionPercentage;
+    } catch {
+      /* ignore malformed buffer */
+    }
+  }
+
   return token;
 }
 

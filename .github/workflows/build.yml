@@ -3,9 +3,13 @@ name: Build Night-Desk on Code Change
 on:
   push:
     branches:
+      - main
+      - gravity
       - gemini
   pull_request:
     branches:
+      - main
+      - gravity
       - gemini
   workflow_dispatch:
 
@@ -45,7 +49,7 @@ jobs:
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
           BUNDLE="night-desk-app-${GITHUB_REF_NAME}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.tar.gz"
           tar -czf "$BUNDLE" \
-            dist/ web/dist/ scripts/ deploy/ \
+            dist/ lib/ app/ web/dist/ scripts/ deploy/ \
             package.json package-lock.json ecosystem.config.cjs Dockerfile docker-compose.yml .env.example
           echo "bundle_name=${BUNDLE}" >> $GITHUB_OUTPUT
 
@@ -98,14 +102,14 @@ jobs:
           path: ./${{ steps.apk_pkg.outputs.apk_name }}
           retention-days: 30
 
-      - name: Create GitHub Release on Code Push (gemini branch)
-        if: github.ref == 'refs/heads/gemini' && github.event_name == 'push'
+      - name: Create GitHub Release on Code Push
+        if: (github.ref == 'refs/heads/gravity' || github.ref == 'refs/heads/gemini') && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: gemini-build-${{ github.run_number }}
-          name: "Night-Desk Automated Build #${{ github.run_number }} (gemini)"
+          tag_name: ${{ github.ref_name }}-build-${{ github.run_number }}
+          name: "Night-Desk Automated Build #${{ github.run_number }} (${{ github.ref_name }})"
           body: |
-            Automated build generated from commit `${{ github.sha }}` on branch `gemini`.
+            Automated build generated from commit `${{ github.sha }}` on branch `${{ github.ref_name }}`.
             - **Android APK:** `${{ steps.apk_pkg.outputs.apk_name }}`
             - **Backend & Agent Test Suite:** Passed
           prerelease: true
