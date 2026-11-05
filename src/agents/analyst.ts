@@ -1,15 +1,6 @@
 import type { AnalystReport, CandidateToken, ScoreFactor, SocialProxy } from "../types.js";
 import type { ResolvedRules } from "../rules.js";
 
-/**
- * Weights sum to 1. Applied only to Filter survivors.
- *
- * liquidity — pool depth bands. Deeper locked liquidity scores higher.
- * holders   — top-10 share inside the 20% gate, plus a small breadth bonus.
- * volume    — last-hour notional, with a wash penalty when volume dwarfs liquidity.
- * age       — very new mints are penalized; 30 minutes to 6 hours is the sweet spot.
- * social    — weak proxy only: site, telegram, twitter, mention count. Never enough alone.
- */
 export const SCORE_WEIGHTS = {
   liquidity: 0.25,
   holders: 0.25,
@@ -35,7 +26,6 @@ export function holderScore(top10: number | null, holders: number | null): { raw
   else if (top10 <= 0.2) base = 0.42;
   else base = 0;
   const count = holders ?? 0;
-  // Breadth only softens a concentration still inside the gate. It never lifts a zero.
   const bonus = base === 0 ? 0 : count >= 1000 ? 0.08 : count >= 400 ? 0.04 : 0;
   const raw = Math.min(1, base + bonus);
   return {
@@ -54,7 +44,7 @@ export function volumeScore(volume1hUsd: number, liquidityUsd: number): { raw: n
   let note = `$${Math.round(volume1hUsd).toLocaleString("en-US")} volume vs $${Math.round(liquidityUsd).toLocaleString("en-US")} liquidity.`;
   if (ratio > 20) {
     base *= 0.7;
-    note += " Volume dwarfs liquidity, so the print is discounted as possible wash.";
+    note += " Volume dwarfs liquidity, discounted as possible wash trading.";
   } else if (ratio >= 0.4 && ratio <= 8) {
     base = Math.min(1, base + 0.08);
     note += " Turnover sits in a healthy band.";
@@ -96,7 +86,6 @@ export function socialScore(social: SocialProxy): { raw: number; note: string } 
 }
 
 export function decideScore(score: number, min: number): "trade" | "reject" {
-  // The tolerance only absorbs float error. A true 0.60 summed as 0.5999999999 still trades.
   return score + 1e-9 >= min ? "trade" : "reject";
 }
 
@@ -124,7 +113,6 @@ export function scoreToken(token: CandidateToken, rules: ResolvedRules): Analyst
     contribution: roundScore(p.raw * p.weight),
     note: p.note
   }));
-  // Decide on the exact sum. Rounding first would let 0.59996 trade at a 0.60 line.
   const exact = parts.reduce((sum, p) => sum + p.raw * p.weight, 0);
   const score = roundScore(exact);
   const decision = decideScore(exact, rules.analystMinScore);
