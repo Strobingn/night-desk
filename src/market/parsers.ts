@@ -136,6 +136,7 @@ export interface ParsedRugcheck {
   /** True when at least one reported holder was dropped as a curve, vault, or burn account. */
   holdersExcludeReserves: boolean;
   devWallet: string | null;
+  devHoldingPct: number | null;
   devRug: { rugged: boolean; evidence?: string } | null;
   riskText: string;
 }
@@ -191,6 +192,13 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
   const holdersExcludeReserves = holderRead.excludedReserves;
 
   const devWallet = data.creator ?? data.creatorAddress ?? null;
+  let devHoldingPct: number | null = null;
+  if (devWallet && Array.isArray(data.topHolders)) {
+    const hit = data.topHolders.find((holder) => holder.address === devWallet || holder.owner === devWallet);
+    if (hit && typeof hit.pct === "number" && Number.isFinite(hit.pct)) {
+      devHoldingPct = hit.pct > 1 ? hit.pct / 100 : hit.pct;
+    }
+  }
   const rugRisk = names.some((n) => /creator|deployer|dev/.test(n) && /rug|scam/.test(n));
   const devRug =
     data.rugged === true || rugRisk
@@ -204,6 +212,7 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
     top10HolderPct,
     holdersExcludeReserves,
     devWallet,
+    devHoldingPct,
     devRug,
     riskText: names.join("\n")
   };
@@ -232,6 +241,8 @@ export function parseDexPair(payload: unknown, mint: string): {
   priceUsd: number;
   liquidityUsd: number;
   volume1hUsd: number;
+  volume5mUsd?: number;
+  priceChange1hPct?: number;
   marketCapUsd?: number;
   ageSeconds: number;
   pairAddress?: string;
@@ -259,10 +270,16 @@ export function parseDexPair(payload: unknown, mint: string): {
   const created = typeof best.pairCreatedAt === "number" ? best.pairCreatedAt : Date.now();
   const dexId = String(best.dexId ?? "");
   const base = best.baseToken as { symbol?: string; name?: string };
+  const volume1hUsd = matching.reduce((max, pair) => Math.max(max, pairHourVolume(pair)), 0);
+  const volume5mUsd = matching.reduce((max, pair) => Math.max(max, finite((pair.volume as { m5?: unknown } | undefined)?.m5)), 0);
+  const changeRaw = (best.priceChange as { h1?: unknown } | undefined)?.h1;
+  const change = typeof changeRaw === "number" || (typeof changeRaw === "string" && changeRaw.trim() !== "") ? Number(changeRaw) : NaN;
   return {
+    volume5mUsd: volume5mUsd > 0 ? volume5mUsd : undefined,
+    priceChange1hPct: Number.isFinite(change) ? change : undefined,
     priceUsd: Number(best.priceUsd ?? 0) || 0,
     liquidityUsd: Number((best.liquidity as { usd?: number } | undefined)?.usd ?? 0) || 0,
-    volume1hUsd: Number((best.volume as { h1?: number } | undefined)?.h1 ?? 0) || 0,
+    volume1hUsd,
     marketCapUsd: Number(best.marketCap ?? 0) || undefined,
     ageSeconds: Math.max(0, (Date.now() - created) / 1000),
     pairAddress: typeof best.pairAddress === "string" ? best.pairAddress : undefined,
@@ -277,4 +294,23 @@ export function parseDexPair(payload: unknown, mint: string): {
     symbol: base?.symbol,
     name: base?.name
   };
+}
+
+/** Real 1h volume from a DexScreener pair. A pool younger than an hour often only fills h24. */
+export function pairHourVolume(pair: Record<string, unknown>, now = Date.now()): number {
+  const vol = pair.volume as { h1?: unknown; h24?: unknown } | undefined;
+  const h1 = finite(vol?.h1);
+  if (h1 > 0) return h1;
+  const created = typeof pair.pairCreatedAt === "number" ? pair.pairCreatedAt : 0;
+  const ageMs = created > 0 ? now - created : Number.POSITIVE_INFINITY;
+  if (ageMs >= 0 && ageMs <= 60 * 60 * 1000) {
+    const h24 = finite(vol?.h24);
+    if (h24 > 0) return h24;
+  }
+  return 0;
+}
+
+function finite(value: unknown): number {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isFinite(n) ? n : 0;
 }

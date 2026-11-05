@@ -83,6 +83,53 @@ describe("scout enrich drain", () => {
     expect(published).toEqual(["a", "c", "d"]);
     scout.stop();
   });
+
+  it("keeps a burst of the same mint to one tape line", async () => {
+    const bus = new EventBus<DeskEvents>();
+    const published: string[] = [];
+    bus.on("scout.candidate", (token) => {
+      published.push(token.mint);
+    });
+    const scout = new Scout({
+      bus,
+      feedMode: "live",
+      demo: false,
+      pumpWsUrl: "ws://unused",
+      enrichConcurrency: 4,
+      fetchImpl: async () => Response.json({ pairs: [] }),
+      onStatus: () => {}
+    });
+    const mint = "SameMint1111111111111111111111111111111111";
+    for (let i = 0; i < 4; i += 1) scout.ingest({ mint, symbol: "SAME", source: "pumpfun", observedAt: Date.now() });
+    expect(scout.status.sightings).toBe(1);
+    await waitFor(() => published.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(published).toEqual([mint]);
+    scout.stop();
+  });
+
+  it("fills 1h volume from a later listing when the first pass had none", async () => {
+    const bus = new EventBus<DeskEvents>();
+    const volumes: number[] = [];
+    bus.on("scout.candidate", (token) => {
+      volumes.push(token.volume1hUsd);
+    });
+    const scout = new Scout({
+      bus,
+      feedMode: "live",
+      demo: false,
+      pumpWsUrl: "ws://unused",
+      fetchImpl: async () => Response.json({ pairs: [] }),
+      onStatus: () => {}
+    });
+    const mint = "VolMint11111111111111111111111111111111111";
+    scout.ingest({ mint, symbol: "VOL", source: "pumpfun", observedAt: Date.now() });
+    await waitFor(() => volumes.length === 1);
+    scout.ingest({ mint, symbol: "VOL", source: "raydium", observedAt: Date.now(), volume1hUsd: 12_500, priceUsd: 0.01 });
+    await waitFor(() => volumes.length === 2);
+    expect(volumes).toEqual([0, 12_500]);
+    scout.stop();
+  });
 });
 
 async function waitFor(done: () => boolean): Promise<void> {

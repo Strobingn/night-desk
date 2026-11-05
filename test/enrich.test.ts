@@ -55,12 +55,12 @@ describe("enrich overlap", () => {
   });
 
   it("clamps enrich concurrency and queue from the environment", () => {
-    expect(loadConfig({}).enrichConcurrency).toBe(6);
+    expect(loadConfig({}).enrichConcurrency).toBe(8);
     expect(loadConfig({}).enrichQueueCap).toBe(160);
     expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "8" }).enrichConcurrency).toBe(8);
     expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "0" }).enrichConcurrency).toBe(1);
-    expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "99" }).enrichConcurrency).toBe(12);
-    expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "nope" }).enrichConcurrency).toBe(6);
+    expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "99" }).enrichConcurrency).toBe(16);
+    expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "nope" }).enrichConcurrency).toBe(8);
     expect(loadConfig({ SCOUT_ENRICH_QUEUE: "3" }).enrichQueueCap).toBe(8);
     expect(loadConfig({ SCOUT_ENRICH_QUEUE: "5000" }).enrichQueueCap).toBe(2000);
   });

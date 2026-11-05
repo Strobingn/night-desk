@@ -1,4 +1,5 @@
 import type { ClosedTrade, EquityPoint, FeedEvent, PositionView } from "../types.js";
+import { exitLabel } from "./gap.js";
 
 export interface Recap {
   since: number;
@@ -23,6 +24,98 @@ export interface Recap {
   executorSkips: Record<string, number>;
   riskExits: Record<string, number>;
   scouted: number;
+}
+
+/** Closed trades shipped with a recap. Counts still cover the whole window. */
+export const RECAP_CLOSED_LIMIT = 50;
+
+export interface RecapReport {
+  since: number;
+  until: number;
+  startingEquity: number;
+  endingEquity: number;
+  pnlUsd: number;
+  pnlPct: number;
+  closedCount: number;
+  closed: ClosedTrade[];
+  winCount: number;
+  lossCount: number;
+  breakevenCount: number;
+  winRate: number | null;
+  biggestWin?: ClosedTrade;
+  biggestLoss?: ClosedTrade;
+  open: PositionView[];
+  filterKills: number;
+  filterPasses: number;
+  killReasons: Record<string, number>;
+  analystRejects: number;
+  executorSkips: Record<string, number>;
+  riskExits: Record<string, number>;
+  scouted: number;
+  text: string;
+}
+
+/**
+ * Last time the book was stamped down to its starting balance.
+ * The known case is the $10,000 paper book jumping to $100.
+ * A slow drift onto that number is not a reset.
+ */
+export function resetAtFromEquity(points: EquityPoint[], startingBalanceUsd = 100): number | null {
+  let found: number | null = null;
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = points[i - 1]!;
+    const next = points[i]!;
+    if (isBookReset(prev.equity, next.equity, startingBalanceUsd) || isBookReset(prev.cash, next.cash, startingBalanceUsd)) {
+      found = next.t;
+    }
+  }
+  return found;
+}
+
+function isBookReset(before: number, after: number, starting: number): boolean {
+  if (!Number.isFinite(before) || !Number.isFinite(after)) return false;
+  const targets = Math.abs(starting - 100) < 0.01 ? [100] : [starting, 100];
+  for (const target of targets) {
+    const near = Math.abs(after - target) <= Math.max(1, Math.abs(target) * 0.01);
+    if (near && before >= 1_000 && before - after >= 500) return true;
+  }
+  return false;
+}
+
+/** Requested window, never earlier than the current book's floor. `reset` is the floor itself. */
+export function resolveRecapSince(arg: string | undefined, floorTs: number, now = Date.now()): number {
+  const floor = Number.isFinite(floorTs) && floorTs > 0 ? floorTs : 0;
+  if (arg === "reset") return floor;
+  return Math.max(parseSince(arg, now), floor);
+}
+
+/** Summary plus the last 50 closes. Win and loss lists stay as counts so the body stays small. */
+export function recapReport(recap: Recap): RecapReport {
+  return {
+    since: recap.since,
+    until: recap.until,
+    startingEquity: recap.startingEquity,
+    endingEquity: recap.endingEquity,
+    pnlUsd: recap.pnlUsd,
+    pnlPct: recap.pnlPct,
+    closedCount: recap.closed.length,
+    closed: recap.closed.slice(-RECAP_CLOSED_LIMIT),
+    winCount: recap.wins.length,
+    lossCount: recap.losses.length,
+    breakevenCount: recap.breakeven.length,
+    winRate: recap.winRate,
+    biggestWin: recap.biggestWin,
+    biggestLoss: recap.biggestLoss,
+    open: recap.open,
+    filterKills: recap.filterKills,
+    filterPasses: recap.filterPasses,
+    killReasons: recap.killReasons,
+    analystRejects: recap.analystRejects,
+    executorSkips: recap.executorSkips,
+    riskExits: recap.riskExits,
+    scouted: recap.scouted,
+    text: formatRecap(recap)
+  };
 }
 
 export function buildRecap(input: {
@@ -146,7 +239,35 @@ export function formatRecap(recap: Recap): string {
   lines.push(...table(recap.executorSkips));
   lines.push("Risk exits:");
   lines.push(...table(recap.riskExits));
+  const recent = recap.closed.slice(-RECAP_CLOSED_LIMIT);
+  if (recent.length) {
+    lines.push("");
+    lines.push(
+      recap.closed.length > recent.length
+        ? `Recent closes: last ${recent.length} of ${recap.closed.length}`
+        : "Recent closes:"
+    );
+    for (const trade of recent.slice().reverse()) {
+      lines.push(`  ${trade.symbol.padEnd(10)} ${signedUsd(trade.pnlUsd)}  ${closeLabel(trade)}`);
+    }
+    const gaps = recap.closed.filter((trade) => trade.exitCode === "GAP_RUG").length;
+    if (gaps) {
+      lines.push(
+        `  ${gaps} gap/rug exit${gaps === 1 ? "" : "s"}: the price moved past the stop line between marks (or the pool was pulled). A stop cannot fill better than the market, so these are recorded at the true fill.`
+      );
+    }
+  }
   return lines.join("\n");
+}
+
+/** v13.3: honest exit label with the true fill vs entry, e.g. "gap/rug, fill −99.9%". */
+function closeLabel(trade: ClosedTrade): string {
+  const label = exitLabel(trade.exitCode);
+  if (trade.entryPrice && trade.entryPrice > 0 && trade.exitPrice != null && (trade.exitCode === "GAP_RUG" || trade.exitCode === "STOP_LOSS")) {
+    const pct = (trade.exitPrice / trade.entryPrice - 1) * 100;
+    return `${label}, fill ${pct < 0 ? "−" : "+"}${Math.abs(pct).toFixed(1)}%`;
+  }
+  return label;
 }
 
 function table(counts: Record<string, number>): string[] {

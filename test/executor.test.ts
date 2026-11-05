@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planOrder } from "../src/agents/execution-math.js";
+import { planOrder, resolveManualSize } from "../src/agents/execution-math.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { HARD_RULES, resolveRules } from "../src/rules.js";
 import { testDesk } from "./helpers.js";
@@ -60,6 +60,21 @@ describe("Executor 8% cap", () => {
     expect(order.ok).toBe(true);
     if (!order.ok) return;
     expect(order.sizeUsd).toBe(800);
+  });
+
+  it("cuts a manual size above the plan down to the cap and keeps a blank size at the cap", () => {
+    expect(resolveManualSize(800, undefined)).toEqual({ ok: true, sizeUsd: 800, capUsd: 800 });
+    expect(resolveManualSize(800, 25)).toEqual({ ok: true, sizeUsd: 25, capUsd: 800 });
+    expect(resolveManualSize(800, 800.004)).toMatchObject({ ok: true, sizeUsd: 800 });
+    expect(resolveManualSize(800, 800.02)).toEqual({ ok: true, sizeUsd: 800, capUsd: 800, clampedFrom: 800.02 });
+    expect(resolveManualSize(7.1, 10)).toEqual({ ok: true, sizeUsd: 7.1, capUsd: 7.1, clampedFrom: 10 });
+    const dust = resolveManualSize(800, 0.001);
+    expect(dust.ok).toBe(false);
+    const bad = resolveManualSize(800, Number.NaN);
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.reason.message).toBe("Manual size must be a positive USD amount. Order refused.");
+    const zero = resolveManualSize(800, 0);
+    expect(zero.ok).toBe(false);
   });
 
   it("ignores an env cap above 8%", () => {

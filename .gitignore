@@ -7,8 +7,8 @@ data/*.jsonl
 data/ruggers.json
 data/advisor.json
 data/advisor.json.tmp
-# Current Cloudflare quick-tunnel hostname. Local only. Never commit the URL.
 data/public-url.txt
+data/cloudflared.pid
 android/.gradle
 android/build
 android/app/build

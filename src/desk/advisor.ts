@@ -1,3 +1,4 @@
+import { tinyPx } from "../price-text.js";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -8,6 +9,16 @@ export interface FeatureSample {
   ageSeconds: number;
   onBondingCurve: boolean;
   score?: number;
+  /** The mint was shown as a near-miss card before this entry. */
+  nearMiss?: boolean;
+}
+
+export interface NearMissStat {
+  surfaced: number;
+  taken: number;
+  wins: number;
+  losses: number;
+  pnlSum: number;
 }
 
 export interface BucketStat {
@@ -24,6 +35,7 @@ export interface AdvisorMemory {
   buckets: Record<string, BucketStat>;
   entries: Record<string, FeatureSample & { symbol: string }>;
   lessons: string[];
+  nearMiss: NearMissStat;
 }
 
 export interface AdvicePosition {
@@ -46,14 +58,29 @@ export interface WeakSurvivor {
 }
 
 export interface Advice {
-  stance: "sell" | "skip" | "hold" | "watch";
+  stance: "sell" | "skip" | "hold" | "watch" | "near-miss";
   symbol?: string;
   mint?: string;
   text: string;
+  code?: string;
+  score?: number;
+}
+
+export function emptyNearMiss(): NearMissStat {
+  return { surfaced: 0, taken: 0, wins: 0, losses: 0, pnlSum: 0 };
 }
 
 export function emptyMemory(): AdvisorMemory {
-  return { version: 1, updatedAt: Date.now(), kills: {}, passes: 0, buckets: {}, entries: {}, lessons: [] };
+  return {
+    version: 1,
+    updatedAt: Date.now(),
+    kills: {},
+    passes: 0,
+    buckets: {},
+    entries: {},
+    lessons: [],
+    nearMiss: emptyNearMiss()
+  };
 }
 
 export function bucketKey(sample: FeatureSample): string {
@@ -75,6 +102,18 @@ export function notePass(memory: AdvisorMemory): void {
   memory.updatedAt = Date.now();
 }
 
+export function noteNearMissSurface(memory: AdvisorMemory): void {
+  memory.nearMiss = memory.nearMiss ?? emptyNearMiss();
+  memory.nearMiss.surfaced += 1;
+  memory.updatedAt = Date.now();
+}
+
+export function noteNearMissTaken(memory: AdvisorMemory): void {
+  memory.nearMiss = memory.nearMiss ?? emptyNearMiss();
+  memory.nearMiss.taken += 1;
+  memory.updatedAt = Date.now();
+}
+
 export function noteEntry(memory: AdvisorMemory, mint: string, symbol: string, sample: FeatureSample): void {
   memory.entries[mint] = { ...sample, symbol };
   memory.updatedAt = Date.now();
@@ -92,6 +131,12 @@ export function noteOutcome(memory: AdvisorMemory, mint: string, pnlPct: number,
   stat.pnlSum += pnlPct;
   memory.buckets[key] = stat;
   const lesson = `${entry.symbol} ${won ? "won" : "lost"} ${(pnlPct * 100).toFixed(1)}% in ${key} (${stat.wins}/${stat.n}).`;
+  if (entry.nearMiss) {
+    memory.nearMiss = memory.nearMiss ?? emptyNearMiss();
+    if (won) memory.nearMiss.wins += 1;
+    else memory.nearMiss.losses += 1;
+    memory.nearMiss.pnlSum += pnlPct;
+  }
   memory.lessons.push(lesson);
   memory.lessons = memory.lessons.slice(-40);
   memory.updatedAt = Date.now();
@@ -119,6 +164,13 @@ export function advise(
   }
 
   if (input.weak) notes.push(adviseWeak(memory, input.weak));
+  const near = memory.nearMiss;
+  if (near && near.surfaced > 0) {
+    notes.push({
+      stance: "watch",
+      text: `Near-miss record: surfaced ${near.surfaced}, taken ${near.taken}, wins ${near.wins}, losses ${near.losses}. Advice only.`
+    });
+  }
   return notes.slice(0, 8);
 }
 
@@ -170,12 +222,12 @@ function adviseWeak(memory: AdvisorMemory, weak: WeakSurvivor): Advice {
       text: `Skip / weak survivor ${weak.symbol} — similar names won ${stat.wins} of ${stat.n} (avg ${avg.toFixed(1)}%). Score ${weak.score.toFixed(2)}. Advice only.`
     };
   }
-  if (weak.score < 0.6) {
+  if (weak.score < 0.5) {
     return {
       stance: "skip",
       mint: weak.mint,
       symbol: weak.symbol,
-      text: `Skip / weak survivor ${weak.symbol} — score ${weak.score.toFixed(2)} is under 0.60. Advice only.`
+      text: `Skip / weak survivor ${weak.symbol} — score ${weak.score.toFixed(2)} is under 0.50. Advice only.`
     };
   }
   return {
@@ -195,7 +247,16 @@ export class AdvisorBook {
     try {
       const raw = readFileSync(filePath, "utf8");
       const parsed = JSON.parse(raw) as AdvisorMemory;
-      if (parsed && parsed.version === 1 && parsed.buckets && parsed.entries) this.memory = parsed;
+      if (parsed && parsed.version === 1 && parsed.buckets && parsed.entries) {
+        const fresh = emptyMemory();
+        this.memory = {
+          ...fresh,
+          ...parsed,
+          lessons: parsed.lessons ?? [],
+          kills: parsed.kills ?? {},
+          nearMiss: { ...fresh.nearMiss, ...(parsed.nearMiss ?? {}) }
+        };
+      }
     } catch {
       this.memory = emptyMemory();
     }
@@ -224,5 +285,5 @@ function signedPct(n: number): string {
 function fmtPx(n: number): string {
   if (!(n > 0)) return "—";
   if (n >= 1) return n.toFixed(4);
-  return n.toFixed(8);
+  return tinyPx(n);
 }

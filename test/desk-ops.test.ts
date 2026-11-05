@@ -41,7 +41,8 @@ describe("manual close, log, and commentary", () => {
       expect(desk.snapshot().events.some((event) => event.code === "MANUAL_CLOSE")).toBe(true);
       expect(desk.snapshot().events.some((event) => event.code === "REVENGE_COOLDOWN")).toBe(false);
 
-      await desk.submitCandidate(makeToken({ mint, symbol: "HOLD", priceUsd: 1 }));
+      // Re-bought at the current price (v13.3: a re-entry 29% under the last mark would be a PRICE_CRASH skip).
+      await desk.submitCandidate(makeToken({ mint, symbol: "HOLD", priceUsd: 1.4 }));
       expect(desk.book.positions.has(mint)).toBe(true);
 
       const log = readFileSync(cfg.logPath, "utf8");
@@ -143,14 +144,11 @@ describe("manual close, log, and commentary", () => {
       expect(refused.ok).toBe(false);
       expect(desk.book.positions.has(mint)).toBe(true);
 
-      desk.config.mode = "live";
-      const live = desk.resetPaperBook(true);
-      expect(live.ok).toBe(false);
-      expect(desk.book.positions.has(mint)).toBe(true);
-      desk.config.mode = "paper";
+      // v13.7: an armed desk runs the paper book too, so reset is allowed; it never touches the live book (see v137 tests).
 
       const done = desk.resetPaperBook(true);
-      expect(done).toEqual({ ok: true, cashUsd: 100, startingBalanceUsd: 100 });
+      expect(done).toMatchObject({ ok: true, cashUsd: 100, startingBalanceUsd: 100 });
+      if (done.ok) expect(done.archive).toMatch(/^session-/);
       const snap = desk.snapshot();
       expect(snap.cashUsd).toBe(100);
       expect(snap.equityUsd).toBe(100);
@@ -178,26 +176,29 @@ describe("manual close, log, and commentary", () => {
     }
   });
 
-  it("keeps a $50k volume floor until the desk lowers it, then the next filter uses the new line", async () => {
+  it("boots at a $10k volume floor, then the next filter uses a saved lower line", async () => {
     expect(clampVolumeUsd(50)).toBe(1_000);
     expect(clampVolumeUsd(9_000_000)).toBe(500_000);
-    expect(clampVolumeUsd(Number.NaN)).toBe(50_000);
+    expect(clampVolumeUsd(Number.NaN)).toBe(10_000);
 
     const cfg = testConfig();
     const desk = new Desk(cfg);
     const quiet = "QuietVol1111111111111111111111111111111";
     try {
-      expect(desk.snapshot().rules.minVolume1hUsd).toBe(50_000);
-      await desk.submitCandidate(makeToken({ mint: quiet, symbol: "QUIET", volume1hUsd: 20_000 }));
+      expect(desk.snapshot().rules.minVolume1hUsd).toBe(10_000);
+      expect(desk.snapshot().rules.analystMinScore).toBe(0.5);
+      expect(desk.snapshot().rules.maxTop10Pct).toBe(0.35);
+      expect(desk.snapshot().rules.stopLossPct).toBe(0.06);
+      await desk.submitCandidate(makeToken({ mint: quiet, symbol: "QUIET", volume1hUsd: 4_000 }));
       expect(desk.snapshot().events.some((event) => event.mint === quiet && event.code === "VOLUME_TOO_LOW")).toBe(true);
 
-      const lowered = desk.setMinVolume(10_000);
+      const lowered = desk.setMinVolume(1_000);
       expect(lowered.ok).toBe(true);
-      if (lowered.ok) expect(lowered.minVolume1hUsd).toBe(10_000);
-      expect(desk.snapshot().rules.minVolume1hUsd).toBe(10_000);
+      if (lowered.ok) expect(lowered.minVolume1hUsd).toBe(1_000);
+      expect(desk.snapshot().rules.minVolume1hUsd).toBe(1_000);
 
       const louder = "LouderVol111111111111111111111111111111";
-      await desk.submitCandidate(makeToken({ mint: louder, symbol: "LOUD", volume1hUsd: 20_000 }));
+      await desk.submitCandidate(makeToken({ mint: louder, symbol: "LOUD", volume1hUsd: 4_000 }));
       expect(desk.snapshot().events.some((event) => event.mint === louder && event.code === "VOLUME_TOO_LOW")).toBe(false);
       expect(desk.snapshot().events.some((event) => event.mint === louder && event.stage === "filter" && event.kind === "pass")).toBe(true);
     } finally {
@@ -206,7 +207,7 @@ describe("manual close, log, and commentary", () => {
 
     const again = new Desk({ ...cfg, resetPaper: false });
     try {
-      expect(again.snapshot().rules.minVolume1hUsd).toBe(10_000);
+      expect(again.snapshot().rules.minVolume1hUsd).toBe(1_000);
     } finally {
       again.stop();
     }

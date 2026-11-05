@@ -17,6 +17,8 @@ export interface EnrichDeps {
   /** Pages of 1,000 token accounts when the RPC is Helius. 0 keeps the top-20 read. */
   holderPagesMax?: number;
   dasGapMs?: number;
+  /** v12.1: batched DexScreener lookup. When absent, one /latest/dex/tokens call per mint. */
+  dexLookup?: (mint: string) => Promise<unknown | null>;
 }
 
 const DAS_PAGE = 1_000;
@@ -68,7 +70,9 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     ? `${deps.rugcheckUrl.replace(/\/$/, "")}/tokens/${raw.mint}/report`
     : null;
   const [dex, mintInfo, report] = await Promise.all([
-    fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`),
+    deps.dexLookup
+      ? deps.dexLookup(raw.mint).catch(() => null)
+      : fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`),
     deps.rpcUrl
       ? rpc(fetchImpl, deps.rpcUrl, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }])
       : Promise.resolve(null),
@@ -76,18 +80,39 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   ]);
 
   const parsed = dex ? parseDexPair(dex, raw.mint) : null;
-  if (parsed) {
+  if (parsed && parsed.priceUsd > 0) {
     token.priceUsd = parsed.priceUsd;
     token.liquidityUsd = parsed.liquidityUsd;
     token.volume1hUsd = parsed.volume1hUsd;
+    token.volume5mUsd = parsed.volume5mUsd;
+    token.priceChange1hPct = parsed.priceChange1hPct;
     token.marketCapUsd = parsed.marketCapUsd;
     token.ageSeconds = parsed.ageSeconds;
     token.pairAddress = parsed.pairAddress;
     token.dex = parsed.dex;
     token.source = parsed.source;
+    token.priceFeed = "dexscreener";
     token.social = parsed.social;
     if (parsed.symbol) token.symbol = parsed.symbol.slice(0, 16);
     if (parsed.name) token.name = parsed.name.slice(0, 48);
+    if (!(token.volume1hUsd > 0) && (raw.volume1hUsd ?? 0) > 0) token.volume1hUsd = raw.volume1hUsd ?? 0;
+    if (!(token.liquidityUsd > 0) && (raw.liquidityUsd ?? 0) > 0) token.liquidityUsd = raw.liquidityUsd ?? 0;
+  } else if ((raw.priceUsd ?? 0) > 0 || (raw.volume1hUsd ?? 0) > 0 || (raw.liquidityUsd ?? 0) > 0 || parsed) {
+    if (parsed) {
+      token.volume1hUsd = parsed.volume1hUsd;
+      token.volume5mUsd = parsed.volume5mUsd;
+      token.marketCapUsd = parsed.marketCapUsd;
+      token.ageSeconds = parsed.ageSeconds;
+      token.dex = parsed.dex;
+      token.source = parsed.source;
+      token.social = parsed.social;
+      if (parsed.symbol) token.symbol = parsed.symbol.slice(0, 16);
+      if (parsed.name) token.name = parsed.name.slice(0, 48);
+    }
+    token.volume1hUsd = token.volume1hUsd || raw.volume1hUsd || 0;
+    token.priceUsd = (raw.priceUsd ?? 0) > 0 ? raw.priceUsd ?? 0 : 0;
+    token.liquidityUsd = (raw.liquidityUsd ?? 0) > 0 ? raw.liquidityUsd ?? 0 : parsed?.liquidityUsd ?? 0;
+    if (token.priceUsd > 0) token.priceFeed = raw.priceFeed ?? "listing";
   }
 
   let riskText = "";
@@ -146,6 +171,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
         token.top10HolderPct == null ? rug.top10HolderPct : Math.max(token.top10HolderPct, rug.top10HolderPct);
     }
     if (!token.devWallet && rug.devWallet) token.devWallet = rug.devWallet;
+    if (rug.devHoldingPct != null) token.devHoldingPct = rug.devHoldingPct;
     if (rug.devRug) token.devRug = rug.devRug;
   }
 
