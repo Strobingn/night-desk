@@ -2,6 +2,8 @@ import { isReserveHolder, pumpReserveAddresses } from "./exclusions.js";
 
 export interface ParsedMint {
   mintAuthorityRevoked: boolean | null;
+  freezeAuthorityRevoked: boolean | null;
+  unsupportedExtensions: string[];
   supplyUi: number | null;
   decimals: number | null;
 }
@@ -10,18 +12,22 @@ export interface ParsedMint {
 export function parseMintAccount(result: unknown): ParsedMint {
   const info = (
     result as {
-      value?: { data?: { parsed?: { info?: { mintAuthority?: string | null; supply?: string; decimals?: number } } } };
+      value?: { data?: { parsed?: { info?: { mintAuthority?: string | null; freezeAuthority?: string | null; supply?: string; decimals?: number; extensions?: Array<{ extension?: string }> } } } };
     }
   )?.value?.data?.parsed?.info;
-  if (!info) return { mintAuthorityRevoked: null, supplyUi: null, decimals: null };
-  const decimals = typeof info.decimals === "number" ? info.decimals : null;
+  if (!info) return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, unsupportedExtensions: [], supplyUi: null, decimals: null };
+  const decimals = Number.isInteger(info.decimals) && info.decimals! >= 0 && info.decimals! <= 18 ? info.decimals! : null;
   let supplyUi: number | null = null;
   if (info.supply != null && decimals != null) {
     const raw = Number(info.supply);
-    supplyUi = Number.isFinite(raw) ? raw / 10 ** decimals : null;
+    supplyUi = /^\d+$/.test(info.supply) && Number.isFinite(raw) && raw > 0 ? raw / 10 ** decimals : null;
   }
-  const revoked = info.mintAuthority == null;
-  return { mintAuthorityRevoked: revoked, supplyUi, decimals };
+  const revoked = info.mintAuthority === null ? true : typeof info.mintAuthority === "string" && info.mintAuthority.length > 0 ? false : null;
+  const freezeRevoked = info.freezeAuthority === null ? true : typeof info.freezeAuthority === "string" && info.freezeAuthority.length > 0 ? false : null;
+  const unsupportedExtensions = (info.extensions ?? [])
+    .map((item) => item.extension ?? "unknown")
+    .filter((name) => name !== "metadataPointer" && name !== "tokenMetadata");
+  return { mintAuthorityRevoked: revoked, freezeAuthorityRevoked: freezeRevoked, unsupportedExtensions, supplyUi, decimals };
 }
 
 export interface LargestHolderRow {
@@ -46,7 +52,7 @@ export function parseTop10Pct(
   exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {}
 ): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number } {
   const rows = (result as { value?: LargestHolderRow[] })?.value;
-  if (!Array.isArray(rows) || !(supplyUi && supplyUi > 0)) {
+  if (!Array.isArray(rows) || !(supplyUi && supplyUi > 0) || !Number.isFinite(supplyUi)) {
     return { top10HolderPct: null, holderCount: null, excludedReserves: 0 };
   }
   if (rows.length === 0) {
@@ -54,9 +60,16 @@ export function parseTop10Pct(
   }
   const retail = rows.filter((row) => !isReserveRow(row, exclude));
   const excludedReserves = rows.length - retail.length;
-  const amounts = retail.slice(0, 10).map(rowAmount);
-  const sum = amounts.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: retail.length, excludedReserves };
+  const byOwner = new Map<string, number>();
+  for (const [index, row] of retail.entries()) {
+    const amount = rowAmount(row);
+    if (!Number.isFinite(amount) || amount < 0) return { top10HolderPct: null, holderCount: null, excludedReserves };
+    const owner = row.owner || row.address || String(index);
+    byOwner.set(owner, (byOwner.get(owner) ?? 0) + amount);
+  }
+  const sum = [...byOwner.values()].sort((a, b) => b - a).slice(0, 10).reduce((a, b) => a + b, 0);
+  const share = sum / supplyUi;
+  return { top10HolderPct: share <= 1 ? share : null, holderCount: byOwner.size, excludedReserves };
 }
 
 export interface TokenAccountRow {
@@ -77,7 +90,7 @@ export function parseHolderAccounts(
   exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {},
   truncated = false
 ): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number; truncated: boolean } {
-  if (!(supplyUi && supplyUi > 0) || decimals == null || accounts.length === 0) {
+  if (!(supplyUi && supplyUi > 0) || !Number.isFinite(supplyUi) || decimals == null || accounts.length === 0) {
     return { top10HolderPct: null, holderCount: null, excludedReserves: 0, truncated };
   }
   const scale = 10 ** decimals;
@@ -85,7 +98,10 @@ export function parseHolderAccounts(
   let excludedReserves = 0;
   for (const account of accounts) {
     const raw = Number(account.amount);
-    if (!(raw > 0) || !Number.isFinite(raw)) continue;
+    if (!Number.isFinite(raw) || raw < 0 || account.amount == null) {
+      return { top10HolderPct: null, holderCount: null, excludedReserves, truncated };
+    }
+    if (raw === 0) continue;
     if (isReserveRow({ address: account.address, owner: account.owner ?? null }, exclude)) {
       excludedReserves += 1;
       continue;
@@ -96,16 +112,16 @@ export function parseHolderAccounts(
   }
   const top10 = [...byOwner.values()].sort((a, b) => b - a).slice(0, 10);
   const sum = top10.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: byOwner.size, excludedReserves, truncated };
+  return { top10HolderPct: sum <= supplyUi ? sum / supplyUi : null, holderCount: byOwner.size, excludedReserves, truncated };
 }
 
 function rowAmount(row: LargestHolderRow): number {
   if (typeof row.uiAmount === "number" && Number.isFinite(row.uiAmount)) return row.uiAmount;
   if (row.amount != null && typeof row.decimals === "number") {
     const raw = Number(row.amount);
-    return Number.isFinite(raw) ? raw / 10 ** row.decimals : 0;
+    return /^\d+$/.test(row.amount) && Number.isFinite(raw) ? raw / 10 ** row.decimals : Number.NaN;
   }
-  return 0;
+  return Number.NaN;
 }
 
 function isReserveRow(row: LargestHolderRow, exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> }): boolean {
@@ -138,6 +154,7 @@ export interface ParsedRugcheck {
   devWallet: string | null;
   devRug: { rugged: boolean; evidence?: string } | null;
   riskText: string;
+  insiderSupplyPct: number | null;
 }
 
 /**
@@ -197,6 +214,10 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
       ? { rugged: true, evidence: data.rugged ? "rugcheck rugged flag" : "rugcheck creator rug risk" }
       : null;
 
+  const insiders = (data.topHolders ?? []).filter((holder) => holder.insider === true);
+  const insiderSupplyPct = insiders.length && insiders.every((holder) => typeof holder.pct === "number" && Number.isFinite(holder.pct) && holder.pct >= 0 && holder.pct <= 100)
+    ? insiders.reduce((sum, holder) => sum + holder.pct!, 0) / 100 : null;
+
   return {
     mintAuthorityRevoked,
     lpLockedOrBurned,
@@ -205,6 +226,7 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
     holdersExcludeReserves,
     devWallet,
     devRug,
+    insiderSupplyPct,
     riskText: names.join("\n")
   };
 }
@@ -223,9 +245,12 @@ export function retailPctFromRugcheck(
   const retail = holders.filter((holder) => !isReserveHolder(holder, extraAddresses));
   const excludedReserves = retail.length !== holders.length;
   const slice = retail.slice(0, 10);
-  const usesPercent = slice.some((holder) => (holder.pct ?? 0) > 1) || holders.some((holder) => (holder.pct ?? 0) > 1);
-  const sum = slice.reduce((total, holder) => total + (typeof holder.pct === "number" ? holder.pct : 0), 0);
-  return { top10HolderPct: usesPercent ? sum / 100 : sum, excludedReserves };
+  if (slice.some((holder) => typeof holder.pct !== "number" || !Number.isFinite(holder.pct) || holder.pct < 0 || holder.pct > 100)) {
+    return { top10HolderPct: null, excludedReserves };
+  }
+  // RugCheck's pct field is 0–100, including values below 1%.
+  const sum = slice.reduce((total, holder) => total + holder.pct!, 0);
+  return { top10HolderPct: sum <= 100 ? sum / 100 : null, excludedReserves };
 }
 
 export function parseDexPair(payload: unknown, mint: string): {

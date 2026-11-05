@@ -17,6 +17,7 @@ export function makeToken(overrides: Partial<CandidateToken> = {}): CandidateTok
     volume1hUsd: 180_000,
     ageSeconds: 5_400,
     mintAuthorityRevoked: true,
+    freezeAuthorityRevoked: true,
     lpLockedOrBurned: true,
     lpLockPct: 100,
     top10HolderPct: 0.04,

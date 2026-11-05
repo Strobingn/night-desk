@@ -36,6 +36,27 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
     });
   }
 
+  checks.push({
+    code: "FREEZE_AUTHORITY_ACTIVE",
+    pass: token.freezeAuthorityRevoked === true,
+    message: token.freezeAuthorityRevoked === true
+      ? "Freeze authority is revoked."
+      : token.freezeAuthorityRevoked === false
+        ? "Freeze authority is active and can freeze holder wallets."
+        : "Freeze authority could not be verified as revoked. Fail closed."
+  });
+  if (token.unsupportedExtensions?.length) {
+    checks.push({ code: "UNSUPPORTED_TOKEN_EXTENSION", pass: false,
+      message: `Token extensions require a dedicated safety review: ${token.unsupportedExtensions.join(", ")}.` });
+  }
+  if (token.insiderSupplyPct != null) {
+    const share = token.insiderSupplyPct;
+    const pass = Number.isFinite(share) && share >= 0 && share <= 0.18;
+    checks.push({ code: "INSIDER_CONCENTRATION", pass,
+      message: pass ? `Reported insider supply is ${pct(share)}. Cluster coverage may be incomplete.`
+        : "Reported insider supply exceeds 18% or is invalid. Order refused." });
+  }
+
   if (token.lpLockedOrBurned === false) {
     checks.push({
       code: "LP_NOT_LOCKED",
@@ -65,7 +86,7 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
   }
 
   const holderPct = token.top10HolderPct;
-  const holdersKnown = typeof holderPct === "number" && Number.isFinite(holderPct);
+  const holdersKnown = typeof holderPct === "number" && Number.isFinite(holderPct) && holderPct >= 0 && holderPct <= 1;
   if (!holdersKnown) {
     checks.push({
       code: "HOLDER_CONCENTRATION",

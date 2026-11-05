@@ -61,6 +61,25 @@ export function requestAuthorized(expected: string | undefined, req: IncomingMes
   });
 }
 
-export function deskSessionCookie(token: string): string {
-  return `desk_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
+export function deskSessionCookie(token: string, secure = false): string {
+  return `desk_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000${secure ? "; Secure" : ""}`;
+}
+
+export function isLoopbackHost(host: string): boolean {
+  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host.toLowerCase());
+}
+
+/** Cookie sessions must not authorize a cross-site POST or WebSocket upgrade. */
+export function requestOriginAllowed(req: IncomingMessage, localOnly: boolean): boolean {
+  const host = req.headers.host;
+  if (!host || req.headers["sec-fetch-site"] === "cross-site") return false;
+  try {
+    if (localOnly && !isLoopbackHost(new URL(`http://${host}`).hostname)) return false;
+    const origin = req.headers.origin;
+    if (origin == null) return true; // Native clients authenticate with X-Desk-Token.
+    const parsed = new URL(origin);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host === host;
+  } catch {
+    return false;
+  }
 }

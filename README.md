@@ -6,6 +6,8 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 This is a trading tool, not a promise of profit. Defaults are deliberately tight.
 
+Execution and security changes, opt-in fees/Jito setup, and the limitations of the proposed trading strategies are documented in [docs/security-audit.md](docs/security-audit.md).
+
 ## Run paper mode
 
 ```bash
@@ -54,7 +56,7 @@ curl -X POST http://127.0.0.1:4721/api/paper/reset \
 
 ## Phone access
 
-The desk binds `0.0.0.0:4721`. On home Wi‑Fi a phone can open `http://<lan-ip>:4721`. Away from home, put a tunnel in front and set a shared secret. Leave `LIVE_TRADING` unset or `false` unless you intentionally want real orders. A tunnel does not arm live trading.
+The desk binds `127.0.0.1:4721` by default. For a phone on home Wi-Fi, set `HOST=0.0.0.0` and `DESK_TOKEN`, then open `http://<lan-ip>:4721`. A non-loopback binding without a token is refused. Away from home, put a tunnel in front of localhost and set a shared secret. Leave `LIVE_TRADING` unset or `false` unless you intentionally want real orders. A tunnel does not arm live trading.
 
 ```bash
 # Paper book, live market prints, no replay tape. Pick a long random token.
@@ -202,7 +204,7 @@ Copy `.env.example` to `.env` only when you want overrides. No secrets ship in t
 | `JUPITER_QUOTE_URL` / `JUPITER_SWAP_URL` | Live buys and sells only. Paper mode never calls them. |
 | `DB_PATH` / `LOG_JSONL` | Ledger locations. |
 | `PORT` | Terminal port. Default `4721`. |
-| `DESK_TOKEN` | Optional. When set, pages, `/api/*`, and `/ws` require `X-Desk-Token` or `?token=`. Never commit it. |
+| `DESK_TOKEN` | Required for non-loopback bindings and remote access. Pages, `/api/*`, and `/ws` require `X-Desk-Token` or `?token=`. Never commit it. |
 
 Live discovery enriches each mint with DexScreener, then RPC, then RugCheck. If a check cannot be verified, Filter rejects it. Public RPC rate limits are real; a Helius-style URL is the practical upgrade.
 
@@ -218,6 +220,10 @@ Leave it off. To arm it you need all of:
 4. USDC in that wallet (Jupiter input) and a little SOL for fees
 
 If `LIVE_TRADING=true` but the key path is missing, the process still boots **in paper** and the terminal shows a banner. There is no on-screen switch that arms live trading.
+
+Armed live mode disables replay. Paper/live balances, positions, closed-trade views, and equity are stored separately. Legacy untagged books remain paper-only; inspect and reconcile an old real-money book before enabling live mode after upgrading. Live execution verifies simulation and confirmed balance deltas. An uncertain submission leaves a persistent order guard and a terminal banner; stop the desk and reconcile its transaction signature and wallet balances before clearing that guard. Restarting cannot retry the order.
+
+`LIVE_EXECUTION_TRANSPORT=jito` opts into private bundle submission without a public-RPC fallback. `PLATFORM_FEE_BPS=85` plus `JUPITER_FEE_ACCOUNT=<initialized-USDC-token-account>` opts into a 0.85% atomic Jupiter fee. Fees default to zero. Details and operational limits are in [the audit notes](docs/security-audit.md).
 
 ## Overnight
 
@@ -239,10 +245,11 @@ sudo systemctl enable --now solana-desk
 Docker:
 
 ```bash
+export DESK_TOKEN='choose-a-long-random-secret'
 docker compose up --build
 ```
 
-The container publishes port 4721, restarts unless stopped, and keeps the ledger in the `desk-data` volume. `LIVE_TRADING` is hardcoded false in the compose file.
+Compose requires `DESK_TOKEN`, publishes port 4721 on localhost, restarts unless stopped, and keeps the ledger in the `desk-data` volume. `LIVE_TRADING` is hardcoded false in the compose file.
 
 Morning recap (cron example, 13:05 UTC):
 

@@ -9,10 +9,10 @@ const arg = eq ? eq.slice("--since=".length) : sinceFlag >= 0 ? process.argv[sin
 const since = parseSince(arg);
 const until = Date.now();
 const store = new DeskStore(config.dbPath, ":memory:");
-const book = store.loadBook();
+const book = store.loadBook(config.mode);
 const events = store.eventsSince(since);
-const equity = store.equitySince(since);
-const closed = store.closedSince(since);
+const equity = store.equitySince(since, config.mode);
+const closed = store.closedSince(since, config.mode);
 const marks = new Map(book?.lastPrices ?? []);
 const open = (book?.positions ?? []).map((pos) => {
   const markPrice = marks.get(pos.mint) ?? pos.entryPrice;

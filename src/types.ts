@@ -8,6 +8,9 @@ export type TokenSource = "pumpfun" | "raydium" | "replay";
 
 export type ReasonCode =
   | "MINT_AUTHORITY_ACTIVE"
+  | "FREEZE_AUTHORITY_ACTIVE"
+  | "UNSUPPORTED_TOKEN_EXTENSION"
+  | "INSIDER_CONCENTRATION"
   | "LP_NOT_LOCKED"
   | "HOLDER_CONCENTRATION"
   | "VOLUME_TOO_LOW"
@@ -56,6 +59,11 @@ export interface CandidateToken {
   ageSeconds: number;
   /** null = could not verify. Treated as not revoked. */
   mintAuthorityRevoked: boolean | null;
+  /** Missing evidence fails closed, just like mint authority. */
+  freezeAuthorityRevoked: boolean | null;
+  unsupportedExtensions?: string[];
+  /** Known insider supply from an upstream report, a lower bound rather than a wallet-cluster audit. */
+  insiderSupplyPct?: number | null;
   /**
    * null = could not verify.
    * Fail closed, except while `onBondingCurve` is true (no pool LP exists yet).
@@ -114,6 +122,9 @@ export interface Fill {
   symbol: string;
   side: "buy" | "sell";
   qty: number;
+  rawQty?: string;
+  networkFeeLamports?: number;
+  bundleId?: string;
   priceUsd: number;
   markUsd: number;
   slippage: number;
@@ -144,6 +155,7 @@ export interface Position {
   symbol: string;
   name: string;
   qty: number;
+  rawQty?: string;
   entryPrice: number;
   costUsd: number;
   openedAt: number;

@@ -2,13 +2,14 @@ services:
   night-desk:
     build: .
     ports:
-      - "4721:4721"
+      - "127.0.0.1:4721:4721"
     environment:
       LIVE_TRADING: "false"
       DEMO_FEED: "1"
       FEED_MODE: auto
       PORT: "4721"
-      DESK_TOKEN: ${DESK_TOKEN:-}
+      HOST: "0.0.0.0"
+      DESK_TOKEN: ${DESK_TOKEN:?Set DESK_TOKEN before starting Docker Compose}
       DB_PATH: /data/desk.sqlite
       LOG_JSONL: /data/desk.jsonl
     volumes:

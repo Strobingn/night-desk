@@ -1,7 +1,8 @@
 import path from "node:path";
 import { resolveRules, HARD_RULES, type ResolvedRules } from "./rules.js";
-import { resolveDeskToken } from "./server/auth.js";
+import { isLoopbackHost, resolveDeskToken } from "./server/auth.js";
 import type { FeedStatus } from "./types.js";
+import { resolveLiveExecution } from "./market/live-options.js";
 
 export interface DeskConfig {
   rules: ResolvedRules;
@@ -26,6 +27,8 @@ export interface DeskConfig {
   walletKeypairPath?: string;
   jupiterQuoteUrl: string;
   jupiterSwapUrl: string;
+  jupiterApiKey?: string;
+  liveExecution: import("./market/live-options.js").LiveExecutionOptions;
   resetPaper: boolean;
   rugWalletsFile?: string;
   /** Set only when DESK_TOKEN is non-empty. Never logged. */
@@ -42,6 +45,9 @@ export interface DeskConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
+  const host = env.HOST?.trim() || "127.0.0.1";
+  const deskToken = resolveDeskToken(env.DESK_TOKEN);
+  if (!deskToken && !isLoopbackHost(host)) throw new Error("DESK_TOKEN is required when HOST is not a loopback address.");
   const liveRequested = env.LIVE_TRADING === "true";
   const walletKeypairPath = env.WALLET_KEYPAIR_PATH?.trim() || undefined;
   const rpcUrl = env.SOLANA_RPC_URL?.trim() || "https://api.mainnet-beta.solana.com";
@@ -56,8 +62,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
       mode = "live";
     }
   }
-  const feedMode = parseFeedMode(env.FEED_MODE);
-  const demoFeed = env.DEMO_FEED === "0" ? false : env.DEMO_FEED === "1" ? true : feedMode !== "live";
+  const feedMode = mode === "live" ? "live" : parseFeedMode(env.FEED_MODE);
+  const demoFeed = mode === "live" ? false : env.DEMO_FEED === "0" ? false : env.DEMO_FEED === "1" ? true : feedMode !== "live";
   const starting = Number(env.PAPER_BALANCE_USD);
   return {
     rules: resolveRules(env),
@@ -72,7 +78,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     demoFeed,
     feedMode,
     port: Number(env.PORT) > 0 ? Number(env.PORT) : 4721,
-    host: env.HOST?.trim() || "0.0.0.0",
+    host,
     rpcUrl,
     pumpWsUrl: env.PUMP_WS_URL?.trim() || "wss://pumpportal.fun/api/data",
     rugcheckUrl: env.RUGCHECK_API_URL?.trim() || "https://api.rugcheck.xyz/v1",
@@ -80,9 +86,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     walletKeypairPath,
     jupiterQuoteUrl: env.JUPITER_QUOTE_URL?.trim() || "https://lite-api.jup.ag/swap/v1/quote",
     jupiterSwapUrl: env.JUPITER_SWAP_URL?.trim() || "https://lite-api.jup.ag/swap/v1/swap",
-    resetPaper: env.PAPER_RESET === "1",
+    jupiterApiKey: env.JUPITER_API_KEY?.trim() || undefined,
+    liveExecution: resolveLiveExecution(env),
+    resetPaper: env.PAPER_RESET === "1" && mode === "paper",
     rugWalletsFile: env.RUG_WALLETS_FILE?.trim() || undefined,
-    deskToken: resolveDeskToken(env.DESK_TOKEN),
+    deskToken,
     openaiApiKey: env.OPENAI_API_KEY?.trim() || undefined,
     openaiModel: env.OPENAI_MODEL?.trim() || "gpt-4o-mini",
     enrichConcurrency: clampEnvInt(env.SCOUT_ENRICH_CONCURRENCY, 6, 1, 12),

@@ -5,7 +5,7 @@ import path from "node:path";
 import { WebSocketServer } from "ws";
 import type { Desk } from "../desk/orchestrator.js";
 import { buildRecap, formatRecap, parseSince } from "../desk/recap.js";
-import { deskSessionCookie, requestAuthorized } from "./auth.js";
+import { deskSessionCookie, isLoopbackHost, requestAuthorized, requestOriginAllowed } from "./auth.js";
 
 const DEFAULT_DIST = path.resolve("web/dist");
 
@@ -16,27 +16,31 @@ export function startServer(
   deskToken?: string,
   uiDist: string = DEFAULT_DIST
 ): http.Server {
+  if (!deskToken && !isLoopbackHost(host)) throw new Error("DESK_TOKEN is required when HOST is not a loopback address.");
   const dist = path.resolve(uiDist);
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (!requestAuthorized(deskToken, req, url)) return unauthorized(res);
-      if (deskToken) res.setHeader("set-cookie", deskSessionCookie(deskToken));
+      if (!requestOriginAllowed(req, !deskToken)) return json(res, 403, { error: "Cross-origin request refused" });
+      res.setHeader("referrer-policy", "no-referrer");
+      res.setHeader("x-content-type-options", "nosniff");
+      if (deskToken) res.setHeader("set-cookie", deskSessionCookie(deskToken, req.headers.origin?.startsWith("https://") === true));
       if (url.pathname === "/api/health") return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now() });
       if (url.pathname === "/api/state") return json(res, 200, desk.snapshot());
       if (url.pathname === "/api/events" && req.method === "GET") {
-        const limit = Number(url.searchParams.get("limit") ?? "800");
+        const limitRaw = Number(url.searchParams.get("limit") ?? "800");
+        const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 800;
         const stage = url.searchParams.get("stage") ?? undefined;
         const beforeRaw = url.searchParams.get("before");
-        const before = beforeRaw != null && beforeRaw !== "" ? Number(beforeRaw) : undefined;
+        const beforeNum = beforeRaw != null && beforeRaw !== "" ? Number(beforeRaw) : Number.NaN;
+        const before = Number.isFinite(beforeNum) ? beforeNum : undefined;
         return json(res, 200, { events: desk.store.queryEvents({ limit, stage, before }) });
       }
       if (url.pathname === "/api/settings" && req.method === "POST") {
         const body = await readJson(req);
-        const raw =
-          body && typeof body === "object" && "minVolume1hUsd" in body
-            ? Number((body as { minVolume1hUsd?: unknown }).minVolume1hUsd)
-            : Number.NaN;
+        const value = body && typeof body === "object" ? (body as { minVolume1hUsd?: unknown }).minVolume1hUsd : undefined;
+        const raw = typeof value === "number" && Number.isFinite(value) ? value : Number.NaN;
         const result = desk.setMinVolume(raw);
         return json(res, result.ok ? 200 : 400, result);
       }
@@ -63,8 +67,8 @@ export function startServer(
           since,
           until,
           events: desk.store.eventsSince(since),
-          equity: desk.store.equitySince(since),
-          closed: desk.store.closedSince(since),
+          equity: desk.store.equitySince(since, desk.config.mode),
+          closed: desk.store.closedSince(since, desk.config.mode),
           open: snap.positions,
           startingBalanceUsd: snap.startingBalanceUsd
         });
@@ -72,8 +76,10 @@ export function startServer(
       }
       await serveStatic(dist, url.pathname, res);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "error";
-      json(res, 500, { error: message });
+      if (err instanceof SyntaxError) return json(res, 400, { error: "Invalid JSON" });
+      if (err instanceof Error && err.message === "body too large") return json(res, 413, { error: "Body too large" });
+      console.error("[desk] HTTP request failed", err);
+      json(res, 500, { error: "Internal server error" });
     }
   });
 
@@ -91,7 +97,7 @@ export function startServer(
       socket.destroy();
       return;
     }
-    if (!requestAuthorized(deskToken, req, url)) {
+    if (!requestAuthorized(deskToken, req, url) || !requestOriginAllowed(req, !deskToken)) {
       socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 12\r\n\r\nUnauthorized");
       socket.destroy();
       return;
@@ -117,8 +123,16 @@ export function startServer(
       }
     }, 200);
   };
-  desk.bus.on("log.event", () => push());
-  desk.bus.on("market.tick", () => push());
+  const stopLogs = desk.bus.on("log.event", () => push());
+  const stopTicks = desk.bus.on("market.tick", () => push());
+  server.on("close", () => {
+    stopLogs();
+    stopTicks();
+    if (pending) clearTimeout(pending);
+    pending = null;
+    for (const socket of sockets) socket.terminate();
+    wss.close();
+  });
 
   server.listen(port, host, () => {
     const bound = server.address();

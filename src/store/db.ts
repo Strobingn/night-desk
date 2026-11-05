@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ClosedTrade, EquityPoint, FeedEvent, Position } from "../types.js";
 
 export interface PersistedBook {
+  mode?: "paper" | "live";
   cashUsd: number;
   startingBalanceUsd: number;
   startedAt: number;
@@ -64,7 +65,15 @@ export class DeskStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS live_order_guard (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        details TEXT NOT NULL
+      );
     `);
+    const equityColumns = this.db.prepare("PRAGMA table_info(equity)").all() as Array<{ name: string }>;
+    if (!equityColumns.some((column) => column.name === "mode")) {
+      this.db.exec("ALTER TABLE equity ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'");
+    }
   }
 
   appendEvent(event: FeedEvent, payload: unknown): void {
@@ -181,14 +190,14 @@ export class DeskStore {
     }));
   }
 
-  insertEquity(point: EquityPoint): void {
-    this.db.prepare(`INSERT INTO equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`).run(point.t, point.equity, point.cash);
+  insertEquity(point: EquityPoint, mode: "paper" | "live" = "paper"): void {
+    this.db.prepare(`INSERT INTO equity (ts, equity_usd, cash_usd, mode) VALUES (?, ?, ?, ?)`).run(point.t, point.equity, point.cash, mode);
   }
 
-  equitySince(sinceTs: number): EquityPoint[] {
+  equitySince(sinceTs: number, mode: "paper" | "live" = "paper"): EquityPoint[] {
     const rows = this.db
-      .prepare(`SELECT ts as t, equity_usd as equity, cash_usd as cash FROM equity WHERE ts >= ? ORDER BY ts ASC`)
-      .all(sinceTs) as unknown as EquityPoint[];
+      .prepare(`SELECT ts as t, equity_usd as equity, cash_usd as cash FROM equity WHERE ts >= ? AND mode = ? ORDER BY ts ASC`)
+      .all(sinceTs, mode) as unknown as EquityPoint[];
     return rows;
   }
 
@@ -211,30 +220,30 @@ export class DeskStore {
       .run(trade.closedAt, trade.proceedsUsd, trade.pnlUsd, trade.pnlPct, trade.exitCode, trade.id);
   }
 
-  recentClosed(limit = 12): ClosedTrade[] {
+  recentClosed(limit = 12, mode: "paper" | "live" = "paper"): ClosedTrade[] {
     const rows = this.db
       .prepare(
         `SELECT id, mint, symbol, opened_at, closed_at, cost_usd, proceeds_usd, pnl_usd, pnl_pct, exit_code, score, mode
-         FROM trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT ?`
+         FROM trades WHERE closed_at IS NOT NULL AND mode = ? ORDER BY closed_at DESC LIMIT ?`
       )
-      .all(limit) as Array<Record<string, unknown>>;
+      .all(mode, limit) as Array<Record<string, unknown>>;
     return rows.map(rowToClosed).reverse();
   }
 
-  closedSince(sinceTs: number): ClosedTrade[] {
+  closedSince(sinceTs: number, mode: "paper" | "live" = "paper"): ClosedTrade[] {
     const rows = this.db
       .prepare(
         `SELECT id, mint, symbol, opened_at, closed_at, cost_usd, proceeds_usd, pnl_usd, pnl_pct, exit_code, score, mode
-         FROM trades WHERE closed_at IS NOT NULL AND closed_at >= ? ORDER BY closed_at ASC`
+         FROM trades WHERE closed_at IS NOT NULL AND closed_at >= ? AND mode = ? ORDER BY closed_at ASC`
       )
-      .all(sinceTs) as Array<Record<string, unknown>>;
+      .all(sinceTs, mode) as Array<Record<string, unknown>>;
     return rows.map(rowToClosed);
   }
 
-  saveBook(book: PersistedBook): void {
+  saveBook(book: PersistedBook, mode: "paper" | "live" = "paper"): void {
     this.db
-      .prepare(`INSERT INTO kv (key, value) VALUES ('book', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
-      .run(JSON.stringify(book));
+      .prepare(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(`book:${mode}`, JSON.stringify({ ...book, mode }));
   }
 
   readJson(key: string): unknown | null {
@@ -247,17 +256,52 @@ export class DeskStore {
     }
   }
 
+  /** One outstanding live order per ledger, including across processes/restarts. */
+  reserveLiveOrder(details: unknown): boolean {
+    return this.db.prepare("INSERT OR IGNORE INTO live_order_guard (id, details) VALUES (1, ?)")
+      .run(JSON.stringify(details)).changes === 1;
+  }
+
+  prepareLiveOrder(details: unknown): void {
+    this.db.prepare("UPDATE live_order_guard SET details = ? WHERE id = 1").run(JSON.stringify(details));
+  }
+
+  pendingLiveOrder(): unknown | null {
+    const row = this.db.prepare("SELECT details FROM live_order_guard WHERE id = 1").get() as { details: string } | undefined;
+    return row ? JSON.parse(row.details) : null;
+  }
+
+  releaseLiveOrder(): void {
+    this.db.exec("DELETE FROM live_order_guard WHERE id = 1");
+  }
+
+  /** Ledger writes and clearing the durable guard must commit together. */
+  settleLiveOrder(apply: () => void): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      apply();
+      this.releaseLiveOrder();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   writeJson(key: string, value: unknown): void {
     this.db
       .prepare(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
       .run(key, JSON.stringify(value));
   }
 
-  loadBook(): PersistedBook | null {
-    const row = this.db.prepare(`SELECT value FROM kv WHERE key = 'book'`).get() as { value: string } | undefined;
-    if (!row) return null;
+  loadBook(mode: "paper" | "live" = "paper"): PersistedBook | null {
+    const row = this.db.prepare(`SELECT value FROM kv WHERE key = ?`).get(`book:${mode}`) as { value: string } | undefined;
+    const legacy = mode === "paper" && !row ? this.db.prepare("SELECT value FROM kv WHERE key = 'book'").get() as { value: string } | undefined : undefined;
+    const value = row?.value ?? legacy?.value;
+    if (!value) return null;
     try {
-      return JSON.parse(row.value) as PersistedBook;
+      const book = JSON.parse(value) as PersistedBook;
+      return book.mode && book.mode !== mode ? null : book;
     } catch {
       return null;
     }

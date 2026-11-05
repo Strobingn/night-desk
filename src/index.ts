@@ -7,10 +7,13 @@ const desk = new Desk(config);
 desk.start();
 const server = startServer(desk, config.host, config.port, config.deskToken);
 
-function shutdown(signal: string): void {
+let stopping = false;
+async function shutdown(signal: string): Promise<void> {
+  if (stopping) return;
+  stopping = true;
   console.log(`[desk] ${signal}, flushing the book`);
   server.close();
-  desk.stop();
+  await desk.stop();
   process.exit(0);
 }
 

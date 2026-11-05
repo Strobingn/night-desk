@@ -54,6 +54,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     volume1hUsd: 0,
     ageSeconds: 0,
     mintAuthorityRevoked: null,
+    freezeAuthorityRevoked: null,
     lpLockedOrBurned: null,
     top10HolderPct: null,
     holderCount: null,
@@ -94,6 +95,8 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   if (deps.rpcUrl) {
     const mint = parseMintAccount(mintInfo);
     if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
+    token.freezeAuthorityRevoked = mint.freezeAuthorityRevoked;
+    token.unsupportedExtensions = mint.unsupportedExtensions;
     if (mint.decimals != null) token.decimals = mint.decimals;
     const reserves = new Set([...pumpReserveAddresses(raw.mint), ...RESERVE_OWNER_SET]);
     const exclude = { addresses: reserves, owners: RESERVE_OWNER_SET };
@@ -134,6 +137,10 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
 
   if (report) {
     const rug = parseRugcheckReport(report, raw.mint);
+    token.insiderSupplyPct = rug.insiderSupplyPct;
+    // Supplemental reports can veto on-chain evidence, never certify a missing authority read.
+    if (/freeze authority.*(enabled|not revoked|still)/i.test(rug.riskText)) token.freezeAuthorityRevoked = false;
+    if (rug.mintAuthorityRevoked === false) token.mintAuthorityRevoked = false;
     riskText = rug.riskText;
     if (token.mintAuthorityRevoked == null && rug.mintAuthorityRevoked != null) {
       token.mintAuthorityRevoked = rug.mintAuthorityRevoked;

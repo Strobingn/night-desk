@@ -71,6 +71,23 @@ describe("desk token gate", () => {
 
     const wrong = await fetch(`${base}/api/health?token=wrong`);
     expect(wrong.status).toBe(401);
+
+    const crossSite = await fetch(`${base}/api/settings`, {
+      method: "POST", headers: { cookie: "desk_token=secret", origin: "https://untrusted.example", "content-type": "application/json" },
+      body: JSON.stringify({ minVolume1hUsd: 1000 })
+    });
+    expect(crossSite.status).toBe(403);
+    expect(desk.config.rules.minVolume1hUsd).toBe(50000);
+
+    const malformed = await fetch(`${base}/api/settings`, {
+      method: "POST", headers: { "X-Desk-Token": "secret", "content-type": "application/json" }, body: "{"
+    });
+    expect(malformed.status).toBe(400);
+    const nullFloor = await fetch(`${base}/api/settings`, {
+      method: "POST", headers: { "X-Desk-Token": "secret", "content-type": "application/json" },
+      body: JSON.stringify({ minVolume1hUsd: null })
+    });
+    expect(nullFloor.status).toBe(400);
   });
 
   it("returns 503 for the page when the UI build is missing", async () => {

@@ -66,6 +66,7 @@ export class Desk {
   private commentTimer: NodeJS.Timeout | null = null;
   private lastNotes = new Set<string>();
   private lastEquityAt = 0;
+  private liveChain: Promise<void> = Promise.resolve();
   private pipeline: PipelineCounts = {
     scouted: 0,
     filteredPass: 0,
@@ -88,7 +89,7 @@ export class Desk {
       this.config.rules.minVolume1hUsd = clampVolumeUsd(saved.minVolume1hUsd);
     }
     this.rugs = new LayeredRugRegistry(new StaticRugRegistry(loadRugWalletMap(config.rugWalletsFile)));
-    const restored = config.resetPaper ? null : this.store.loadBook();
+    const restored = config.resetPaper && config.mode === "paper" ? null : this.store.loadBook(config.mode);
     const starting =
       restored && restored.startingBalanceUsd > 0 ? restored.startingBalanceUsd : config.startingBalanceUsd;
     this.config.startingBalanceUsd = starting;
@@ -200,13 +201,14 @@ export class Desk {
     );
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.replay.stop();
     this.scout.stop();
     this.pricer.stop();
     if (this.equityTimer) clearInterval(this.equityTimer);
     if (this.commentTimer) clearInterval(this.commentTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
+    await this.drain();
     this.persist();
     this.advisor.save();
     this.store.close();
@@ -308,7 +310,7 @@ export class Desk {
     });
     this.bus.emit("risk.exit", order);
     await this.drain();
-    return { ok: true };
+    return this.book.positions.has(mint) ? { ok: false, error: "Position remains open. Check the executor log and pending live order." } : { ok: true };
   }
 
   /** One advisory pass. Logs notes. Does not buy, sell, or change a rule. */
@@ -336,7 +338,8 @@ export class Desk {
     return {
       mode: this.config.mode,
       liveRequested: this.config.liveRequested,
-      armError: this.config.armError,
+      armError: this.config.armError ?? (this.config.mode === "live" && this.store.pendingLiveOrder()
+        ? `Live trading paused: unresolved order ${JSON.stringify(this.store.pendingLiveOrder())}. Reconcile before restarting orders.` : undefined),
       startedAt: this.startedAt,
       now: Date.now(),
       startingBalanceUsd: this.config.startingBalanceUsd,
@@ -350,10 +353,10 @@ export class Desk {
       killReasons: { ...this.killReasons },
       positions,
       closed: this.store
-        .recentClosed(40)
+        .recentClosed(40, this.config.mode)
         .filter((trade) => trade.closedAt >= this.startedAt)
         .slice(-8),
-      equity: downsample(this.store.equitySince(this.startedAt), 240),
+      equity: downsample(this.store.equitySince(this.startedAt, this.config.mode), 240),
       events: this.store.recentEvents(180),
       advice: this.advice
     };
@@ -449,7 +452,7 @@ export class Desk {
         },
         { breakdown: report.breakdown }
       );
-      const job = this.buy(report);
+      const job = this.queueLive(() => this.buy(report));
       this.track(job);
     });
 
@@ -459,7 +462,7 @@ export class Desk {
     });
 
     this.bus.on("risk.exit", (order) => {
-      const job = this.sell(order);
+      const job = this.queueLive(() => this.sell(order));
       this.track(job);
     });
   }
@@ -498,10 +501,19 @@ export class Desk {
     }
 
     if (this.config.mode === "live") {
+      if (token.source === "replay") {
+        this.skipLive(token, report.score, "Replay fixtures cannot enter the live executor.");
+        return;
+      }
       if (!this.config.walletKeypairPath) {
         this.skipLive(token, report.score, "Live mode lost its keypair path.");
         return;
       }
+      if (!this.store.reserveLiveOrder({ side: "buy", mint: token.mint, at: Date.now(), status: "preparing" })) {
+        this.skipLive(token, report.score, "An unresolved live order requires reconciliation. No duplicate order sent.");
+        return;
+      }
+      let prepared = false;
       try {
         const { executeLiveSwap } = await import("../market/live-broker.js");
         const live = await executeLiveSwap({
@@ -509,30 +521,38 @@ export class Desk {
           mint: token.mint,
           sizeUsd: plan.sizeUsd,
           decimals: token.decimals,
+          markUsd: token.priceUsd,
           keypairPath: this.config.walletKeypairPath,
           rpcUrl: this.config.rpcUrl,
           quoteUrl: this.config.jupiterQuoteUrl,
-          swapUrl: this.config.jupiterSwapUrl
+          swapUrl: this.config.jupiterSwapUrl,
+          apiKey: this.config.jupiterApiKey,
+          execution: this.config.liveExecution,
+          onPrepared: (order) => { this.store.prepareLiveOrder(order); prepared = true; }
         });
         if (epoch !== this.bookEpoch) return;
-        this.applyBuy({
+        this.store.settleLiveOrder(() => this.applyBuy({
           id: randomUUID(),
           mint: token.mint,
           symbol: token.symbol,
           side: "buy",
           qty: live.qty,
+          rawQty: live.rawQty,
+          networkFeeLamports: live.networkFeeLamports,
+          bundleId: live.bundleId,
           priceUsd: live.fillPriceUsd,
           markUsd: token.priceUsd,
           slippage: live.slippage,
-          notionalUsd: plan.sizeUsd,
+          notionalUsd: live.notionalUsd,
           feeUsd: live.feeUsd,
           mode: "live",
           txSignature: live.signature,
           at: Date.now(),
           reason: `Live buy sized at ${(this.config.rules.maxPositionPct * 100).toFixed(0)}% cap ($${plan.sizeUsd.toFixed(2)} of $${plan.capUsd.toFixed(2)}).`,
           score: report.score
-        }, token, report.score);
+        }, token, report.score));
       } catch (err) {
+        if (!prepared || (err instanceof Error && "outcome" in err && err.outcome === "failed")) this.store.releaseLiveOrder();
         const message = err instanceof Error ? err.message : String(err);
         this.skipLive(token, report.score, message);
       }
@@ -573,6 +593,7 @@ export class Desk {
       symbol: token.symbol,
       name: token.name,
       qty: fill.qty,
+      rawQty: fill.rawQty,
       entryPrice: fill.priceUsd,
       costUsd: fill.notionalUsd,
       openedAt: fill.at,
@@ -620,26 +641,40 @@ export class Desk {
   private async sell(order: ExitOrder): Promise<void> {
     const pos = this.book.positions.get(order.mint);
     if (!pos) return;
+    let prepared = false;
+    let reserved = false;
     try {
       if (this.config.mode === "live") {
+        if (!this.store.reserveLiveOrder({ side: "sell", mint: pos.mint, at: Date.now(), status: "preparing" })) {
+          throw new Error("An unresolved live order requires reconciliation. No duplicate order sent.");
+        }
+        reserved = true;
         if (!this.config.walletKeypairPath) throw new Error("LIVE_NOT_ARMED");
         const { executeLiveSwap } = await import("../market/live-broker.js");
         const live = await executeLiveSwap({
           side: "sell",
           mint: order.mint,
           qty: pos.qty,
+          rawQty: pos.rawQty,
+          markUsd: order.markPrice,
           decimals: pos.decimals,
           keypairPath: this.config.walletKeypairPath,
           rpcUrl: this.config.rpcUrl,
           quoteUrl: this.config.jupiterQuoteUrl,
-          swapUrl: this.config.jupiterSwapUrl
+          swapUrl: this.config.jupiterSwapUrl,
+          apiKey: this.config.jupiterApiKey,
+          execution: this.config.liveExecution,
+          onPrepared: (pending) => { this.store.prepareLiveOrder(pending); prepared = true; }
         });
-        this.applySell(pos, {
+        this.store.settleLiveOrder(() => this.applySell(pos, {
           id: randomUUID(),
           mint: pos.mint,
           symbol: pos.symbol,
           side: "sell",
-          qty: pos.qty,
+          qty: live.qty,
+          rawQty: live.rawQty,
+          networkFeeLamports: live.networkFeeLamports,
+          bundleId: live.bundleId,
           priceUsd: live.fillPriceUsd,
           markUsd: order.markPrice,
           slippage: live.slippage,
@@ -651,7 +686,7 @@ export class Desk {
           reason: order.reason.message,
           code: order.reason.code,
           score: pos.score
-        }, order);
+        }, order, live.proceedsUsd));
         return;
       }
       const quote = quotePaperSell(order.markPrice, pos.qty, pos.liquidityUsd);
@@ -678,6 +713,7 @@ export class Desk {
         quote.proceedsUsd ?? 0
       );
     } catch (err) {
+      if (reserved && (!prepared || (err instanceof Error && "outcome" in err && err.outcome === "failed"))) this.store.releaseLiveOrder();
       pos.closing = false;
       const message = err instanceof Error ? err.message : String(err);
       this.log({
@@ -885,18 +921,19 @@ export class Desk {
     const now = Date.now();
     if (!force && now - this.lastEquityAt < 1_800) return;
     this.lastEquityAt = now;
-    this.store.insertEquity({ t: now, equity: roundUsd(this.book.equity()), cash: roundUsd(this.book.cashUsd) });
+    this.store.insertEquity({ t: now, equity: roundUsd(this.book.equity()), cash: roundUsd(this.book.cashUsd) }, this.config.mode);
   }
 
   private persist(): void {
     this.store.saveBook({
+      mode: this.config.mode,
       cashUsd: this.book.cashUsd,
       startingBalanceUsd: this.config.startingBalanceUsd,
       startedAt: this.startedAt,
       positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
       cooldowns: [...this.cooldowns.entries()],
       lastPrices: [...this.book.lastPrice.entries()]
-    });
+    }, this.config.mode);
   }
 
   private log(event: Omit<FeedEvent, "id" | "ts">, payload?: unknown): void {
@@ -911,6 +948,13 @@ export class Desk {
     });
     this.inflight.add(guarded);
     void guarded.finally(() => this.inflight.delete(guarded));
+  }
+
+  private queueLive(run: () => Promise<void>): Promise<void> {
+    if (this.config.mode !== "live") return run();
+    const job = this.liveChain.then(run);
+    this.liveChain = job.catch(() => undefined);
+    return job;
   }
 
   private async drain(): Promise<void> {
