@@ -1,11 +1,30 @@
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, open, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const root = path.resolve(here, "..");
-const PORT = Number(process.env.DESK_PORT || 4721);
+
+/** DESK_PORT, then PORT, then PORT= in .env, then 4721. Never prints the file. */
+export function deskPort(env: NodeJS.ProcessEnv = process.env, envFile = ""): number {
+  const fromEnv = Number(env.DESK_PORT || env.PORT);
+  if (fromEnv > 0 && Number.isFinite(fromEnv)) return fromEnv;
+  const match = /^\s*PORT\s*=\s*["']?(\d+)/m.exec(envFile);
+  const fromFile = match ? Number(match[1]) : 0;
+  return fromFile > 0 ? fromFile : 4721;
+}
+
+function envFileText(): string {
+  try {
+    return readFileSync(path.join(root, ".env"), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+const PORT = deskPort(process.env, envFileText());
 const urlFile = path.join(root, "data", "public-url.txt");
 const logFile = path.join(root, "data", "cloudflared.log");
 const pidFile = path.join(root, "data", "cloudflared.pid");

@@ -11,6 +11,7 @@ export interface PersistedBook {
   positions: Position[];
   cooldowns: Array<[string, number]>;
   lastPrices?: Array<[string, number]>;
+  markSeries?: Array<[string, Array<{ t: number; priceUsd: number }>]>;
 }
 
 export class DeskStore {

@@ -6,15 +6,15 @@ Application id: `com.dirk.nightdesk`.
 
 ## Point it at Austin
 
-1. On the desk machine, paper is `npm run paper` (or `npm run paper:live` for live feeds, still paper trading). It listens on port **4721**.
-2. Leave `cloudflared` running. `npm run tunnel` or `scripts/ensure-tunnel.ps1` starts it only if it is not already pointed at 4721, then writes the hostname for the phone beacon.
-3. Open the app. It asks the beacon for the current tunnel before it connects, and again if the socket drops. A saved Link URL is the fallback. Home Wi‑Fi can still reach `http://192.168.1.242:4721` when that port answers and the beacon does not.
+1. On the desk machine, paper is `npm run paper` (or `npm run paper:live` for live feeds). The listen port is `PORT` in `.env` (default 4721; Austin uses 4788).
+2. Leave `cloudflared` running. `npm run tunnel` or `scripts/ensure-tunnel.ps1` starts it only if it is not already pointed at that port, then writes the hostname for the phone beacon.
+3. Open the app. It asks the beacon for the current tunnel before it connects, and again if the socket drops. A saved Link URL is the fallback. The app does not default to port 4721.
 4. If `DESK_TOKEN` is set, paste that token in **Link**. Leave it blank when the desk is local-open. **Hold this URL** is the manual override. Leave it off so a new tunnel hostname is picked up without pasting.
 5. Book, advisor, and tape update from the WebSocket snapshot and a 3-second poll. Advisor text changes when marks and events change. It never trades.
 
 The 1h volume floor is on the book screen. Apply writes `POST /api/settings`. The desk stores it and the next filter check uses it. Range $1,000–$500,000. Unset, it stays $10,000. A saved floor, including $1,000, wins on the next boot.
 
-Each open position has Chart, Birdeye, and Jupiter. Those open the Solana mint in the phone browser. Close is still the desk close. The chart links do not trade.
+Each open position has DexScreener, Birdeye, and Jupiter. Those open the Solana mint in the phone browser. Close is still the desk close. The chart links do not trade.
 
 On **Tape**, Select a line that has a mint, then **Buy**. Leave the size blank to use the position cap, or enter a smaller USD size. The desk refuses a size above the cap and refuses a second buy while that mint is open. The fill is paper until Austin restarts the desk in live mode.
 

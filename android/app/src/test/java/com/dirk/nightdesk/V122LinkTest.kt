@@ -2,6 +2,7 @@ package com.dirk.nightdesk
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -19,7 +20,7 @@ class V122LinkTest {
         assertEquals(live, order[0].baseUrl)
         assertEquals("last", order[0].source)
         assertEquals(dead, order[1].baseUrl)
-        assertEquals(DeskBeacon.LAN_URL, order.first { it.source == "lan" }.baseUrl)
+        assertTrue(order.none { it.source == "lan" || it.baseUrl.contains(":4721") })
     }
 
     @Test
@@ -35,7 +36,7 @@ class V122LinkTest {
         assertEquals("saved", order[0].source)
         assertEquals(live, order[0].baseUrl)
         assertEquals(dead, order[1].baseUrl)
-        assertEquals(2, order.indexOfFirst { it.source == "lan" })
+        assertTrue(order.none { it.source == "lan" })
     }
 
     @Test
@@ -48,9 +49,9 @@ class V122LinkTest {
     @Test
     fun picksTheFirstCandidateThatAnswersEvenWhenTheBeaconIsDead() {
         val order = candidateUrls(DeskLink("", ""), beaconUrl = dead, lastGood = null, discovered = null)
-        val answered = setOf(live, DeskBeacon.LAN_URL)
-        // Fresh install: beacon dead, the default (new tunnel) answers.
-        assertEquals(DeskBeacon.LAN_URL, order.first { it.baseUrl in answered }.baseUrl)
+        // Fresh install: beacon dead, the default tunnel is the fallback. No hardcoded :4721.
+        assertEquals(live, order.first { it.baseUrl == live }.baseUrl)
+        assertTrue(order.none { it.baseUrl.contains(":4721") })
         assertEquals(live, DeskBeacon.DEFAULT_PUBLIC_URL)
     }
 

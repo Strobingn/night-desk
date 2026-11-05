@@ -144,6 +144,52 @@ export function roundUsd(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/** A mark older than this is not a fill. Net stays blank instead of looking profitable. */
+export const NET_MARK_STALE_MS = 5 * 60_000;
+
+export interface RealizablePnl {
+  netPnlUsd: number;
+  netPnlPct: number;
+  exitSlippage: number;
+  proceedsUsd: number;
+}
+
+/**
+ * What a paper sell would book right now, using quotePaperSell (the same pool model as an exit).
+ * Null when the mark is missing, non-finite, or stale, or when the quote cannot be checked.
+ * A missing pool is a zero fill (a loss), never a made-up profit.
+ */
+export function realizablePnl(input: {
+  markPrice: number;
+  qty: number;
+  costUsd: number;
+  liquidityUsd: number;
+  markAt: number;
+  now: number;
+}): RealizablePnl | null {
+  const { markPrice, qty, costUsd, liquidityUsd, markAt, now } = input;
+  if (!(markPrice > 0) || !Number.isFinite(markPrice)) return null;
+  if (!(qty > 0) || !Number.isFinite(qty)) return null;
+  if (!(costUsd > 0) || !Number.isFinite(costUsd)) return null;
+  if (!Number.isFinite(liquidityUsd)) return null;
+  if (!Number.isFinite(markAt) || !Number.isFinite(now)) return null;
+  if (markAt > now + 5_000) return null;
+  if (now - markAt >= NET_MARK_STALE_MS) return null;
+  let quote: PaperFillQuote;
+  try {
+    quote = quotePaperSell(markPrice, qty, liquidityUsd);
+  } catch {
+    return null;
+  }
+  const proceeds = quote.proceedsUsd ?? 0;
+  if (!Number.isFinite(proceeds) || proceeds < 0) return null;
+  const raw = qty * markPrice - costUsd;
+  const net = roundUsd(proceeds - costUsd);
+  if (net > roundUsd(raw) + 0.02) return null;
+  if (!Number.isFinite(quote.slippage)) return null;
+  return { netPnlUsd: net, netPnlPct: net / costUsd, exitSlippage: quote.slippage, proceedsUsd: proceeds };
+}
+
 /** Cents, never rounded up. Used for the position cap so a half-cent cannot cross 8%. */
 export function floorUsd(n: number): number {
   return Math.floor(n * 100 + 1e-9) / 100;

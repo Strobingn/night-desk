@@ -226,6 +226,8 @@ export interface Position {
   live?: boolean;
   /** v13.5 live trail anchor: the mark the buy was sized against. */
   entryMark?: number;
+  /** Slippage booked on the buy fill. Display only. */
+  entrySlippage?: number;
   /** v13.5 live trail: highest accepted risk mark since entry. */
   markPeak?: number;
 }
@@ -306,6 +308,20 @@ export interface PositionView {
   openedAt: number;
   /** v12 tag shown on the card, e.g. "manual · pump.fun". */
   tag?: string;
+  /** After-slippage proceeds minus cost. Null when the mark is missing or stale. */
+  netPnlUsd?: number | null;
+  netPnlPct?: number | null;
+  /** Exit haircut from the same pool model a paper sell uses. */
+  exitSlippage?: number | null;
+  /** Buy-fill slippage, when the position recorded one. */
+  entrySlippage?: number | null;
+  /** Recent marks for the card sparkline. Only points taken while the coin was held. */
+  marks?: MarkPoint[];
+}
+
+export interface MarkPoint {
+  t: number;
+  priceUsd: number;
 }
 
 export interface FeedStatus {
@@ -682,6 +698,10 @@ export interface MarksDelta {
     markAgeMs: number;
     markAt: number;
     markFeed: string;
+    netPnlUsd?: number | null;
+    netPnlPct?: number | null;
+    exitSlippage?: number | null;
+    marks?: MarkPoint[];
   }>;
 }
 

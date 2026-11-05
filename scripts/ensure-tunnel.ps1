@@ -1,10 +1,19 @@
-# Keep the phone URL stable. Starts cloudflared only when no tunnel already targets port 4721.
+# Keep the phone URL stable. Starts cloudflared only when no tunnel already targets the desk port.
 # This script never stops cloudflared and never stops the Node desk.
 # Requires SUPABASE_SERVICE_ROLE_KEY to PATCH night_desk_beacon. Without it, data/public-url.txt is still written.
+# Port: DESK_PORT, then PORT, then PORT= in .env, then 4721.
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$Port = if ($env:DESK_PORT) { $env:DESK_PORT } else { "4721" }
+function Read-DotEnvPort([string]$File) {
+  if (-not (Test-Path $File)) { return $null }
+  foreach ($line in Get-Content -LiteralPath $File) {
+    if ($line -match '^\s*PORT\s*=\s*["'']?(\d+)') { return $Matches[1] }
+  }
+  return $null
+}
+$Port = if ($env:DESK_PORT) { $env:DESK_PORT } elseif ($env:PORT) { $env:PORT } else { Read-DotEnvPort (Join-Path $Root ".env") }
+if (-not $Port) { $Port = "4721" }
 $Data = Join-Path $Root "data"
 $Log = Join-Path $Data "cloudflared.log"
 $UrlFile = Join-Path $Data "public-url.txt"

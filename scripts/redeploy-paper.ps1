@@ -3,7 +3,15 @@
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$Port = if ($env:DESK_PORT) { [int]$env:DESK_PORT } else { 4721 }
+function Read-DotEnvPort([string]$File) {
+  if (-not (Test-Path $File)) { return $null }
+  foreach ($line in Get-Content -LiteralPath $File) {
+    if ($line -match '^\s*PORT\s*=\s*["'']?(\d+)') { return [int]$Matches[1] }
+  }
+  return $null
+}
+$FromFile = Read-DotEnvPort (Join-Path $Root ".env")
+$Port = if ($env:DESK_PORT) { [int]$env:DESK_PORT } elseif ($env:PORT) { [int]$env:PORT } elseif ($FromFile) { $FromFile } else { 4721 }
 
 $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {

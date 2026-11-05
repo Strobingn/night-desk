@@ -12,7 +12,7 @@ import { MomentumTracker } from "../market/momentum.js";
 import { DEFAULT_SCOUT_SOURCES, type ScoutSources } from "../agents/scout.js";
 import { evaluateFilter } from "../agents/filter.js";
 import { scoreToken } from "../agents/analyst.js";
-import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd, maxSizeForPool, planOrder, quotePaperBuy, quotePaperSell, resolveManualSize, roundUsd, splitPosition } from "../agents/execution-math.js";
+import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd, maxSizeForPool, planOrder, quotePaperBuy, quotePaperSell, realizablePnl, resolveManualSize, roundUsd, splitPosition } from "../agents/execution-math.js";
 import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
 import { resolveCoinMint } from "../market/coin-lookup.js";
 import { DexSearchClient, matchLocal, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
@@ -436,6 +436,7 @@ export class Desk {
         this.liveBook.mark(pos.mint, pos.entryPrice);
       }
       for (const [mint, priceUsd] of liveSaved?.lastPrices ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.mark(mint, priceUsd);
+      for (const [mint, points] of liveSaved?.markSeries ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.restoreSeries(mint, points);
       for (const [mint, until] of liveSaved?.cooldowns ?? []) if (until > Date.now()) this.cooldowns.set(bookKey("live", mint), until);
     }
     if (restored) {
@@ -446,6 +447,7 @@ export class Desk {
         this.book.mark(pos.mint, pos.entryPrice);
       }
       for (const [mint, priceUsd] of restored.lastPrices ?? []) this.book.mark(mint, priceUsd);
+      for (const [mint, points] of restored.markSeries ?? []) if (this.book.positions.has(mint)) this.book.restoreSeries(mint, points);
       for (const [mint, until] of restored.cooldowns) if (until > Date.now() && !mint.startsWith(LIVE_KEY)) this.cooldowns.set(mint, until);
     }
     this.resetAt = this.ensureResetAt();
@@ -2420,9 +2422,11 @@ export class Desk {
       dex: token.dex,
       tradeId: fill.id,
       ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {}),
+      ...(Number.isFinite(fill.slippage) ? { entrySlippage: fill.slippage } : {}),
       ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {})
     };
     book.positions.set(token.mint, position);
+    book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
       sample.nearMiss = true;
@@ -2552,6 +2556,7 @@ export class Desk {
     const booked: Fill = { ...fill, priceUsd: fillPrice };
     book.cashUsd = roundUsd(book.cashUsd + proceedsUsd);
     book.positions.delete(pos.mint);
+    book.dropSeries(pos.mint);
     const pnlUsd = roundUsd(proceedsUsd - pos.costUsd);
     const pnlPct = pos.costUsd > 0 ? pnlUsd / pos.costUsd : order.pnlPct;
     const label = classifyStopExit({
@@ -2708,7 +2713,31 @@ export class Desk {
       markFeed: shown.feed,
       riskMarkAgeMs: Math.max(0, Date.now() - (book.markedAt(pos.mint) ?? pos.openedAt)),
       openedAt: pos.openedAt,
-      ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {})
+      ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {}),
+      ...this.netFields(pos, kind, shown, markPrice)
+    };
+  }
+
+  /** After-slippage P&L for the card. A restored or stale mark stays blank. */
+  private netFields(pos: Position, kind: BookKind, shown: { price: number; at: number }, markPrice: number): Pick<PositionView, "netPnlUsd" | "netPnlPct" | "exitSlippage" | "entrySlippage" | "marks"> {
+    const book = this.bk(kind);
+    const fresh = this.freshMark(kind, pos.mint, shown.at);
+    const net = fresh
+      ? realizablePnl({
+          markPrice,
+          qty: pos.qty,
+          costUsd: pos.costUsd,
+          liquidityUsd: this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd,
+          markAt: shown.at,
+          now: Date.now()
+        })
+      : null;
+    return {
+      netPnlUsd: net?.netPnlUsd ?? null,
+      netPnlPct: net?.netPnlPct ?? null,
+      exitSlippage: net?.exitSlippage ?? null,
+      entrySlippage: Number.isFinite(pos.entrySlippage) ? pos.entrySlippage! : null,
+      marks: book.points(pos.mint).map((p) => ({ t: p.t, priceUsd: p.priceUsd }))
     };
   }
 
@@ -2874,6 +2903,7 @@ export class Desk {
     if (seen) this.sightings.set(mint, { ...seen, priceUsd });
     if (origin?.liquidityUsd && origin.liquidityUsd > 0 && pos) this.markLiquidity.set(mint, origin.liquidityUsd);
     if (kind === "paper" || pos) book.mark(mint, priceUsd);
+    if (pos && !pos.closing) book.noteMark(mint, priceUsd, Date.now());
     if (pos) {
       this.riskFeed.set(key, origin?.feed ?? pos.priceFeed ?? pos.source);
       this.bus.emit("position.mark", { mint, at: Date.now() });
@@ -2917,6 +2947,7 @@ export class Desk {
     }
     this.livePending.delete(key);
     this.liveMarks.set(key, { price: priceUsd, at: origin.at || now, feed: origin.feed });
+    book.noteMark(mint, priceUsd, origin.at || now);
     if (pos.priceFeed === "chain" && pos.pairAddress && origin.pairAddress === pos.pairAddress) {
       // v13.6: the entry itself was priced from this curve/pool, so it is the stop source.
       this.applyMarkIn(kind, mint, priceUsd, { feed: "chain", pairAddress: origin.pairAddress, dex: origin.kind });
@@ -2987,7 +3018,11 @@ export class Desk {
       trailHintPrice: p.trailHintPrice,
       markAgeMs: p.markAgeMs ?? 0,
       markAt: p.markAt ?? 0,
-      markFeed: p.markFeed ?? ""
+      markFeed: p.markFeed ?? "",
+      netPnlUsd: p.netPnlUsd ?? null,
+      netPnlPct: p.netPnlPct ?? null,
+      exitSlippage: p.exitSlippage ?? null,
+      marks: p.marks ?? []
     });
     return {
       now: Date.now(),
@@ -3008,7 +3043,11 @@ export class Desk {
         trailHintPrice: p.trailHintPrice,
         markAgeMs: p.markAgeMs ?? 0,
         markAt: p.markAt ?? 0,
-        markFeed: p.markFeed ?? ""
+        markFeed: p.markFeed ?? "",
+        netPnlUsd: p.netPnlUsd ?? null,
+        netPnlPct: p.netPnlPct ?? null,
+        exitSlippage: p.exitSlippage ?? null,
+        marks: p.marks ?? []
       }))
     };
   }
@@ -3467,7 +3506,8 @@ export class Desk {
         startedAt: this.startedAt,
         positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
         cooldowns: cooldowns.filter(([key]) => !key.startsWith(LIVE_KEY)),
-        lastPrices: [...this.book.lastPrice.entries()]
+        lastPrices: [...this.book.lastPrice.entries()],
+        markSeries: [...this.book.series.entries()]
       },
       "book"
     );
@@ -3479,7 +3519,8 @@ export class Desk {
           startedAt: this.liveStartedAt,
           positions: [...this.liveBook.positions.values()].map((pos) => ({ ...pos, closing: false })),
           cooldowns: cooldowns.filter(([key]) => key.startsWith(LIVE_KEY)).map(([key, until]) => [key.slice(LIVE_KEY.length), until] as [string, number]),
-          lastPrices: [...this.liveBook.lastPrice.entries()]
+          lastPrices: [...this.liveBook.lastPrice.entries()],
+          markSeries: [...this.liveBook.series.entries()]
         },
         "book:live"
       );

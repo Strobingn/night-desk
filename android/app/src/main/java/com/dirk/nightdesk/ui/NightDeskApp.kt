@@ -14,6 +14,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import com.dirk.nightdesk.CoinCard
 import com.dirk.nightdesk.Verdict
 import com.dirk.nightdesk.coinCards
@@ -22,6 +24,7 @@ import com.dirk.nightdesk.TapeSort
 import com.dirk.nightdesk.TOP_VOLUME
 import com.dirk.nightdesk.HOT_RANK
 import android.net.Uri
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
@@ -101,6 +104,7 @@ import com.dirk.nightdesk.DeskSnapshot
 import com.dirk.nightdesk.LiveReadiness
 import com.dirk.nightdesk.MintCooldown
 import com.dirk.nightdesk.PositionRow
+import com.dirk.nightdesk.PricePoint
 import com.dirk.nightdesk.TapeEvent
 import com.dirk.nightdesk.TapeFollowInput
 import com.dirk.nightdesk.TapeFollowState
@@ -1090,9 +1094,28 @@ private fun OpenPositionCard(
             Column(horizontalAlignment = Alignment.End) {
                 PnlChip(pos.pnlUsd, pos.pnlPct)
                 Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                val net = pos.netPnlUsd
+                val netText = if (net != null && net.isFinite()) {
+                    val pct = pos.netPnlPct
+                    val slip = pos.exitSlippage
+                    buildString {
+                        append("Net ")
+                        append(signed(net))
+                        if (pct != null && pct.isFinite()) append(" · ${"%.1f".format(java.util.Locale.US, pct * 100)}%")
+                        if (slip != null && slip.isFinite()) append(" · slip ${"%.2f".format(java.util.Locale.US, slip * 100)}%")
+                    }
+                } else "Net —"
+                Text(
+                    netText,
+                    color = if (net == null || !net.isFinite()) P.muted else if (net >= 0) P.up else P.down,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
         MarkUpdated(pos)
+        CoinSpark(pos.marks, pos.entryPrice)
         StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
         Column(
             Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(P.surface).border(1.dp, P.line, RoundedCornerShape(14.dp)).padding(12.dp),
@@ -1181,6 +1204,34 @@ private fun OpenPositionCard(
             },
             dismissButton = { TextButton(onClick = { sellAsk = null }) { Text("Cancel", color = Dim) } }
         )
+    }
+}
+
+@Composable
+private fun CoinSpark(points: List<PricePoint>, entry: Double) {
+    if (points.isEmpty()) return
+    val drawn = if (points.size >= 2) points else listOf(points[0], points[0])
+    val up = drawn.last().priceUsd >= entry
+    val color = if (up) P.up else P.down
+    Canvas(Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp)) {
+        var min = drawn[0].priceUsd
+        var max = drawn[0].priceUsd
+        for (p in drawn) {
+            if (p.priceUsd < min) min = p.priceUsd
+            if (p.priceUsd > max) max = p.priceUsd
+        }
+        if (entry.isFinite() && entry > 0.0) {
+            if (entry < min) min = entry
+            if (entry > max) max = entry
+        }
+        val span = if (max - min > 0.0) max - min else 1.0
+        val path = Path()
+        drawn.forEachIndexed { i, p ->
+            val x = i.toFloat() / (drawn.size - 1).toFloat() * size.width
+            val y = size.height - ((p.priceUsd - min) / span).toFloat() * size.height
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(path, color, style = Stroke(width = 2.5f))
     }
 }
 
@@ -1628,7 +1679,7 @@ private fun LinkScreen(desk: DeskRepository) {
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp
         )
-        OutlinedTextField(url, { url = it }, label = { Text("Override URL") }, placeholder = { Text("http://192.168.1.242:4721") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = fieldColors())
+        OutlinedTextField(url, { url = it }, label = { Text("Override URL") }, placeholder = { Text("https://<tunnel>.trycloudflare.com") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = fieldColors())
         OutlinedTextField(token, { token = it }, label = { Text("Desk token") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), colors = fieldColors())
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text("Hold this URL instead of the beacon", color = Ink, modifier = Modifier.weight(1f), fontSize = 14.sp)

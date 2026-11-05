@@ -16,7 +16,14 @@ data class MarkDelta(
     val stopPrice: Double,
     val peakPrice: Double,
     val markAgeMs: Long,
-    val markFeed: String
+    val markFeed: String,
+    val netPnlUsd: Double? = null,
+    val netPnlPct: Double? = null,
+    val exitSlippage: Double? = null,
+    /** True when this delta included netPnlUsd (including JSON null). */
+    val netKnown: Boolean = false,
+    /** Null when this delta omitted marks. */
+    val marks: List<PricePoint>? = null
 )
 
 data class MarksMessage(
@@ -113,7 +120,12 @@ private fun parseMarkRows(rows: org.json.JSONArray?): List<MarkDelta> {
                     stopPrice = row.optDouble("stopPrice", Double.NaN),
                     peakPrice = row.optDouble("peakPrice", Double.NaN),
                     markAgeMs = row.optDouble("markAgeMs", 0.0).let { if (it.isFinite()) it.toLong().coerceAtLeast(0L) else 0L },
-                    markFeed = row.optString("markFeed")
+                    markFeed = row.optString("markFeed"),
+                    netPnlUsd = row.optNullableFinite("netPnlUsd"),
+                    netPnlPct = row.optNullableFinite("netPnlPct"),
+                    exitSlippage = row.optNullableFinite("exitSlippage"),
+                    netKnown = row.has("netPnlUsd"),
+                    marks = parsePricePoints(row)
                 )
             )
         }
@@ -158,7 +170,11 @@ private fun mergeMarkRows(rows: List<PositionRow>, deltas: List<MarkDelta>, rece
             peakPrice = d.peakPrice.or(row.peakPrice),
             markAgeMs = d.markAgeMs,
             markLocalAt = receivedAt - d.markAgeMs,
-            markFeed = d.markFeed.ifBlank { row.markFeed }
+            markFeed = d.markFeed.ifBlank { row.markFeed },
+            netPnlUsd = if (d.netKnown) d.netPnlUsd else row.netPnlUsd,
+            netPnlPct = if (d.netKnown) d.netPnlPct else row.netPnlPct,
+            exitSlippage = if (d.netKnown) d.exitSlippage else row.exitSlippage,
+            marks = d.marks ?: row.marks
         )
     }
     return Pair(merged, touched)

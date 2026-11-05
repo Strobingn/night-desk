@@ -62,7 +62,8 @@ internal fun candidateUrls(saved: DeskLink, beaconUrl: String?, lastGood: String
     add(lastGood, "last")
     add(discovered, "desk")
     add(beaconUrl, "beacon")
-    add(DeskBeacon.LAN_URL, "lan")
+    // No fixed LAN :4721. That port was wslrelay on Austin's PC and is not the desk.
+    // The phone follows the saved URL, the beacon, or the desk's publicUrl from /api/health.
     add(DeskBeacon.DEFAULT_PUBLIC_URL, "default")
     return out.map { (url, source) -> ResolvedDesk(url, source) }
 }
@@ -241,7 +242,6 @@ class DeskRepository private constructor(private val context: Context) {
     internal fun resolve(
         saved: DeskLink,
         beaconUrl: String?,
-        lanReachable: Boolean,
         lastGood: String?,
         afterFailure: Boolean
     ): ResolvedDesk {
@@ -255,7 +255,6 @@ class DeskRepository private constructor(private val context: Context) {
             return ResolvedDesk(beacon, "beacon")
         }
         if (savedUrl != null && !afterFailure) return ResolvedDesk(savedUrl, "saved")
-        if (lanReachable) return ResolvedDesk(DeskBeacon.LAN_URL, "lan")
         if (savedUrl != null) return ResolvedDesk(savedUrl, "saved")
         if (beacon != null) return ResolvedDesk(beacon, "beacon")
         if (remembered != null) return ResolvedDesk(remembered, "last")
@@ -282,7 +281,7 @@ class DeskRepository private constructor(private val context: Context) {
             val healthy = candidates.firstOrNull { answers.containsKey(it.baseUrl) }
             // Nothing answered: stay on the saved/last URL and retry, never fall over to a stale beacon.
             val resolved = healthy ?: candidates.firstOrNull { it.source == "saved" || it.source == "last" }
-                ?: resolve(saved, beacon, false, lastGood, afterFailure)
+                ?: resolve(saved, beacon, lastGood, afterFailure)
             answers[resolved.baseUrl]?.let { rememberDiscovered(it) }
             link = DeskLink(resolved.baseUrl, saved.token, saved.useManual)
             _activeUrl.value = resolved.baseUrl

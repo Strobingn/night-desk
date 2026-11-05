@@ -5,7 +5,7 @@ import { api } from "../api";
 import { chartLinks, clock, px, signedPct, signedUsd, usd } from "../format";
 import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../types";
 import { tone, type DeskActions } from "../App";
-import { CoinAvatar, PnlChip, Sparkline, StopTrailBar } from "../ui";
+import { CoinAvatar, CoinSpark, PnlChip, Sparkline, StopTrailBar } from "../ui";
 import { dayBase } from "../coins";
 import { exitLabel } from "../../../src/desk/gap";
 import { LiveTapPair, OneTapBar, TapSellButton } from "./OneTap";
@@ -211,9 +211,15 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
         <div className="pnl">
           <PnlChip usd={pos.pnlUsd} pct={pos.pnlPct} />
           <span className="pos-value">{usd(valueUsd)}</span>
+          <span className={`net-line ${pos.netPnlUsd == null ? "flat" : pos.netPnlUsd >= 0 ? "up" : "down"}`}>
+            {pos.netPnlUsd == null
+              ? "Net —"
+              : `Net ${signedUsd(pos.netPnlUsd)}${pos.netPnlPct != null ? ` · ${signedPct(pos.netPnlPct)}` : ""}${pos.exitSlippage != null ? ` · slip ${(pos.exitSlippage * 100).toFixed(2)}%` : ""}`}
+          </span>
         </div>
       </header>
       <MarkUpdated pos={pos} />
+      <CoinSpark points={pos.marks ?? []} entry={pos.entryPrice} />
       <StopTrailBar stop={pos.stopPrice} entry={pos.entryPrice} mark={pos.markPrice} peak={pos.peakPrice} armPct={armPct} trailOn={trailOn} />
       <dl>
         <div>

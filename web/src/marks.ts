@@ -116,7 +116,11 @@ function mergeRows(rows: PositionView[], delta: MarksDelta["positions"], receive
       markAgeMs: usable(row.markAgeMs) ? row.markAgeMs : pos.markAgeMs,
       markAt: usable(row.markAt) ? row.markAt : pos.markAt,
       markFeed: row.markFeed || pos.markFeed,
-      markLocalAt: receivedAt - Math.max(0, usable(row.markAgeMs) ? row.markAgeMs : 0)
+      markLocalAt: receivedAt - Math.max(0, usable(row.markAgeMs) ? row.markAgeMs : 0),
+      netPnlUsd: row.netPnlUsd === null || usable(row.netPnlUsd) ? row.netPnlUsd : pos.netPnlUsd,
+      netPnlPct: row.netPnlPct === null || usable(row.netPnlPct) ? row.netPnlPct : pos.netPnlPct,
+      exitSlippage: row.exitSlippage === null || usable(row.exitSlippage) ? row.exitSlippage : pos.exitSlippage,
+      marks: Array.isArray(row.marks) ? row.marks : pos.marks
     };
   });
   return { positions, touched };

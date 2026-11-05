@@ -2,7 +2,9 @@
 
 Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by default. Capital preservation is the product: a name that fails one safety check never reaches a ticket.
 
-`npm install && npm run paper` boots the pipeline and the live terminal at [http://127.0.0.1:4721](http://127.0.0.1:4721).
+`npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
+
+Android `13.13` (versionCode 1313) is the v13.11 desk (position cards, Orders, Settings, one-tap live) plus after-slippage net P&L and a sparkline on each held coin.
 
 This is a trading tool, not a promise of profit. Defaults are deliberately tight.
 
@@ -18,7 +20,7 @@ Paper mode does not need a private key, an RPC key, or `LIVE_TRADING`. A new boo
 | Command | What it does |
 | --- | --- |
 | `npm run paper` | Fast path on Windows and Linux. Compiles `src` to `dist` when sources are newer, builds the UI only if `web/dist/index.html` is missing, then runs `node dist/index.js`. Replay tape on. Live trading off. |
-| `npm run paper:live` | Same compiled process. Forces `DEMO_FEED=0`, `FEED_MODE=live`, and `LIVE_TRADING=false` |
+| `npm run paper:live` | Same compiled process. Forces `DEMO_FEED=0` and `FEED_MODE=live`. Sets `LIVE_TRADING` only when `.env` says exactly `LIVE_TRADING=true` (manual live; AI stays paper unless "AI buys live" is on). |
 | `npm run dev` | Same desk under `tsx` (no compile step). For editing TypeScript while it runs. |
 | `npm test` | Filter, analyst, 8% cap, stop / trail / no-add |
 | `npm run recap` | Morning recap of the last 12 hours |
@@ -78,7 +80,7 @@ The script writes `data/public-url.txt`. To publish that URL for the phone, set 
 - `SUPABASE_SERVICE_ROLE_KEY` — required for the beacon PATCH. The anon key cannot write this row.
 - `NIGHT_DESK_BEACON_ID` — optional, defaults to `phone`
 
-Without the service-role key the script still writes `data/public-url.txt` and says the PATCH was skipped. The Android watcher reads `night_desk_beacon.public_url` with the public anon key, then falls back to a saved Link URL, then to `http://192.168.1.242:4721` if that health check answers.
+Without the service-role key the script still writes `data/public-url.txt` and says the PATCH was skipped. The Android watcher reads `night_desk_beacon.public_url` with the public anon key, then a saved Link URL, then the desk's `/api/health` public URL. It does not guess port 4721. Set `PORT` in `.env` (Austin uses 4788) and point the tunnel at that port.
 
 Open `https://<the-tunnel-host>/?token=choose-a-long-secret` on the phone. That first load sets an HttpOnly cookie so later asset and API requests stay authorized. You can also send `X-Desk-Token` or `?token=` on each call. A missing or wrong secret is **401**. With `DESK_TOKEN` unset, the desk behaves as a local open terminal.
 

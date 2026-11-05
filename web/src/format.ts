@@ -72,7 +72,7 @@ export function clock(ts: number): string {
 /** Look-only links. They open the mint in a browser and never send a desk order. */
 export function chartLinks(mint: string): { label: string; href: string }[] {
   return [
-    { label: "Chart", href: `https://dexscreener.com/solana/${mint}` },
+    { label: "DexScreener", href: `https://dexscreener.com/solana/${mint}` },
     // v13.2: Birdeye retired /token/<mint>?chain=solana (404). /solana/token/<mint> redirects to Birdeye Terminal.
     { label: "Birdeye", href: `https://birdeye.so/solana/token/${mint}` },
     { label: "Jupiter", href: `https://jup.ag/tokens/${mint}` }

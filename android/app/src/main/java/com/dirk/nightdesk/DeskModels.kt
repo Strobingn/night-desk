@@ -13,6 +13,8 @@ data class AdviceNote(
     val score: Double? = null
 )
 
+data class PricePoint(val t: Long, val priceUsd: Double)
+
 data class PositionRow(
     val mint: String,
     val symbol: String,
@@ -38,7 +40,12 @@ data class PositionRow(
     /** v13.2 "chain" (pool reserves), "dexscreener", "jupiter", … */
     val markFeed: String = "",
     /** v13.7 true = a real-money position in the live book. */
-    val live: Boolean = false
+    val live: Boolean = false,
+    /** After-slippage net. Null when the mark is missing or stale. */
+    val netPnlUsd: Double? = null,
+    val netPnlPct: Double? = null,
+    val exitSlippage: Double? = null,
+    val marks: List<PricePoint> = emptyList()
 ) {
     val stopDistancePct: Double
         get() {
@@ -493,6 +500,32 @@ fun formatBuyNotice(ok: Boolean, error: String?, symbol: String?, sizeUsd: Doubl
 }
 
 /** Missing, null, and non-finite JSON numbers become the fallback. optDouble would hand back NaN. */
+/** Null when the key is missing, JSON null, or not a finite number. */
+fun JSONObject.optNullableFinite(key: String): Double? {
+    if (!has(key) || isNull(key)) return null
+    val number = when (val raw = opt(key)) {
+        is Number -> raw.toDouble()
+        is String -> raw.toDoubleOrNull()
+        else -> null
+    }
+    return number?.takeIf { it.isFinite() }
+}
+
+/** Sparkline points. Null when the payload omitted `marks` (keep the previous series). */
+fun parsePricePoints(row: JSONObject): List<PricePoint>? {
+    if (!row.has("marks")) return null
+    if (row.isNull("marks")) return emptyList()
+    val arr = row.optJSONArray("marks") ?: return emptyList()
+    return buildList {
+        for (i in 0 until arr.length()) {
+            val point = arr.optJSONObject(i) ?: continue
+            val price = point.optDouble("priceUsd", Double.NaN)
+            val t = point.optDouble("t", Double.NaN)
+            if (price.isFinite() && price > 0.0 && t.isFinite()) add(PricePoint(t.toLong(), price))
+        }
+    }
+}
+
 fun JSONObject.optFinite(key: String, fallback: Double = 0.0): Double {
     if (!has(key) || isNull(key)) return fallback
     val number = when (val raw = opt(key)) {
@@ -828,7 +861,11 @@ internal fun parsePositionRows(positions: org.json.JSONArray?, receivedAt: Long,
                         openedAt = row.optFinite("openedAt").toLong(),
                         tag = row.optText("tag").ifBlank { null },
                         peakPrice = row.optFinite("peakPrice"),
-                        live = live || row.optText("book") == "live"
+                        live = live || row.optText("book") == "live",
+                        netPnlUsd = row.optNullableFinite("netPnlUsd"),
+                        netPnlPct = row.optNullableFinite("netPnlPct"),
+                        exitSlippage = row.optNullableFinite("exitSlippage"),
+                        marks = parsePricePoints(row) ?: emptyList()
                     )
                 )
             }

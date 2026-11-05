@@ -88,6 +88,36 @@ export function PnlChip({ usd, pct, size = "md" }: { usd?: number; pct?: number 
   );
 }
 
+/** Small price line for one held coin. Entry is the dashed baseline. */
+export function CoinSpark({ points, entry }: { points: { t: number; priceUsd: number }[]; entry: number }) {
+  const d = useMemo(() => {
+    const series = points.length >= 2 ? points : points.length === 1 ? [points[0], { ...points[0], t: points[0].t + 1 }] : [];
+    if (series.length < 2) return null;
+    const vals = series.map((p) => p.priceUsd);
+    let min = Math.min(...vals);
+    let max = Math.max(...vals);
+    if (Number.isFinite(entry) && entry > 0) {
+      min = Math.min(min, entry);
+      max = Math.max(max, entry);
+    }
+    const span = max - min || 1;
+    const w = 300;
+    const h = 36;
+    const xy = series.map((p, i) => [(i / (series.length - 1)) * w, h - 3 - ((p.priceUsd - min) / span) * (h - 6)] as const);
+    const line = xy.map((c, i) => `${i ? "L" : "M"}${c[0].toFixed(1)},${c[1].toFixed(1)}`).join(" ");
+    const base = Number.isFinite(entry) ? h - 3 - ((entry - min) / span) * (h - 6) : h / 2;
+    const last = vals[vals.length - 1] ?? entry;
+    return { line, base, up: last >= entry, h };
+  }, [points, entry]);
+  if (!d) return null;
+  return (
+    <svg className={`spark coin-spark ${d.up ? "up" : "down"}`} viewBox={`0 0 300 ${d.h}`} preserveAspectRatio="none" role="img" aria-label="Price sparkline">
+      <line x1="0" x2="300" y1={d.base} y2={d.base} className="spark-base" />
+      <path d={d.line} className="spark-line" />
+    </svg>
+  );
+}
+
 export function Sparkline({ points, baseline, height = 56 }: { points: { t: number; equity: number }[]; baseline: number; height?: number }) {
   const d = useMemo(() => {
     const series = points.length > 1 ? points : [{ t: 0, equity: baseline }, { t: 1, equity: points[0]?.equity ?? baseline }];
