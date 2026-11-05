@@ -7,6 +7,7 @@ import {
   parseMintAccount,
   parseRugcheckReport,
   parseTop10Pct,
+  type HolderRead,
   type TokenAccountRow
 } from "./parsers.js";
 
@@ -54,9 +55,12 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     volume1hUsd: 0,
     ageSeconds: 0,
     mintAuthorityRevoked: null,
+    freezeAuthorityRevoked: null,
     lpLockedOrBurned: null,
     top10HolderPct: null,
     holderCount: null,
+    holderEntropy: null,
+    entropyHolders: null,
     devWallet: raw.devWallet ?? null,
     social: { ...emptySocial }
   };
@@ -94,6 +98,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   if (deps.rpcUrl) {
     const mint = parseMintAccount(mintInfo);
     if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
+    if (mint.freezeAuthorityRevoked != null) token.freezeAuthorityRevoked = mint.freezeAuthorityRevoked;
     if (mint.decimals != null) token.decimals = mint.decimals;
     const reserves = new Set([...pumpReserveAddresses(raw.mint), ...RESERVE_OWNER_SET]);
     const exclude = { addresses: reserves, owners: RESERVE_OWNER_SET };
@@ -108,7 +113,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
       return parseTop10Pct(attachTokenOwners(largest, multiple), mint.supplyUi, exclude);
     };
 
-    let holders: { top10HolderPct: number | null; holderCount: number | null } | null = null;
+    let holders: HolderRead | null = null;
     const pages = deps.holderPagesMax ?? 0;
     if (pages > 0 && isHeliusUrl(rpcUrl)) {
       const full = await readAllHolders(fetchImpl, rpcUrl, raw.mint, pages, deps.dasGapMs ?? 500);
@@ -119,7 +124,9 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
             const top = await readLargest();
             holders = {
               top10HolderPct: top.top10HolderPct == null ? null : Math.max(parsedFull.top10HolderPct, top.top10HolderPct),
-              holderCount: parsedFull.holderCount
+              holderCount: parsedFull.holderCount,
+              holderEntropy: parsedFull.holderEntropy,
+              entropyHolders: parsedFull.entropyHolders
             };
           } else {
             holders = parsedFull;
@@ -130,6 +137,8 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     if (!holders) holders = await readLargest();
     if (holders.top10HolderPct != null) token.top10HolderPct = holders.top10HolderPct;
     if (holders.holderCount != null) token.holderCount = holders.holderCount;
+    token.holderEntropy = holders.holderEntropy;
+    token.entropyHolders = holders.entropyHolders;
   }
 
   if (report) {
@@ -138,6 +147,8 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     if (token.mintAuthorityRevoked == null && rug.mintAuthorityRevoked != null) {
       token.mintAuthorityRevoked = rug.mintAuthorityRevoked;
     }
+    // RugCheck can only report freeze as still enabled. It never upgrades an unknown to revoked.
+    if (rug.freezeAuthorityRevoked === false) token.freezeAuthorityRevoked = false;
     if (rug.lpLockedOrBurned != null) token.lpLockedOrBurned = rug.lpLockedOrBurned;
     if (rug.lpLockPct != null) token.lpLockPct = rug.lpLockPct;
     // Believe the more concentrated read. A source that dropped a reserve must not lower the chain figure.

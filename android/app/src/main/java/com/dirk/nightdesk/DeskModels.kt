@@ -29,7 +29,11 @@ data class PositionRow(
     val markPrice: Double,
     val stopPrice: Double,
     val entryPrice: Double,
-    val score: Double
+    val score: Double,
+    /** Safety read the desk took at entry. Null = not measured. */
+    val freezeRevoked: Boolean?,
+    val holderEntropy: Double?,
+    val top10Pct: Double?
 ) {
     val stopDistancePct: Double
         get() = if (markPrice > 0) ((markPrice - stopPrice) / markPrice) * 100.0 else 0.0
@@ -44,6 +48,16 @@ data class TapeEvent(
     val code: String?
 )
 
+/** Quarter-Kelly read of the closed book. Display only; the desk still sizes by its cap. */
+data class KellyHint(
+    val trades: Int,
+    val winRate: Double,
+    val payoffRatio: Double,
+    val fullKelly: Double,
+    val suggestedPct: Double,
+    val thin: Boolean
+)
+
 data class DeskSnapshot(
     val mode: String,
     val cashUsd: Double,
@@ -52,7 +66,8 @@ data class DeskSnapshot(
     val minVolume1hUsd: Double,
     val advice: List<AdviceNote>,
     val positions: List<PositionRow>,
-    val events: List<TapeEvent>
+    val events: List<TapeEvent>,
+    val kelly: KellyHint?
 )
 
 fun parseDeskPayload(raw: String): DeskSnapshot? {
@@ -101,7 +116,10 @@ fun parseDeskPayload(raw: String): DeskSnapshot? {
                         markPrice = row.optDouble("markPrice"),
                         stopPrice = row.optDouble("stopPrice"),
                         entryPrice = row.optDouble("entryPrice"),
-                        score = row.optDouble("score")
+                        score = row.optDouble("score"),
+                        freezeRevoked = row.optBool("freezeAuthorityRevoked"),
+                        holderEntropy = row.optFinite("holderEntropy"),
+                        top10Pct = row.optFinite("top10HolderPct")
                     )
                 )
             }
@@ -132,8 +150,31 @@ fun parseDeskPayload(raw: String): DeskSnapshot? {
         minVolume1hUsd = rules?.optDouble("minVolume1hUsd", 50_000.0) ?: 50_000.0,
         advice = notes,
         positions = book,
-        events = tape
+        events = tape,
+        kelly = parseKelly(data.optJSONObject("kelly"))
     )
+}
+
+private fun parseKelly(row: JSONObject?): KellyHint? {
+    if (row == null) return null
+    val suggested = row.optFinite("suggestedPct") ?: return null
+    return KellyHint(
+        trades = row.optInt("trades"),
+        winRate = row.optFinite("winRate") ?: return null,
+        payoffRatio = row.optFinite("payoffRatio") ?: return null,
+        fullKelly = row.optFinite("fullKelly") ?: return null,
+        suggestedPct = suggested,
+        thin = row.optBoolean("thin", true)
+    )
+}
+
+/** Null or missing stays null: an unmeasured safety field must not read as a pass. */
+private fun JSONObject.optBool(key: String): Boolean? {
+    if (!has(key) || isNull(key)) return null
+    return when (val v = opt(key)) {
+        is Boolean -> v
+        else -> null
+    }
 }
 
 /** Null, missing, or non-finite stays null so the card cannot paint a made-up net. */

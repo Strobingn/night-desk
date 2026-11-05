@@ -8,6 +8,8 @@ export type TokenSource = "pumpfun" | "raydium" | "replay";
 
 export type ReasonCode =
   | "MINT_AUTHORITY_ACTIVE"
+  | "FREEZE_AUTHORITY_ACTIVE"
+  | "HOLDER_SYBIL_SPLIT"
   | "LP_NOT_LOCKED"
   | "HOLDER_CONCENTRATION"
   | "VOLUME_TOO_LOW"
@@ -56,6 +58,8 @@ export interface CandidateToken {
   ageSeconds: number;
   /** null = could not verify. Treated as not revoked. */
   mintAuthorityRevoked: boolean | null;
+  /** null = could not verify. Treated as active: an active freeze authority can block sells. */
+  freezeAuthorityRevoked: boolean | null;
   /**
    * null = could not verify.
    * Fail closed, except while `onBondingCurve` is true (no pool LP exists yet).
@@ -68,6 +72,10 @@ export interface CandidateToken {
   /** Fraction of supply, 0–1. null = could not verify. */
   top10HolderPct: number | null;
   holderCount: number | null;
+  /** Normalized Shannon entropy of the top 25 retail balances, 0–1. null = not measured. */
+  holderEntropy?: number | null;
+  /** Balances the entropy was taken over. */
+  entropyHolders?: number | null;
   devWallet?: string | null;
   /** Populated when an upstream report already links the deployer to rugs. */
   devRug?: { rugged: boolean; evidence?: string } | null;
@@ -157,6 +165,10 @@ export interface Position {
   closing?: boolean;
   /** Buy-side fill slippage already paid. The dollars sit in `costUsd` / `entryPrice`. */
   entrySlippage?: number;
+  /** Safety read at entry, carried for the book and the phone. */
+  freezeAuthorityRevoked?: boolean | null;
+  holderEntropy?: number | null;
+  top10HolderPct?: number | null;
 }
 
 export interface ClosedTrade {
@@ -226,6 +238,10 @@ export interface PositionView {
   score: number;
   source: TokenSource;
   openedAt: number;
+  /** Safety read taken when the position opened. Null when it was not measured. */
+  freezeAuthorityRevoked: boolean | null;
+  holderEntropy: number | null;
+  top10HolderPct: number | null;
 }
 
 export interface FeedStatus {
@@ -280,6 +296,8 @@ export interface DeskSnapshot {
   events: FeedEvent[];
   /** Latest advisory lines. Display only. */
   advice: AdviceNote[];
+  /** Quarter-Kelly read of the closed book. A hint only; orders are still sized by the cap. */
+  kelly: import("./desk/kelly.js").KellyHint | null;
 }
 
 export type DeskEvents = {

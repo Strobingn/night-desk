@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { kellyHint } from "./kelly.js";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
 import { HARD_RULES, clampVolumeUsd } from "../rules.js";
 import { evaluateFilter } from "../agents/filter.js";
@@ -358,7 +359,11 @@ export class Desk {
         .slice(-8),
       equity: downsample(this.store.equitySince(this.startedAt), 240),
       events: this.store.recentEvents(180),
-      advice: this.advice
+      advice: this.advice,
+      kelly: kellyHint(
+        this.store.recentClosed(200).filter((trade) => trade.mode === this.config.mode),
+        this.config.rules.maxPositionPct
+      )
     };
   }
 
@@ -410,7 +415,7 @@ export class Desk {
         kind: "pass",
         mint: result.token.mint,
         symbol: result.token.symbol,
-        message: `Filter passed ${result.token.symbol}. Mint revoked, LP locked, holders and volume inside the hard lines.`
+        message: `Filter passed ${result.token.symbol}. Mint and freeze revoked, LP locked, holders and volume inside the hard lines.`
       });
       const report = scoreToken(result.token, this.config.rules);
       this.bus.emit("analyst.report", report);
@@ -586,7 +591,10 @@ export class Desk {
       liquidityUsd: token.liquidityUsd,
       decimals: token.decimals,
       tradeId: fill.id,
-      entrySlippage: fill.slippage
+      entrySlippage: fill.slippage,
+      freezeAuthorityRevoked: token.freezeAuthorityRevoked ?? null,
+      holderEntropy: token.holderEntropy ?? null,
+      top10HolderPct: token.top10HolderPct ?? null
     };
     this.book.positions.set(token.mint, position);
     noteEntry(this.advisor.memory, token.mint, token.symbol, sampleOf(token, score));
@@ -852,7 +860,10 @@ export class Desk {
       trailHintPrice: assessment.trailHintPrice,
       score: pos.score,
       source: pos.source,
-      openedAt: pos.openedAt
+      openedAt: pos.openedAt,
+      freezeAuthorityRevoked: pos.freezeAuthorityRevoked ?? null,
+      holderEntropy: pos.holderEntropy ?? null,
+      top10HolderPct: pos.top10HolderPct ?? null
     };
   }
 

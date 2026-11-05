@@ -165,6 +165,7 @@ private fun BookScreen(
             item { ResetCard(onReset) }
         }
         item { AdvisorCard(snap?.advice.orEmpty()) }
+        snap?.kelly?.let { k -> item { KellyCard(k) } }
         item { VolumeCard(snap?.minVolume1hUsd ?: 50_000.0, onVolume) }
         item { Text("Open", style = androidx.compose.material3.MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 4.dp)) }
         if (snap == null || snap.positions.isEmpty()) {
@@ -260,6 +261,7 @@ private fun PositionCard(pos: PositionRow, onClose: (String) -> Unit) {
         }
         Text("mark ${pct(pos.pnlPct)}  ·  score ${"%.2f".format(pos.score)}", color = Dim, fontSize = 12.sp)
         NetLine(pos)
+        SafetyLine(pos)
         Sparkline(pos.marks)
         Text("Hard stop ${fmtPx(pos.stopPrice)}  ·  ${"%.1f".format(pos.stopDistancePct)}% under the mark", color = Ink, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
         val context = LocalContext.current
@@ -271,6 +273,48 @@ private fun PositionCard(pos: PositionRow, onClose: (String) -> Unit) {
             }
         }
         TextButton(onClick = { onClose(pos.mint) }) { Text("Close", color = Coral) }
+    }
+}
+
+@Composable
+private fun SafetyLine(pos: PositionRow) {
+    val freeze = when (pos.freezeRevoked) {
+        true -> "freeze off"
+        false -> "FREEZE ON"
+        null -> "freeze ?"
+    }
+    val entropy = pos.holderEntropy?.let { "H ${"%.2f".format(it)}" } ?: "H —"
+    val top10 = pos.top10Pct?.let { "top10 ${"%.1f".format(it * 100)}%" } ?: "top10 —"
+    Text(
+        "$freeze  ·  $entropy  ·  $top10  at entry",
+        color = if (pos.freezeRevoked == false) Coral else Dim,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 11.sp
+    )
+}
+
+@Composable
+private fun KellyCard(k: KellyHint) {
+    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
+        Text("QUARTER KELLY", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text(
+            "${"%.1f".format(k.suggestedPct * 100)}% of equity per entry",
+            color = if (k.suggestedPct > 0) Ink else Coral,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            "${k.trades} closed  ·  win ${"%.0f".format(k.winRate * 100)}%  ·  payoff ${"%.2f".format(k.payoffRatio)}  ·  full ${"%.2f".format(k.fullKelly)}",
+            color = Dim,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp
+        )
+        Text(
+            if (k.thin) "Under 30 trades. Read it as noise for now. Orders still size by the cap."
+            else "A hint from the closed book. Orders still size by the cap.",
+            color = Dim,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
     }
 }
 

@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - gemini
+      - Claude
   pull_request:
     branches:
       - gemini
+      - Claude
   workflow_dispatch:
 
 permissions:

@@ -58,7 +58,10 @@ const open = (book?.positions ?? []).map((pos) => {
       pos.trailArmed && pos.peakPrice > 0 ? pos.peakPrice * (1 - config.rules.trailGapPct) : null,
     score: pos.score,
     source: pos.source,
-    openedAt: pos.openedAt
+    openedAt: pos.openedAt,
+    freezeAuthorityRevoked: pos.freezeAuthorityRevoked ?? null,
+    holderEntropy: pos.holderEntropy ?? null,
+    top10HolderPct: pos.top10HolderPct ?? null
   };
 });
 const recap = buildRecap({

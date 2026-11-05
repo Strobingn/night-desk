@@ -1,7 +1,10 @@
 import { isReserveHolder, pumpReserveAddresses } from "./exclusions.js";
+import { holderEntropy } from "./holder-entropy.js";
 
 export interface ParsedMint {
   mintAuthorityRevoked: boolean | null;
+  /** An active freeze authority can freeze any holder's account, so sells fail. */
+  freezeAuthorityRevoked: boolean | null;
   supplyUi: number | null;
   decimals: number | null;
 }
@@ -10,10 +13,10 @@ export interface ParsedMint {
 export function parseMintAccount(result: unknown): ParsedMint {
   const info = (
     result as {
-      value?: { data?: { parsed?: { info?: { mintAuthority?: string | null; supply?: string; decimals?: number } } } };
+      value?: { data?: { parsed?: { info?: { mintAuthority?: string | null; freezeAuthority?: string | null; supply?: string; decimals?: number } } } };
     }
   )?.value?.data?.parsed?.info;
-  if (!info) return { mintAuthorityRevoked: null, supplyUi: null, decimals: null };
+  if (!info) return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
   const decimals = typeof info.decimals === "number" ? info.decimals : null;
   let supplyUi: number | null = null;
   if (info.supply != null && decimals != null) {
@@ -21,7 +24,8 @@ export function parseMintAccount(result: unknown): ParsedMint {
     supplyUi = Number.isFinite(raw) ? raw / 10 ** decimals : null;
   }
   const revoked = info.mintAuthority == null;
-  return { mintAuthorityRevoked: revoked, supplyUi, decimals };
+  const freezeRevoked = info.freezeAuthority == null;
+  return { mintAuthorityRevoked: revoked, freezeAuthorityRevoked: freezeRevoked, supplyUi, decimals };
 }
 
 export interface LargestHolderRow {
@@ -44,19 +48,41 @@ export function parseTop10Pct(
   result: unknown,
   supplyUi: number | null,
   exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {}
-): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number } {
+): HolderRead & { excludedReserves: number } {
   const rows = (result as { value?: LargestHolderRow[] })?.value;
   if (!Array.isArray(rows) || !(supplyUi && supplyUi > 0)) {
-    return { top10HolderPct: null, holderCount: null, excludedReserves: 0 };
+    return { ...EMPTY_READ, excludedReserves: 0 };
   }
   if (rows.length === 0) {
-    return { top10HolderPct: null, holderCount: null, excludedReserves: 0 };
+    return { ...EMPTY_READ, excludedReserves: 0 };
   }
   const retail = rows.filter((row) => !isReserveRow(row, exclude));
   const excludedReserves = rows.length - retail.length;
   const amounts = retail.slice(0, 10).map(rowAmount);
   const sum = amounts.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: retail.length, excludedReserves };
+  return {
+    top10HolderPct: sum / supplyUi,
+    holderCount: retail.length,
+    ...entropyOf(retail.map(rowAmount)),
+    excludedReserves
+  };
+}
+
+export interface HolderRead {
+  top10HolderPct: number | null;
+  holderCount: number | null;
+  /** Normalized Shannon entropy over the top 25 retail balances. Null when unmeasured. */
+  holderEntropy: number | null;
+  /** How many balances the entropy was taken over (at most 25). */
+  entropyHolders: number | null;
+}
+
+const EMPTY_READ: HolderRead = { top10HolderPct: null, holderCount: null, holderEntropy: null, entropyHolders: null };
+
+function entropyOf(balances: number[]): Pick<HolderRead, "holderEntropy" | "entropyHolders"> {
+  const positive = balances.filter((b) => b > 0);
+  const h = holderEntropy(positive);
+  return { holderEntropy: h, entropyHolders: h == null ? null : Math.min(positive.length, 25) };
 }
 
 export interface TokenAccountRow {
@@ -76,9 +102,9 @@ export function parseHolderAccounts(
   decimals: number | null,
   exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {},
   truncated = false
-): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number; truncated: boolean } {
+): HolderRead & { excludedReserves: number; truncated: boolean } {
   if (!(supplyUi && supplyUi > 0) || decimals == null || accounts.length === 0) {
-    return { top10HolderPct: null, holderCount: null, excludedReserves: 0, truncated };
+    return { ...EMPTY_READ, excludedReserves: 0, truncated };
   }
   const scale = 10 ** decimals;
   const byOwner = new Map<string, number>();
@@ -94,9 +120,15 @@ export function parseHolderAccounts(
     if (!who) continue;
     byOwner.set(who, (byOwner.get(who) ?? 0) + raw / scale);
   }
-  const top10 = [...byOwner.values()].sort((a, b) => b - a).slice(0, 10);
-  const sum = top10.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: byOwner.size, excludedReserves, truncated };
+  const sorted = [...byOwner.values()].sort((a, b) => b - a);
+  const sum = sorted.slice(0, 10).reduce((a, b) => a + b, 0);
+  return {
+    top10HolderPct: sum / supplyUi,
+    holderCount: byOwner.size,
+    ...entropyOf(sorted),
+    excludedReserves,
+    truncated
+  };
 }
 
 function rowAmount(row: LargestHolderRow): number {
@@ -129,6 +161,8 @@ export function attachTokenOwners(largest: unknown, multiple: unknown): unknown 
 
 export interface ParsedRugcheck {
   mintAuthorityRevoked: boolean | null;
+  /** Set to false only when the report says freeze authority is still enabled. */
+  freezeAuthorityRevoked: boolean | null;
   lpLockedOrBurned: boolean | null;
   lpLockPct: number | null;
   /** Set only when topHolders could be filtered for reserves. Otherwise null so RPC wins. */
@@ -168,6 +202,11 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
     mintAuthorityRevoked = false;
   }
 
+  let freezeAuthorityRevoked: boolean | null = null;
+  if (names.some((n) => /freeze authority/.test(n) && /enabled|not revoked|still/.test(n))) {
+    freezeAuthorityRevoked = false;
+  }
+
   // The weakest market decides. One unlocked pool can still be pulled.
   let lpLockPct: number | null = null;
   let lpMissing = false;
@@ -199,6 +238,7 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
 
   return {
     mintAuthorityRevoked,
+    freezeAuthorityRevoked,
     lpLockedOrBurned,
     lpLockPct,
     top10HolderPct,

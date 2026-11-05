@@ -1,5 +1,6 @@
 import type { CandidateToken, FilterCheck, FilterResult, Rejection, RugLookup } from "../types.js";
 import type { ResolvedRules } from "../rules.js";
+import { looksSybilSplit, SYBIL_ENTROPY_MAX } from "../market/holder-entropy.js";
 
 function pct(n: number): string {
   return `${(n * 100).toFixed(1)}%`;
@@ -33,6 +34,23 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
       code: "MINT_AUTHORITY_ACTIVE",
       pass: true,
       message: "Mint authority is revoked."
+    });
+  }
+
+  if (token.freezeAuthorityRevoked !== true) {
+    checks.push({
+      code: "FREEZE_AUTHORITY_ACTIVE",
+      pass: false,
+      message:
+        token.freezeAuthorityRevoked === false
+          ? "Freeze authority is still active. The creator can freeze holder accounts so sells fail."
+          : "Freeze authority could not be verified as revoked. Fail closed."
+    });
+  } else {
+    checks.push({
+      code: "FREEZE_AUTHORITY_ACTIVE",
+      pass: true,
+      message: "Freeze authority is revoked."
     });
   }
 
@@ -83,6 +101,27 @@ export function evaluateFilter(token: CandidateToken, rug: RugLookup, rules: Res
       code: "HOLDER_CONCENTRATION",
       pass: true,
       message: `Top 10 holders control ${pct(holderPct)} of supply.`
+    });
+  }
+
+  // Supplements the top-10 line: 40% split evenly across 50 fresh wallets passes a top-10 cap
+  // but reads as near-perfect uniformity. Unmeasured entropy skips this check; top 10 still fails closed.
+  const entropy = token.holderEntropy ?? null;
+  const entropyN = token.entropyHolders ?? null;
+  if (looksSybilSplit(entropy, entropyN)) {
+    checks.push({
+      code: "HOLDER_SYBIL_SPLIT",
+      pass: false,
+      message: `Top ${entropyN} retail balances are near-identical (entropy ${entropy!.toFixed(3)} > ${SYBIL_ENTROPY_MAX}). Looks like one wallet split across many.`
+    });
+  } else {
+    checks.push({
+      code: "HOLDER_SYBIL_SPLIT",
+      pass: true,
+      message:
+        entropy == null
+          ? "Holder entropy not measured. Sybil-split check skipped."
+          : `Holder entropy ${entropy.toFixed(3)} across ${entropyN} balances.`
     });
   }
 
