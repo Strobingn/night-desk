@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { MarkPoint } from "../desk/book.js";
 import type { ClosedTrade, EquityPoint, FeedEvent, Position } from "../types.js";
 
 export interface PersistedBook {
@@ -11,6 +12,8 @@ export interface PersistedBook {
   positions: Position[];
   cooldowns: Array<[string, number]>;
   lastPrices?: Array<[string, number]>;
+  /** Bounded sparkline per mint. The last point's time is the mark stamp. */
+  markSeries?: Array<[string, MarkPoint[]]>;
 }
 
 export class DeskStore {

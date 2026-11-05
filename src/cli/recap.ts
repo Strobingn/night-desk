@@ -1,3 +1,4 @@
+import { realizablePnl } from "../agents/execution-math.js";
 import { loadConfig } from "../config.js";
 import { buildRecap, formatRecap, parseSince } from "../desk/recap.js";
 import { DeskStore } from "../store/db.js";
@@ -14,10 +15,24 @@ const events = store.eventsSince(since);
 const equity = store.equitySince(since);
 const closed = store.closedSince(since);
 const marks = new Map(book?.lastPrices ?? []);
+const seriesByMint = new Map(book?.markSeries ?? []);
 const open = (book?.positions ?? []).map((pos) => {
   const markPrice = marks.get(pos.mint) ?? pos.entryPrice;
   const marketValueUsd = pos.qty * markPrice;
   const pnlUsd = marketValueUsd - pos.costUsd;
+  const points = (seriesByMint.get(pos.mint) ?? []).filter(
+    (point) => point != null && point.priceUsd > 0 && Number.isFinite(point.t)
+  );
+  const last = points[points.length - 1];
+  const net = realizablePnl({
+    markPrice,
+    qty: pos.qty,
+    costUsd: pos.costUsd,
+    liquidityUsd: pos.liquidityUsd,
+    markAt: last?.t ?? null,
+    now: until
+  });
+  const markStale = last != null && net == null;
   return {
     mint: pos.mint,
     symbol: pos.symbol,
@@ -29,6 +44,13 @@ const open = (book?.positions ?? []).map((pos) => {
     marketValueUsd,
     pnlUsd,
     pnlPct: pos.entryPrice > 0 ? (markPrice - pos.entryPrice) / pos.entryPrice : 0,
+    netPnlUsd: net?.netPnlUsd ?? null,
+    netPnlPct: net?.netPnlPct ?? null,
+    exitSlippage: net?.exitSlippage ?? null,
+    entrySlippage:
+      typeof pos.entrySlippage === "number" && Number.isFinite(pos.entrySlippage) ? pos.entrySlippage : null,
+    markStale,
+    marks: points,
     peakPrice: pos.peakPrice,
     trailArmed: pos.trailArmed,
     stopPrice: pos.entryPrice * (1 - config.rules.stopLossPct),

@@ -375,11 +375,11 @@ export function App() {
           {snap.positions.length === 0 ? (
             <p className="empty">Flat. A name has to clear every hard filter and score at least {snap.rules.analystMinScore.toFixed(2)}.</p>
           ) : (
-            <table>
+            <table className="positions">
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>uPnL</th>
+                  <th>PnL</th>
                   <th>Stop</th>
                 </tr>
               </thead>
@@ -388,6 +388,7 @@ export function App() {
                   <tr key={pos.mint}>
                     <td>
                       <span className="sym">{pos.symbol}</span>
+                      <Sparkline mint={pos.mint} symbol={pos.symbol} marks={pos.marks} entryPrice={pos.entryPrice} />
                       <span className="sub">
                         {pos.source} · score {pos.score.toFixed(2)} · peak {px(pos.peakPrice)}
                         {pos.trailHintPrice != null ? ` · hint ${px(pos.trailHintPrice)}` : ""}
@@ -406,9 +407,10 @@ export function App() {
                         ))}
                       </span>
                     </td>
-                    <td className={pos.pnlUsd >= 0 ? "up" : "down"}>
-                      {signedUsd(pos.pnlUsd)}
-                      <span className="sub">{signedPct(pos.pnlPct)}</span>
+                    <td>
+                      <span className={pos.pnlUsd >= 0 ? "up" : "down"}>{signedUsd(pos.pnlUsd)}</span>
+                      <span className="sub">mark {signedPct(pos.pnlPct)}</span>
+                      <NetLine pos={pos} />
                     </td>
                     <td>
                       {px(pos.stopPrice)}
@@ -492,6 +494,74 @@ function Row({ event }: { event: FeedEvent }) {
         {event.detail ? <span className="detail"> · {event.detail}</span> : null}
       </p>
     </article>
+  );
+}
+
+function NetLine({ pos }: { pos: { netPnlUsd: number | null; netPnlPct: number | null; exitSlippage: number | null; entrySlippage: number | null; markStale: boolean } }) {
+  if (pos.netPnlUsd == null || pos.netPnlPct == null) {
+    return <span className="sub net-hold">{pos.markStale ? "net — stale mark" : "net —"}</span>;
+  }
+  const bits = [
+    pos.exitSlippage != null ? `exit slip ${(pos.exitSlippage * 100).toFixed(2)}%` : "",
+    pos.entrySlippage != null ? `buy ${(pos.entrySlippage * 100).toFixed(2)}% in cost` : ""
+  ].filter(Boolean);
+  return (
+    <>
+      <span className={`net-line ${pos.netPnlUsd >= 0 ? "up" : "down"}`}>
+        net {signedUsd(pos.netPnlUsd)} {signedPct(pos.netPnlPct)}
+      </span>
+      {bits.length ? <span className="sub">{bits.join(" · ")}</span> : null}
+    </>
+  );
+}
+
+function Sparkline({
+  mint,
+  symbol,
+  marks,
+  entryPrice
+}: {
+  mint: string;
+  symbol: string;
+  marks: { t: number; priceUsd: number }[];
+  entryPrice: number;
+}) {
+  const path = useMemo(() => {
+    const series = marks.filter((point) => point.priceUsd > 0);
+    if (series.length === 0) return null;
+    const values = series.map((point) => point.priceUsd);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || Math.max(Math.abs(max) * 0.02, 1e-12);
+    const w = 140;
+    const h = 36;
+    const coords = series.map((point, index) => {
+      const x = series.length === 1 ? w / 2 : (index / (series.length - 1)) * w;
+      const y = h - ((point.priceUsd - min) / span) * (h - 8) - 4;
+      return [x, y] as const;
+    });
+    const line = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c[0].toFixed(1)},${c[1].toFixed(1)}`).join(" ");
+    const lastPx = series[series.length - 1]?.priceUsd ?? entryPrice;
+    const up = lastPx >= (series[0]?.priceUsd ?? entryPrice);
+    const last = coords[coords.length - 1] ?? [w / 2, h / 2];
+    return { line, up, last };
+  }, [marks, entryPrice]);
+
+  if (!path) return null;
+  const stroke = path.up ? "#dff25a" : "#ff6a45";
+  const gid = `spark-${mint.replace(/[^a-zA-Z0-9]/g, "")}`;
+  return (
+    <svg className="spark" viewBox="0 0 140 36" role="img" aria-label={`${symbol} price`}>
+      <defs>
+        <linearGradient id={gid} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={stroke} stopOpacity="0.45" />
+          <stop offset="100%" stopColor={stroke} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={`${path.line} L140,36 L0,36 Z`} fill={`url(#${gid})`} />
+      <path d={path.line} fill="none" stroke={stroke} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={path.last[0]} cy={path.last[1]} r="2.4" fill="#e7f0d8" />
+    </svg>
   );
 }
 

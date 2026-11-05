@@ -101,6 +101,61 @@ export function quotePaperBuy(mark: number, notionalUsd: number, liquidityUsd: n
   return { fillPrice, slippage, feeUsd, qty, notionalUsd };
 }
 
+/** Same silence window the position pricer uses before it calls a mark stale. */
+export const MARK_STALE_MS = 5 * 60_000;
+
+export interface RealizablePnl {
+  netPnlUsd: number;
+  netPnlPct: number;
+  /** Sell-side rate from `slippageFor` (base slippage + pool impact, capped). */
+  exitSlippage: number;
+  proceedsUsd: number;
+}
+
+/**
+ * What a close would clear right now, using the same paper sell quote the executor fills with.
+ * Cost already includes the buy fill (price paid above the mark, plus the fee). This subtracts
+ * the exit haircut on top of that. Returns null when the mark or the slippage inputs are not
+ * usable — never a made-up gain.
+ *
+ * Unknown but numeric liquidity (0 or negative) still goes through `slippageFor`, which charges
+ * the configured ceiling. A non-finite liquidity figure is missing, not zero.
+ */
+export function realizablePnl(input: {
+  markPrice: number;
+  qty: number;
+  costUsd: number;
+  liquidityUsd: number;
+  /** When the mark was actually printed. Null means the price was restored or never stamped. */
+  markAt: number | null;
+  now: number;
+  staleMs?: number;
+}): RealizablePnl | null {
+  const staleMs = input.staleMs ?? MARK_STALE_MS;
+  if (!(input.markPrice > 0) || !Number.isFinite(input.markPrice)) return null;
+  if (!(input.qty > 0) || !Number.isFinite(input.qty)) return null;
+  if (!(input.costUsd > 0) || !Number.isFinite(input.costUsd)) return null;
+  if (input.markAt == null || !Number.isFinite(input.markAt)) return null;
+  if (!Number.isFinite(input.now)) return null;
+  if (input.markAt > input.now + 5_000) return null;
+  if (input.now - input.markAt >= staleMs) return null;
+  if (!Number.isFinite(input.liquidityUsd)) return null;
+
+  const quote = quotePaperSell(input.markPrice, input.qty, input.liquidityUsd);
+  if (quote.proceedsUsd == null || !Number.isFinite(quote.proceedsUsd) || !Number.isFinite(quote.slippage)) {
+    return null;
+  }
+  const netPnlUsd = roundUsd(quote.proceedsUsd - input.costUsd);
+  const netPnlPct = netPnlUsd / input.costUsd;
+  if (!Number.isFinite(netPnlPct)) return null;
+  return {
+    netPnlUsd,
+    netPnlPct,
+    exitSlippage: quote.slippage,
+    proceedsUsd: quote.proceedsUsd
+  };
+}
+
 export function quotePaperSell(mark: number, qty: number, liquidityUsd: number): PaperFillQuote {
   const grossEstimate = qty * mark;
   const slippage = slippageFor(grossEstimate, liquidityUsd, "sell");

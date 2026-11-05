@@ -155,6 +155,8 @@ export interface Position {
   decimals?: number | null;
   tradeId: string;
   closing?: boolean;
+  /** Buy-side fill slippage already paid. The dollars sit in `costUsd` / `entryPrice`. */
+  entrySlippage?: number;
 }
 
 export interface ClosedTrade {
@@ -201,6 +203,20 @@ export interface PositionView {
   marketValueUsd: number;
   pnlUsd: number;
   pnlPct: number;
+  /**
+   * Mark-to-exit after the configured sell slippage and fee, minus cost (buy slippage
+   * and fee already in the cost). Null when the mark or slippage inputs are missing or stale.
+   */
+  netPnlUsd: number | null;
+  netPnlPct: number | null;
+  /** Sell-side rate used for `netPnlUsd`. Null when that figure is withheld. */
+  exitSlippage: number | null;
+  /** Buy-side rate already paid, when the fill recorded it. */
+  entrySlippage: number | null;
+  /** A stored mark exists, but it is too old to trust for a net figure. */
+  markStale: boolean;
+  /** Recent live marks for the position sparkline. Bounded. */
+  marks: { t: number; priceUsd: number }[];
   peakPrice: number;
   trailArmed: boolean;
   /** Hard stop. The only automatic exit. */

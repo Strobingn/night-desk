@@ -3,7 +3,7 @@ import { assessPosition, entryAllowed } from "../agents/risk.js";
 import { HARD_RULES, clampVolumeUsd } from "../rules.js";
 import { evaluateFilter } from "../agents/filter.js";
 import { scoreToken } from "../agents/analyst.js";
-import { planOrder, quotePaperBuy, quotePaperSell, roundUsd } from "../agents/execution-math.js";
+import { MARK_STALE_MS, planOrder, quotePaperBuy, quotePaperSell, realizablePnl, roundUsd } from "../agents/execution-math.js";
 import { Scout } from "../agents/scout.js";
 import { EventBus } from "../bus.js";
 import type { DeskConfig } from "../config.js";
@@ -101,6 +101,7 @@ export class Desk {
         this.book.mark(pos.mint, pos.entryPrice);
       }
       for (const [mint, priceUsd] of restored.lastPrices ?? []) this.book.mark(mint, priceUsd);
+      for (const [mint, points] of restored.markSeries ?? []) this.book.restoreSeries(mint, points);
       this.cooldowns = new Map(restored.cooldowns.filter(([, until]) => until > Date.now()));
     }
     this.scout = new Scout({
@@ -238,6 +239,8 @@ export class Desk {
     this.config.startingBalanceUsd = starting;
     this.book.positions.clear();
     this.book.lastPrice.clear();
+    this.book.markAt.clear();
+    this.book.series.clear();
     this.book.cashUsd = starting;
     this.cooldowns.clear();
     this.markLiquidity.clear();
@@ -582,14 +585,15 @@ export class Desk {
       source: token.source,
       liquidityUsd: token.liquidityUsd,
       decimals: token.decimals,
-      tradeId: fill.id
+      tradeId: fill.id,
+      entrySlippage: fill.slippage
     };
     this.book.positions.set(token.mint, position);
     noteEntry(this.advisor.memory, token.mint, token.symbol, sampleOf(token, score));
     this.advisor.save();
     // Record the spot. Review waits for the next tick so a fill that is already through
     // the hard stop is closed by that tick, not erased inside the buy itself.
-    this.book.mark(token.mint, fill.markUsd);
+    this.book.mark(token.mint, fill.markUsd, fill.at);
     this.pipeline.fills += 1;
     this.store.openTrade({
       id: fill.id,
@@ -696,6 +700,7 @@ export class Desk {
     const proceedsUsd = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     this.book.cashUsd = roundUsd(this.book.cashUsd + proceedsUsd);
     this.book.positions.delete(pos.mint);
+    this.book.forgetMarks(pos.mint);
     const pnlUsd = roundUsd(proceedsUsd - pos.costUsd);
     const pnlPct = pos.costUsd > 0 ? pnlUsd / pos.costUsd : order.pnlPct;
     const closed: ClosedTrade = {
@@ -803,6 +808,27 @@ export class Desk {
     const marketValueUsd = pos.qty * markPrice;
     const pnlUsd = marketValueUsd - pos.costUsd;
     const assessment = assessPosition(pos, markPrice, this.config.rules);
+    const now = Date.now();
+    const markAt = this.book.markAt.get(pos.mint) ?? null;
+    const liveMark = this.book.lastPrice.get(pos.mint);
+    const quotedLiq = this.markLiquidity.get(pos.mint);
+    const liquidityUsd = quotedLiq != null && Number.isFinite(quotedLiq) ? quotedLiq : pos.liquidityUsd;
+    const net =
+      liveMark != null
+        ? realizablePnl({
+            markPrice: liveMark,
+            qty: pos.qty,
+            costUsd: pos.costUsd,
+            liquidityUsd,
+            markAt,
+            now
+          })
+        : null;
+    const markStale =
+      liveMark != null &&
+      (markAt == null || !Number.isFinite(markAt) || markAt > now + 5_000 || now - markAt >= MARK_STALE_MS);
+    const entrySlippage =
+      typeof pos.entrySlippage === "number" && Number.isFinite(pos.entrySlippage) ? pos.entrySlippage : null;
     return {
       mint: pos.mint,
       symbol: pos.symbol,
@@ -814,6 +840,12 @@ export class Desk {
       marketValueUsd,
       pnlUsd,
       pnlPct: pos.entryPrice > 0 ? (markPrice - pos.entryPrice) / pos.entryPrice : 0,
+      netPnlUsd: net?.netPnlUsd ?? null,
+      netPnlPct: net?.netPnlPct ?? null,
+      exitSlippage: net?.exitSlippage ?? null,
+      entrySlippage,
+      markStale,
+      marks: this.book.seriesFor(pos.mint),
       peakPrice: assessment.peakPrice,
       trailArmed: assessment.trailArmed,
       stopPrice: assessment.stopPrice,
@@ -875,8 +907,8 @@ export class Desk {
   }
 
   private applyMark(mint: string, priceUsd: number, advise = true): void {
-    if (!(priceUsd > 0)) return;
-    this.book.mark(mint, priceUsd);
+    if (!(priceUsd > 0) || !Number.isFinite(priceUsd)) return;
+    this.book.mark(mint, priceUsd, Date.now());
     this.review(mint, priceUsd);
     if (advise) this.publishAdvice(this.buildAdvice());
   }
@@ -895,7 +927,8 @@ export class Desk {
       startedAt: this.startedAt,
       positions: [...this.book.positions.values()].map((pos) => ({ ...pos, closing: false })),
       cooldowns: [...this.cooldowns.entries()],
-      lastPrices: [...this.book.lastPrice.entries()]
+      lastPrices: [...this.book.lastPrice.entries()],
+      markSeries: [...this.book.series.entries()].filter(([mint]) => this.book.positions.has(mint))
     });
   }
 
