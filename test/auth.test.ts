@@ -48,8 +48,12 @@ describe("desk token gate", () => {
       }
     });
 
+    // Health is open so the watchdog can tell a live desk from a dead one.
     const bare = await fetch(`${base}/api/health`);
-    expect(bare.status).toBe(401);
+    expect(bare.status).toBe(200);
+    expect(bare.headers.get("set-cookie")).toBeNull();
+    const stateBare = await fetch(`${base}/api/state`);
+    expect(stateBare.status).toBe(401);
     const pageBare = await fetch(`${base}/`);
     expect(pageBare.status).toBe(401);
 
@@ -69,7 +73,7 @@ describe("desk token gate", () => {
     const html = await page.text();
     expect(html).toMatch(/Night Desk/);
 
-    const wrong = await fetch(`${base}/api/health?token=wrong`);
+    const wrong = await fetch(`${base}/api/state?token=wrong`);
     expect(wrong.status).toBe(401);
   });
 

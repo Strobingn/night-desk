@@ -20,9 +20,11 @@ export function startServer(
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      // Health stays open so ensure-desk.ps1 and uptime checks work with DESK_TOKEN set.
+      // It returns only ok/mode/time — no book, keys, or events.
+      if (url.pathname === "/api/health") return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now() });
       if (!requestAuthorized(deskToken, req, url)) return unauthorized(res);
       if (deskToken) res.setHeader("set-cookie", deskSessionCookie(deskToken));
-      if (url.pathname === "/api/health") return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now() });
       if (url.pathname === "/api/state") return json(res, 200, desk.snapshot());
       if (url.pathname === "/api/events" && req.method === "GET") {
         const limit = Number(url.searchParams.get("limit") ?? "800");
