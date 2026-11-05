@@ -1,3 +1,4 @@
+import { tinyPx } from "../price-text.js";
 import type { PipelineCounts, PositionView } from "../types.js";
 
 export interface CommentaryInput {
@@ -102,5 +103,5 @@ function fmtPx(n: number): string {
   if (!(n > 0)) return "—";
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(6);
-  return n.toFixed(8);
+  return tinyPx(n);
 }

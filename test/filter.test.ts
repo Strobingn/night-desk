@@ -31,6 +31,28 @@ describe("Filter hard rules", () => {
     expect(result.reasons[0]?.message).toMatch(/Fail closed/);
   });
 
+  it("passes a lone unlocked LP only when the desk allows that flag", () => {
+    const unlocked = makeToken({ lpLockedOrBurned: false, symbol: "FLOAT" });
+    const blocked = evaluateFilter(unlocked, clean, rules);
+    expect(blocked.decision).toBe("reject");
+    expect(blocked.reasons.map((reason) => reason.code)).toEqual(["LP_NOT_LOCKED"]);
+    const allowed = evaluateFilter(unlocked, clean, rules, { allowUnlockedLp: true });
+    expect(allowed.decision).toBe("pass");
+    expect(allowed.reasons).toEqual([]);
+    expect(allowed.flags).toEqual(["LP_UNLOCKED"]);
+    expect(allowed.checks.find((check) => check.code === "LP_NOT_LOCKED")?.pass).toBe(true);
+    const withVolume = evaluateFilter(makeToken({ lpLockedOrBurned: false, volume1hUsd: 1_000 }), clean, rules, { allowUnlockedLp: true });
+    expect(withVolume.decision).toBe("reject");
+    expect(withVolume.reasons.map((reason) => reason.code)).toEqual(["LP_NOT_LOCKED", "VOLUME_TOO_LOW"]);
+    const withMint = evaluateFilter(makeToken({ lpLockedOrBurned: false, mintAuthorityRevoked: false }), clean, rules, { allowUnlockedLp: true });
+    expect(withMint.decision).toBe("reject");
+    expect(withMint.flags).toBeUndefined();
+    expect(withMint.reasons.map((reason) => reason.code)).toContain("MINT_AUTHORITY_ACTIVE");
+    const unknownLp = evaluateFilter(makeToken({ lpLockedOrBurned: null }), clean, rules, { allowUnlockedLp: true });
+    expect(unknownLp.decision).toBe("reject");
+    expect(unknownLp.reasons.map((reason) => reason.code)).toContain("LP_NOT_LOCKED");
+  });
+
   it("rejects unlocked LP and unverified LP off the bonding curve", () => {
     expect(evaluateFilter(makeToken({ lpLockedOrBurned: false }), clean, rules).reasons[0]?.code).toBe("LP_NOT_LOCKED");
     expect(evaluateFilter(makeToken({ lpLockedOrBurned: false, onBondingCurve: true }), clean, rules).reasons.map((r) => r.code)).toContain(
@@ -57,21 +79,29 @@ describe("Filter hard rules", () => {
     expect(result.checks.find((check) => check.code === "LP_NOT_LOCKED")?.message).toMatch(/bonding curve/);
   });
 
-  it("rejects top 10 holders above 20% and passes at exactly 20%", () => {
-    const over = evaluateFilter(makeToken({ top10HolderPct: 0.201 }), clean, rules);
+  it("rejects top 10 holders above 35% and passes at exactly 35%", () => {
+    expect(rules.maxTop10Pct).toBe(0.35);
+    const over = evaluateFilter(makeToken({ top10HolderPct: 0.351 }), clean, rules);
     expect(over.reasons.map((r) => r.code)).toContain("HOLDER_CONCENTRATION");
-    expect(over.reasons.find((r) => r.code === "HOLDER_CONCENTRATION")?.message).toMatch(/20\.1%/);
-    const exact = evaluateFilter(makeToken({ top10HolderPct: 0.2 }), clean, rules);
+    expect(over.reasons.find((r) => r.code === "HOLDER_CONCENTRATION")?.message).toMatch(/35\.1%/);
+    const exact = evaluateFilter(makeToken({ top10HolderPct: 0.35 }), clean, rules);
     expect(exact.decision).toBe("pass");
+    const inside = evaluateFilter(makeToken({ top10HolderPct: 0.33 }), clean, rules);
+    expect(inside.reasons.map((r) => r.code)).not.toContain("HOLDER_CONCENTRATION");
     const missing = evaluateFilter(makeToken({ top10HolderPct: null }), clean, rules);
     expect(missing.reasons.map((r) => r.code)).toContain("HOLDER_CONCENTRATION");
+    expect(resolveRules({ MAX_TOP10_PCT: "0.5" }).maxTop10Pct).toBe(0.35);
+    expect(resolveRules({ MAX_TOP10_PCT: "0.15" }).maxTop10Pct).toBe(0.15);
   });
 
-  it("rejects volume under $50k and passes at exactly $50k", () => {
-    const low = evaluateFilter(makeToken({ volume1hUsd: 49_999 }), clean, rules);
+  it("rejects volume under $10k and passes at exactly $10k", () => {
+    expect(rules.minVolume1hUsd).toBe(10_000);
+    const low = evaluateFilter(makeToken({ volume1hUsd: 9_999 }), clean, rules);
     expect(low.reasons.map((r) => r.code)).toContain("VOLUME_TOO_LOW");
-    expect(low.reasons.find((r) => r.code === "VOLUME_TOO_LOW")?.message).toMatch(/\$49,999/);
-    expect(evaluateFilter(makeToken({ volume1hUsd: 50_000 }), clean, rules).decision).toBe("pass");
+    expect(low.reasons.find((r) => r.code === "VOLUME_TOO_LOW")?.message).toMatch(/\$9,999/);
+    expect(evaluateFilter(makeToken({ volume1hUsd: 10_000 }), clean, rules).decision).toBe("pass");
+    expect(resolveRules({ MIN_VOLUME_1H_USD: "1000" }).minVolume1hUsd).toBe(1_000);
+    expect(resolveRules({ MIN_VOLUME_1H_USD: "50" }).minVolume1hUsd).toBe(1_000);
   });
 
   it("rejects a dev wallet linked to a previous rug", () => {

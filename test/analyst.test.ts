@@ -6,9 +6,10 @@ import { resolveRules } from "../src/rules.js";
 const rules = resolveRules({});
 
 describe("Analyst threshold", () => {
-  it("trades at 0.6 and rejects anything under it", () => {
-    expect(decideScore(0.6, rules.analystMinScore)).toBe("trade");
-    expect(decideScore(0.5999, rules.analystMinScore)).toBe("reject");
+  it("trades at 0.50 and rejects anything under it", () => {
+    expect(rules.analystMinScore).toBe(0.5);
+    expect(decideScore(0.5, rules.analystMinScore)).toBe("trade");
+    expect(decideScore(0.4999, rules.analystMinScore)).toBe("reject");
   });
 
   it("scores a deep, distributed, active survivor as a trade", () => {
@@ -35,7 +36,7 @@ describe("Analyst threshold", () => {
       }),
       rules
     );
-    expect(report.score).toBeLessThan(0.6);
+    expect(report.score).toBeLessThan(0.5);
     expect(report.decision).toBe("reject");
     expect(report.reason).toMatchObject({
       code: "SCORE_BELOW_THRESHOLD",
@@ -43,8 +44,12 @@ describe("Analyst threshold", () => {
     });
   });
 
-  it("does not let a looser env score line through", () => {
-    const tightened = resolveRules({ ANALYST_MIN_SCORE: "0.2" });
-    expect(tightened.analystMinScore).toBe(0.6);
+  it("defaults to 0.50 and keeps an env line inside 0.10–0.95", () => {
+    expect(resolveRules({}).analystMinScore).toBe(0.5);
+    expect(resolveRules({ ANALYST_MIN_SCORE: "0.2" }).analystMinScore).toBe(0.2);
+    expect(resolveRules({ ANALYST_MIN_SCORE: "0.40" }).analystMinScore).toBe(0.4);
+    expect(resolveRules({ ANALYST_MIN_SCORE: "0.70" }).analystMinScore).toBe(0.7);
+    expect(resolveRules({ ANALYST_MIN_SCORE: "0.05" }).analystMinScore).toBe(0.1);
+    expect(resolveRules({ ANALYST_MIN_SCORE: "0.99" }).analystMinScore).toBe(0.95);
   });
 });

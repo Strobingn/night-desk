@@ -12,8 +12,8 @@ android {
         applicationId = "com.dirk.nightdesk"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1312
-        versionName = "13.12"
+        versionCode = 1313
+        versionName = "13.13"
     }
 
     buildTypes {
@@ -34,6 +34,11 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -48,6 +53,22 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.3")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("com.solanamobile:mobile-wallet-adapter-clientlib-ktx:2.0.5")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
+val injectedServices = System.getenv("GOOGLE_SERVICES_JSON")?.let { file(it) }
+val servicesJson = file("google-services.json")
+if (!servicesJson.exists() && injectedServices != null && injectedServices.exists()) {
+    injectedServices.copyTo(servicesJson, overwrite = false)
+}
+if (servicesJson.exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }

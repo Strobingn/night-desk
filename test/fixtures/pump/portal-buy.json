@@ -1,0 +1,10 @@
+{
+  "signature": "5signed",
+  "mint": "MintNotFilteredBySuffix111111111111111111111",
+  "traderPublicKey": "Wallet111111111111111111111111111111111111111",
+  "txType": "buy",
+  "tokenAmount": 1.5,
+  "solAmount": 0.02,
+  "vTokensInBondingCurve": 1000000,
+  "vSolInBondingCurve": 30.5
+}

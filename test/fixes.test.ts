@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ageScore,
   decideScore,
@@ -17,7 +17,7 @@ import { buildRecap, formatRecap } from "../src/desk/recap.js";
 import { fetchDexPrices } from "../src/market/dex-prices.js";
 import { enrichSighting } from "../src/market/enrich.js";
 import { parseRugcheckReport } from "../src/market/parsers.js";
-import { PositionPricer } from "../src/market/position-pricer.js";
+import { HELD_MARK_POLL_MS, PositionPricer } from "../src/market/position-pricer.js";
 import { resolveRules } from "../src/rules.js";
 import type { ClosedTrade } from "../src/types.js";
 import { testDesk } from "./helpers.js";
@@ -70,9 +70,9 @@ describe("filter inputs can no longer loosen a hard line", () => {
   describe("holder concentration from two sources", () => {
     const rpcResults: Record<string, unknown> = {
       getAccountInfo: { value: { data: { parsed: { info: { mintAuthority: null, supply: "1000000000000", decimals: 6 } } } } },
-      // Ten wallets at 3.5% each is 35% of a 1,000,000 supply.
+      // Ten wallets at 4% each is 40% of a 1,000,000 supply, over the 35% cap.
       getTokenLargestAccounts: {
-        value: Array.from({ length: 10 }, (_, i) => ({ address: `Acc${i}`, uiAmount: 35_000 }))
+        value: Array.from({ length: 10 }, (_, i) => ({ address: `Acc${i}`, uiAmount: 40_000 }))
       },
       getMultipleAccounts: {
         value: Array.from({ length: 10 }, (_, i) => ({ data: { parsed: { info: { owner: `Wallet${i}` } } } }))
@@ -98,7 +98,7 @@ describe("filter inputs can no longer loosen a hard line", () => {
         { mint: MINT, source: "pumpfun", observedAt: 0 },
         { rpcUrl: "http://rpc.test", rugcheckUrl: "http://rugcheck.test", fetchImpl: routed(true) }
       );
-      expect(token.top10HolderPct).toBeCloseTo(0.35, 8);
+      expect(token.top10HolderPct).toBeCloseTo(0.4, 8);
       expect(evaluateFilter(token, { status: "clean" }, rules).reasons.map((r) => r.code)).toContain("HOLDER_CONCENTRATION");
     });
 
@@ -125,15 +125,20 @@ describe("paper fill model is constant-product", () => {
     expect(slippageFor(800, 10_000, "sell")).toBeLessThan(slippageFor(800, 10_000, "buy"));
   });
 
-  it("is no longer capped at 3%, and charges the ceiling when liquidity is unknown", () => {
+  it("reports true buy impact and refuses a fill past the entry cap, including unknown liquidity", () => {
     expect(slippageFor(800, 10_000, "buy")).toBeGreaterThan(0.03);
-    expect(slippageFor(5_000, 1_000, "buy")).toBe(0.5);
-    expect(slippageFor(800, 0, "buy")).toBe(0.5);
-    expect(slippageFor(800, Number.NaN, "buy")).toBe(0.5);
+    expect(slippageFor(5_000, 1_000, "buy")).toBeGreaterThan(0.5);
+    expect(slippageFor(800, 0, "buy")).toBe(Number.POSITIVE_INFINITY);
+    expect(slippageFor(800, Number.NaN, "buy")).toBe(Number.POSITIVE_INFINITY);
+    const refused = quotePaperBuy(0.00000292, 7.84, 0);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.message).toContain("Buy refused");
   });
 
   it("fills a $800 buy in a $100k pool at 1.0175x with a $0.80 fee", () => {
     const quote = quotePaperBuy(1, 800, 100_000);
+    expect(quote.ok).toBe(true);
+    if (!quote.ok) return;
     expect(quote.fillPrice).toBeCloseTo(1.0175, 10);
     expect(quote.feeUsd).toBe(0.8);
     // (800 - 0.80) / 1.0175
@@ -149,28 +154,29 @@ describe("paper fill model is constant-product", () => {
     expect(sell.proceedsUsd!).toBeLessThanOrEqual(sell.notionalUsd - sell.feeUsd + 1e-9);
   });
 
-  it("makes a flat round trip in a $10k pool lose about a quarter of the ticket", () => {
+  it("refuses the old 16% paper buy instead of filling it", () => {
     const buy = quotePaperBuy(1, 800, 10_000);
-    // qty = (800 - 0.80) / 1.1615 = 688.0758
-    expect(buy.qty).toBeCloseTo(688.0758, 3);
-    const sell = quotePaperSell(1, buy.qty, 10_000);
-    // sell share = 688.0758 / 5000 = 0.137615; impact = 0.137615 / 1.137615 = 0.120968; slippage 0.122468
-    // gross = 688.0758 * 0.877532 = 603.8086; fee ceil(0.6038) = 0.61; proceeds floor(603.1986) = 603.19
-    expect(sell.slippage).toBeCloseTo(0.122468, 5);
-    expect(sell.proceedsUsd).toBe(603.19);
+    expect(buy.ok).toBe(false);
+    if (!buy.ok) expect(buy.slippage).toBeCloseTo(0.1615, 4);
   });
 
-  it("stops a thin-pool buy out on its first tick, because the fill is already below the stop", async () => {
+  it("makes a flat round trip in a deep pool lose the spread", () => {
+    const buy = quotePaperBuy(1, 800, 100_000);
+    expect(buy.ok).toBe(true);
+    if (!buy.ok) return;
+    const sell = quotePaperSell(1, buy.qty, 100_000);
+    expect(sell.proceedsUsd).toBeLessThan(800);
+    expect(sell.slippage).toBeLessThan(0.03);
+  });
+
+  it("refuses a thin-pool buy instead of filling through the stop", async () => {
     const desk = testDesk();
     try {
       const mint = "ThinPool1111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ symbol: "THIN", mint, liquidityUsd: 20_000, priceUsd: 0.001 }));
-      const pos = desk.book.positions.get(mint);
-      expect(pos).toBeTruthy();
-      // fill = 0.001 * (1 + 0.0015 + 800/10000) = 0.0010815
-      expect(pos!.entryPrice).toBeCloseTo(0.0010815, 10);
-      await desk.markPrice(mint, 0.001); // (0.001 - 0.0010815) / 0.0010815 = -7.5%
-      expect(desk.snapshot().closed.at(-1)).toMatchObject({ symbol: "THIN", exitCode: "STOP_LOSS" });
+      expect(desk.book.positions.has(mint)).toBe(false);
+      expect(desk.snapshot().events.some((event) => event.code === "EXIT_IMPACT" && event.message.includes("Buy refused"))).toBe(true);
+      expect(desk.snapshot().closed).toHaveLength(0);
     } finally {
       desk.stop();
     }
@@ -306,7 +312,8 @@ describe("open positions get priced on the live feed", () => {
       fetchImpl: (async () => new Response("", { status: 429 })) as unknown as typeof fetch
     });
     await pricer.poll();
-    expect(errors).toEqual(["dexscreener HTTP 429"]);
+    expect(errors[0]).toContain("dexscreener HTTP 429");
+    expect(errors[0]).toContain("jupiter HTTP 429");
     expect(ticks).toEqual([]);
   });
 
@@ -331,11 +338,19 @@ describe("open positions get priced on the live feed", () => {
     try {
       await desk.submitCandidate(makeToken({ symbol: "ERR", mint: "ErrBanner1111111111111111111111111111111111", source: "raydium" }));
       await desk.repricePositions();
-      expect(desk.snapshot().feed.lastError).toBe("position prices: dexscreener HTTP 503");
+      // v12.1: one failed poll is not a banner; two minutes of failures is.
+      expect(desk.snapshot().feed.lastError).toBeUndefined();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 121_000);
+      await desk.repricePositions();
+      expect(desk.snapshot().feed.lastError).toContain("dexscreener HTTP 503");
       ok = true;
+      // v13.2: a 5xx cools that source (2 s, doubling), so the next good poll comes after the cool-off.
+      vi.setSystemTime(Date.now() + 5_000);
       await desk.repricePositions();
       expect(desk.snapshot().feed.lastError).toBeUndefined();
     } finally {
+      vi.useRealTimers();
       desk.stop();
     }
   });
@@ -351,7 +366,8 @@ describe("open positions get priced on the live feed", () => {
       // fill = 0.001 * (1 + 0.0015 + 800/90000) = 0.0010104; stop = 0.0010104 * 0.94 = 0.00094978
       expect(desk.book.positions.has(mint)).toBe(true);
       await desk.repricePositions();
-      expect(desk.snapshot().closed.at(-1)).toMatchObject({ symbol: "POLLED", exitCode: "STOP_LOSS" });
+      expect(desk.snapshot().closed.at(-1)).toMatchObject({ symbol: "POLLED" });
+      expect(["STOP_LOSS", "GAP_RUG"]).toContain(desk.snapshot().closed.at(-1)?.exitCode);
       expect(desk.book.positions.has(mint)).toBe(false);
     } finally {
       desk.stop();
