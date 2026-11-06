@@ -50,12 +50,20 @@ data class ResolvedDesk(val baseUrl: String, val source: String)
  * worked comes before the beacon, so a stale beacon (its row is only updated with the
  * Supabase service key) can never override a tunnel that answers. connect() health-checks
  * all of them in parallel and takes the first one that answers.
+ * Hold this URL returns only the saved host. The baked-in quick tunnel is ephemeral, so it
+ * is not a candidate once a saved URL exists.
  */
 internal fun candidateUrls(saved: DeskLink, beaconUrl: String?, lastGood: String?, discovered: String?): List<ResolvedDesk> {
     val out = LinkedHashMap<String, String>()
     fun add(raw: String?, source: String) {
         val url = raw?.trim()?.trimEnd('/')?.takeIf { it.startsWith("http://") || it.startsWith("https://") } ?: return
         if (!out.containsKey(url)) out[url] = source
+    }
+    val savedUrl = saved.baseUrl.trim().trimEnd('/').takeIf { it.startsWith("http://") || it.startsWith("https://") }
+    // The operator locked this host. A blip or a new tunnel report must not move the book.
+    if (saved.useManual && savedUrl != null) {
+        add(savedUrl, "saved")
+        return out.map { (url, source) -> ResolvedDesk(url, source) }
     }
     // The URL Dirk typed on the Link tab always comes first; the beacon is last of the public ones.
     add(saved.baseUrl, "saved")
@@ -64,8 +72,20 @@ internal fun candidateUrls(saved: DeskLink, beaconUrl: String?, lastGood: String
     add(beaconUrl, "beacon")
     // No fixed LAN :4721. That port was wslrelay on Austin's PC and is not the desk.
     // The phone follows the saved URL, the beacon, or the desk's publicUrl from /api/health.
-    add(DeskBeacon.DEFAULT_PUBLIC_URL, "default")
+    // The baked-in trycloudflare name can be reclaimed. Do not probe it when a saved URL exists.
+    if (savedUrl == null) add(DeskBeacon.DEFAULT_PUBLIC_URL, "default")
     return out.map { (url, source) -> ResolvedDesk(url, source) }
+}
+
+/**
+ * The baked-in quick tunnel may see the desk token only when the operator saved that exact host.
+ * Every other host keeps the normal token rules.
+ */
+internal fun maySendDeskToken(url: String, savedBase: String): Boolean {
+    val bare = url.substringBefore('?').trimEnd('/')
+    val root = DeskBeacon.DEFAULT_PUBLIC_URL
+    if (bare != root && !bare.startsWith("$root/")) return true
+    return savedBase.trim().trimEnd('/') == root
 }
 
 private val TUNNEL_RE = Regex("""^https://[a-z0-9-]+\.trycloudflare\.com$""")
@@ -147,6 +167,8 @@ class DeskRepository private constructor(private val context: Context) {
     private var reconnecting = false
     private var poll: Job? = null
     @Volatile private var link = DeskLink("", "")
+    /** Saved Link host. The baked-in tunnel receives the token only when this is that host. */
+    @Volatile private var explicitBase: String = ""
     private val generation = AtomicInteger(0)
     private var pollMisses = 0
     private var backoffMs = 1_000L
@@ -248,7 +270,7 @@ class DeskRepository private constructor(private val context: Context) {
         val beacon = beaconUrl?.trim()?.trimEnd('/')?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
         val savedUrl = saved.baseUrl.trim().trimEnd('/').ifBlank { null }
         val remembered = lastGood?.trim()?.trimEnd('/')?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-        if (saved.useManual && !afterFailure && savedUrl != null) {
+        if (saved.useManual && savedUrl != null) {
             return ResolvedDesk(savedUrl, "saved")
         }
         if (beacon != null && (!saved.useManual || beacon != savedUrl)) {
@@ -266,6 +288,7 @@ class DeskRepository private constructor(private val context: Context) {
         connectLock.withLock {
             if (gen != generation.get()) return@withLock
             val saved = currentLink()
+            explicitBase = saved.baseUrl.trim().trimEnd('/')
             val prefs = context.deskStore.data.first()
             val lastGood = prefs[KEY_LAST_GOOD]
             if (_lastGoodUrl.value == null) _lastGoodUrl.value = lastGood
@@ -367,6 +390,8 @@ class DeskRepository private constructor(private val context: Context) {
         scope.launch {
             context.deskStore.edit { prefs ->
                 prefs[KEY_DISCOVERED] = url
+                // Hold this URL keeps the Override URL the operator locked.
+                if (prefs[KEY_MANUAL] == true) return@edit
                 // v13.11: a saved trycloudflare Override URL follows the desk's new tunnel on its own,
                 // so a tunnel restart (or an APK update) never needs the URL typed again.
                 upgradeSavedUrl(prefs[KEY_URL].orEmpty(), url)?.let { prefs[KEY_URL] = it }
@@ -812,7 +837,7 @@ class DeskRepository private constructor(private val context: Context) {
             base.startsWith("https://") -> "wss://" + base.removePrefix("https://")
             else -> "ws://" + base.removePrefix("http://")
         }
-        val token = link.token
+        val token = exposedToken(base)
         val opened = runCatching {
             val query = if (token.isBlank()) "" else "?token=" + URLEncoder.encode(token, Charsets.UTF_8.name())
             val request = Request.Builder()
@@ -920,17 +945,24 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     private fun withToken(url: String): String {
-        val token = link.token
+        val token = exposedToken(url)
         if (token.isBlank() || url.contains("token=")) return url
         val join = if (url.contains("?")) "&" else "?"
         return url + join + "token=" + URLEncoder.encode(token, Charsets.UTF_8.name())
     }
 
     private fun Request.Builder.authed(): Request.Builder {
-        val token = link.token
         header("accept", "application/json")
+        val target = runCatching { build().url.toString() }.getOrDefault("")
+        val token = exposedToken(target)
         if (token.isNotBlank()) header("X-Desk-Token", token)
         return this
+    }
+
+    private fun exposedToken(url: String): String {
+        val token = link.token
+        if (token.isBlank() || !maySendDeskToken(url, explicitBase)) return ""
+        return token
     }
 
     private fun rememberGood(url: String) {

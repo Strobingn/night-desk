@@ -1,6 +1,7 @@
 package com.dirk.nightdesk
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -24,10 +25,20 @@ class V122LinkTest {
     }
 
     @Test
-    fun aManualUrlStaysFirstAndTheBeaconIsOnlyAFallback() {
+    fun aHeldUrlIsTheOnlyCandidate() {
         val order = candidateUrls(DeskLink("$live/", "", useManual = true), beaconUrl = dead, lastGood = dead, discovered = null)
-        assertEquals(listOf(live, dead), order.take(2).map { it.baseUrl })
-        assertEquals(order.size, order.map { it.baseUrl }.toSet().size)
+        assertEquals(listOf(live), order.map { it.baseUrl })
+        assertEquals("saved", order.single().source)
+    }
+
+    @Test
+    fun aSavedUrlIsNotProbedAlongsideTheBakedInTunnel() {
+        val other = "https://deaths-fridge-portal-neck.trycloudflare.com"
+        val order = candidateUrls(DeskLink(other, "secret"), beaconUrl = dead, lastGood = null, discovered = null)
+        assertTrue(order.none { it.baseUrl == DeskBeacon.DEFAULT_PUBLIC_URL })
+        assertTrue(maySendDeskToken("$other/api/health", other))
+        assertFalse(maySendDeskToken("${DeskBeacon.DEFAULT_PUBLIC_URL}/api/health", other))
+        assertTrue(maySendDeskToken("${DeskBeacon.DEFAULT_PUBLIC_URL}/api/health", DeskBeacon.DEFAULT_PUBLIC_URL))
     }
 
     @Test
