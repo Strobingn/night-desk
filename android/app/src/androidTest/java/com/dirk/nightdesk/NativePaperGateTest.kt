@@ -158,29 +158,34 @@ class NativePaperGateTest {
 
     private fun scrollUntil(text: String, timeoutMs: Long = 20_000) {
         val matcher = hasText(text, substring = true)
-        repeat(8) {
-            if (rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()) {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (runCatching { rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty() }.getOrDefault(false)) {
                 runCatching { rule.onNode(matcher).performScrollTo() }
                 rule.waitForIdle()
                 return
             }
-            rule.onRoot().performTouchInput {
-                swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 200)
+            runCatching {
+                rule.onRoot().performTouchInput {
+                    swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 150)
+                }
             }
-            rule.waitForIdle()
+            // UiAutomator waits in real time. Compose waitUntil was holding the desk's beacon call.
+            if (UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+                    .wait(Until.hasObject(By.textContains(text)), 2_000)
+            ) {
+                runCatching { rule.onNode(matcher).performScrollTo() }
+                return
+            }
         }
-        waitFor(text, timeoutMs)
+        waitFor(text, 5_000)
     }
 
     private fun waitFor(text: String, timeoutMs: Long = 20_000) {
-        try {
-            rule.waitUntil(timeoutMs) {
-                rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
-            }
-        } catch (err: Throwable) {
-            val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 16) }.getOrElse { it.message ?: "" }
-            throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(3500)}", err)
-        }
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        if (device.wait(Until.hasObject(By.textContains(text)), timeoutMs)) return
+        val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 12) }.getOrElse { it.message ?: "" }
+        throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(2500)}")
     }
 
     private fun dismissNotice() {
