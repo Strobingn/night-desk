@@ -215,19 +215,30 @@ class NativePaperGateTest {
 
     /** Clicks the label on the card that owns the anchor, not the same label on another coin. */
     private fun tapBelow(anchor: String, label: String) {
-        scrollUntil(anchor)
-        // The holding row reads "GATE ›", so an exact "GATE" match finds nothing.
-        val anchors = rule.onAllNodes(hasText(anchor, substring = true)).fetchSemanticsNodes()
-        check(anchors.isNotEmpty()) { "No \"$anchor\" to anchor \"$label\"" }
-        val anchorTop = anchors.minOf { it.boundsInRoot.top }
-        val buttons = rule.onAllNodes(hasText(label) and hasClickAction())
-        val found = buttons.fetchSemanticsNodes()
-        val below = found.indices.filter { found[it].boundsInRoot.top >= anchorTop - 1f }
-        check(below.isNotEmpty()) { "No clickable \"$label\" under $anchor" }
-        val index = below.minBy { found[it].boundsInRoot.top }
-        runCatching { buttons[index].performScrollTo() }
-        buttons[index].performTouchInput { click() }
-        rule.waitForIdle()
+        val deadline = System.currentTimeMillis() + 20_000
+        while (System.currentTimeMillis() < deadline) {
+            val anchors = rule.onAllNodes(hasText(anchor, substring = true)).fetchSemanticsNodes()
+            val buttons = rule.onAllNodes(hasText(label) and hasClickAction())
+            val found = buttons.fetchSemanticsNodes()
+            if (anchors.isNotEmpty() && found.isNotEmpty()) {
+                val anchorTop = anchors.minOf { it.boundsInRoot.top }
+                val root = appRoot().fetchSemanticsNode().boundsInRoot
+                val below = found.indices.filter { index ->
+                    val bounds = found[index].boundsInRoot
+                    bounds.top >= anchorTop - 1f && bounds.top >= root.top && bounds.bottom <= root.bottom - 96f
+                }
+                if (below.isNotEmpty()) {
+                    buttons[below.minBy { found[it].boundsInRoot.top }].performTouchInput { click() }
+                    rule.waitForIdle()
+                    return
+                }
+            }
+            appRoot().performTouchInput {
+                swipe(Offset(centerX, bottom * 0.70f), Offset(centerX, bottom * 0.42f), durationMillis = 180)
+            }
+            rule.waitForIdle()
+        }
+        error("No clickable \"$label\" on screen under $anchor")
     }
 
     private fun tap(text: String) {
