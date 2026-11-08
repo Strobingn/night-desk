@@ -2,10 +2,10 @@
  * v13.6 Add coin by ticker or name. Pure matching plus a polite DexScreener search client.
  *
  * Resolve order (the caller feeds the local tiers):
- *   1. open positions (paper + live) and recent trades
- *   2. current Tape / Scout sightings, lookups and the watchlist
+ *   1. open positions (paper + live) and recent trades — one exact hit answers without a network call
+ *   2. Tape / Scout sightings, lookups and the watchlist, merged with DexScreener search
  *   3. DexScreener /latest/dex/search (Solana pairs only, ranked by liquidity then 1h volume)
- * A tier with exactly one coin answers; several coins come back as a pick list.
+ * A Tape hit does not hide other coins and does not skip the search.
  */
 import { isQuoteMint, isSolanaAddress } from "./coin-input.js";
 
@@ -86,6 +86,13 @@ export function matchLocal(query: string, coins: LocalCoin[]): TickerCandidate[]
     });
   }
   return [...out.values()];
+}
+
+/** Tape rows first, then DexScreener mints that are not already listed. Capped at 8. */
+export function mergeTickerCandidates(local: TickerCandidate[], remote: TickerCandidate[], limit = 8): TickerCandidate[] {
+  const seen = new Set(local.map((row) => row.mint));
+  const extra = remote.filter((row) => row.mint && !seen.has(row.mint));
+  return [...local, ...extra].slice(0, limit);
 }
 
 interface DexPair {

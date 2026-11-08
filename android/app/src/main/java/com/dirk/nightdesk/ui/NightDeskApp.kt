@@ -128,7 +128,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** v13 bottom nav: label to icon. Link stays as the sixth tab. */
-private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Add coin" to "add", "Recap" to "recap", "Settings" to "settings", "Link" to "link", "Pump" to "radar")
+private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Search" to "search", "Recap" to "recap", "Settings" to "settings", "Link" to "link", "Pump" to "radar")
 
 private fun stageColor(stage: String): Color = when (stage) {
     "filter" -> P.down
@@ -718,14 +718,14 @@ private fun HeroCard(snap: DeskSnapshot?, openPnl: Double) {
             .clip(RoundedCornerShape(24.dp))
             .background(Brush.linearGradient(listOf(P.heroFrom, P.heroTo)))
             .border(1.dp, P.accent.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
-            .padding(18.dp)
+            .padding(14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Marked equity", color = P.dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             val live = snap?.mode == "live" && snap.liveBook == null
             Chip(if (live) "LIVE" else if (snap?.liveBook != null) "PAPER · AI" else "PAPER", if (live) P.onDown else P.onAccent, if (live) P.down else P.accent, size = 11)
         }
-        Text(money(equity), color = P.ink, fontSize = 40.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1).sp, modifier = Modifier.padding(vertical = 4.dp))
+        Text(money(equity), color = P.ink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp, modifier = Modifier.padding(vertical = 2.dp))
         @OptIn(ExperimentalLayoutApi::class)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Chip("Today ${signed(day)}" + (if (base > 0) " · ${pct(day / base)}" else ""), tint(day), tint(day).copy(alpha = 0.16f), size = 12)
@@ -1097,7 +1097,7 @@ private fun OpenPositionCard(
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
     var sellAsk by remember { mutableStateOf<Int?>(null) }
-    Column(Modifier.deskCard().padding(16.dp)) {
+    Column(Modifier.deskCard().padding(12.dp)) {
         Row(Modifier.fillMaxWidth().clickable(onClickLabel = "Open ${pos.symbol} coin card") { onOpenCoin(pos.mint) }, verticalAlignment = Alignment.CenterVertically) {
             CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null)
             Spacer(Modifier.width(12.dp))
@@ -1137,7 +1137,7 @@ private fun OpenPositionCard(
                 Text(
                     netText,
                     color = if (net == null || !net.isFinite()) P.muted else if (net >= 0) P.up else P.down,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1147,8 +1147,8 @@ private fun OpenPositionCard(
         CoinSpark(pos.marks, pos.entryPrice)
         StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
         Column(
-            Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(P.surface).border(1.dp, P.line, RoundedCornerShape(14.dp)).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(12.dp)).background(P.surface).border(1.dp, P.line, RoundedCornerShape(12.dp)).padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row {
                 PosStat("Entry", px(pos.entryPrice))
@@ -1162,7 +1162,7 @@ private fun OpenPositionCard(
             }
         }
         // v13.9: LIVE BUY / LIVE SELL side by side on every paper card.
-        if (oneTap != null && !pos.live) LivePair(oneTap, pos.mint, pos.symbol, Modifier.padding(top = 12.dp))
+        if (oneTap != null && !pos.live) LivePair(oneTap, pos.mint, pos.symbol, Modifier.padding(top = 4.dp), compact = true)
         // v13.3 one tap: closes 100% now, no dialog. The 25 / 50 / 100 buttons below still ask first.
         if (oneTap != null) {
             // v13.7: live-book cards sell for real; on an armed desk the AI's paper cards sell on paper.
@@ -1176,18 +1176,19 @@ private fun OpenPositionCard(
                 if (inFlight) "Selling…" else label,
                 P.down,
                 P.onDown,
-                Modifier.fillMaxWidth().padding(top = 12.dp),
+                Modifier.fillMaxWidth().padding(top = 2.dp),
+                height = 34.dp,
                 enabled = !inFlight
             ) { if (pos.live) oneTap.onSellLive(pos.mint, pos.symbol) else oneTap.onSell(pos.mint, pos.symbol) }
         }
         // Sell 25 / 50 / 100. Each one still asks first; the confirm never touches the connection.
         // v13.7: a live position closes in full only.
-        Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!pos.live) {
-                BigButton("Sell 25%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 25 }
-                BigButton("Sell 50%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong) { sellAsk = 50 }
+                BigButton("Sell 25%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong, height = 34.dp) { sellAsk = 25 }
+                BigButton("Sell 50%", P.card3, P.ink, Modifier.weight(1f), border = P.lineStrong, height = 34.dp) { sellAsk = 50 }
             }
-            BigButton(if (pos.live) "Sell 100% LIVE" else "Sell 100%", P.down, P.onDown, Modifier.weight(1f)) { sellAsk = 100 }
+            BigButton(if (pos.live) "Sell 100% LIVE" else "Sell 100%", P.down, P.onDown, Modifier.weight(1f), height = 34.dp) { sellAsk = 100 }
         }
         // v13.11 take profit / stop orders on this position.
         if (orders != null) {
@@ -1267,8 +1268,8 @@ private fun CoinSpark(points: List<PricePoint>, entry: Double) {
 @Composable
 private fun RowScope.PosStat(label: String, value: String, tint: Color = P.ink) {
     Column(Modifier.weight(1f)) {
-        Text(label, color = P.muted, fontSize = 11.sp)
-        Text(value, color = tint, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(label, color = P.muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        Text(value, color = tint, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -13,7 +13,7 @@ import {
   pumpCurveAddress,
   solSides
 } from "../src/market/chain-marks.js";
-import { DexSearchClient, matchLocal, rankDexSearch, shortMint, tickerQuery } from "../src/market/ticker-search.js";
+import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, shortMint, tickerQuery } from "../src/market/ticker-search.js";
 import { bucketFor } from "../src/market/net.js";
 import { PositionPricer } from "../src/market/position-pricer.js";
 import { testConfig, testDesk } from "./helpers.js";
@@ -211,6 +211,64 @@ describe("v13.6 ticker / name lookup", () => {
       const res = await desk.lookupCoin("NOPE");
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.error).toMatch(/positions, trades, the Tape or DexScreener search/);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("a name that is not on Home or the Tape still resolves from DexScreener, and a failure stays visible", async () => {
+    const SEEK = "2HNbRAN6m3bhgYb9mCzH6ULoT8qQuTWE3pM1CyM1pump";
+    let status = 200;
+    const urls: string[] = [];
+    const pair = {
+      chainId: "solana",
+      dexId: "raydium",
+      pairAddress: POOL,
+      priceUsd: "1.25",
+      liquidity: { usd: 180_000 },
+      volume: { h1: 40_000 },
+      pairCreatedAt: Date.now() - 3_600_000,
+      baseToken: { address: SEEK, symbol: "SEEK", name: "Seek Coin" },
+      quoteToken: { address: WSOL_MINT }
+    };
+    const lookupFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("/latest/dex/search")) {
+        if (status !== 200) return new Response("{}", { status });
+        return Response.json({ pairs: [pair] });
+      }
+      if (url.includes(`/latest/dex/tokens/${SEEK}`)) return Response.json({ pairs: [pair] });
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+    const desk = new Desk(testConfig({ rpcUrl: "", rugcheckUrl: "" }), { lookupFetch });
+    try {
+      await desk.submitCandidate(makeToken({ mint: MINT, symbol: "GATE", name: "Gate Coin", priceUsd: 1 }));
+      const found = await desk.lookupCoin("seek");
+      expect(found.ok).toBe(true);
+      if (found.ok) {
+        expect(found.mint).toBe(SEEK);
+        expect(found.matchedBy).toMatch(/DexScreener search/);
+        expect(found.providerNote).toBeUndefined();
+      }
+      expect(urls.some((u) => u.includes("/latest/dex/search"))).toBe(true);
+      expect(desk.book.positions.has(SEEK)).toBe(false);
+      const merged = mergeTickerCandidates(
+        [{ mint: MINT, symbol: "SEEK", name: "Local", mintShort: "gate", liquidityUsd: 1, volume1hUsd: 1, held: false, origin: "tape", exact: true }],
+        [{ mint: SEEK, symbol: "SEEK", name: "Seek Coin", mintShort: "seek", liquidityUsd: 2, volume1hUsd: 2, held: false, origin: "dexscreener", exact: true }]
+      );
+      expect(merged.map((row) => row.mint)).toEqual([MINT, SEEK]);
+      const again = await desk.lookupCoin("SEEK");
+      expect(again.ok).toBe(true);
+      if (again.ok) expect(again.providerNote).toMatch(/up to 60s old/);
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      status = 429;
+      const limited = await desk.lookupCoin("NOPE2");
+      expect(limited.ok).toBe(false);
+      if (!limited.ok) {
+        expect(limited.providerNote ?? limited.error).toMatch(/rate limited/);
+        expect(limited.error).toMatch(/rate limited/);
+      }
     } finally {
       desk.stop();
     }

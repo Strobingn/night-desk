@@ -58,6 +58,12 @@ class NativePaperGateTest {
         tapContains("⚡ Buy")
         waitFor("· paper")
         dismissNotice()
+        openTab("Home")
+        scrollUntil("GATE")
+        scrollUntil("Sell 25%")
+        shot("home")
+        openTab("Tape")
+        scrollUntil("⚡ Sell")
         tapContains("⚡ Sell")
         waitFor("Sold GATE")
         dismissNotice()
@@ -71,6 +77,36 @@ class NativePaperGateTest {
         waitFor("Sold GATE")
         dismissNotice()
 
+        openTab("Search")
+        waitFor("Look up")
+        rule.onAllNodes(hasSetText())[0].performTextReplacement("SEEK")
+        tap("Look up")
+        waitFor("2HNb")
+        scrollUntil("LIVE BUY")
+        shot("search")
+        val paperBuy = rule.onAllNodesWithText("Paper buy", substring = true).fetchSemanticsNodes().isNotEmpty()
+        if (paperBuy) {
+            scrollUntil("Paper buy")
+            val nodes = rule.onAllNodesWithText("Paper buy", substring = true)
+            val found = nodes.fetchSemanticsNodes()
+            nodes[found.indices.maxBy { found[it].boundsInRoot.top }].performTouchInput { click() }
+            rule.waitForIdle()
+            tapRightmost("Buy")
+        } else {
+            scrollUntil("anyway")
+            tapContains("anyway")
+            tap("Buy anyway")
+        }
+        waitFor("(paper)")
+        dismissNotice()
+        openTab("Home")
+        scrollUntil("SEEK")
+        tapContains("⚡ Sell")
+        waitFor("Sold SEEK")
+        dismissNotice()
+
+        openTab("Tape")
+        scrollUntil("LIVE BUY $5")
         tap("LIVE BUY $5")
         waitFor("OPERATOR_NOT_READY")
         dismissNotice()
@@ -205,6 +241,12 @@ class NativePaperGateTest {
         }
         val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 12) }.getOrElse { it.message ?: "" }
         throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(2500)}")
+    }
+
+    private fun shot(name: String) {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val file = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir, "$name.png")
+        check(device.takeScreenshot(file)) { "screenshot $name failed" }
     }
 
     private fun dismissNotice() {

@@ -63,7 +63,7 @@ fun PumpScreen() {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Pump", color = P.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Simulate-only until this session is armed. The wallet signs. A restart disarms.",
+            "Paste a mint under Bonding curve and tap Watch to read the curve. Simulate-only until this session is armed. An armed buy is signed by the desk host wallet, not a key on this phone. A restart disarms.",
             color = P.muted,
             fontSize = 13.sp,
             modifier = Modifier.padding(top = 6.dp, bottom = 12.dp)

@@ -29,7 +29,11 @@ mkdir -p "${GITHUB_WORKSPACE:-.}/gate-logs"
 set +e
 adb shell am instrument -w -r com.dirk.nightdesk.test/androidx.test.runner.AndroidJUnitRunner | tee "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"
 set -e
+adb pull /data/data/com.dirk.nightdesk/files/home.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-13.17.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/search.png "${GITHUB_WORKSPACE:-.}/gate-logs/search-13.17.png" || true
 if grep -q "FAILURES!!!" "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"; then
   exit 1
 fi
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/home-13.17.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/search-13.17.png"
 node "${GITHUB_WORKSPACE:-/agent/repos/night-desk}/scripts/apk-gate-assert.mjs" /tmp/nd-gate/http.jsonl /tmp/nd-gate/swaps.jsonl

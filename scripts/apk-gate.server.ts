@@ -18,6 +18,31 @@ const DIR = "/tmp/nd-gate";
 const LOG = `${DIR}/http.jsonl`;
 const SWAPS = `${DIR}/swaps.jsonl`;
 const MINT = "GateMint111111111111111111111111111111111";
+const SEEK = "2HNbRAN6m3bhgYb9mCzH6ULoT8qQuTWE3pM1CyM1pump";
+
+function seekPair() {
+  return {
+    chainId: "solana",
+    dexId: "raydium",
+    pairAddress: "Ai6sqoFGkuyJYv1SoPX1UdV6VobsqnFNYhVjQX5Mo4iV",
+    priceUsd: "1.00",
+    liquidity: { usd: 180_000 },
+    volume: { h1: 40_000 },
+    pairCreatedAt: Date.now() - 3_600_000,
+    baseToken: { address: SEEK, symbol: "SEEK", name: "Seek Coin" },
+    quoteToken: { address: "So11111111111111111111111111111111111111112" }
+  };
+}
+
+/** Search for SEEK is local. Nothing else is fetched, so the gate never calls a provider. */
+const lookupFetch = (async (input: RequestInfo | URL) => {
+  const url = String(input);
+  if (url.includes("/latest/dex/search") && url.toUpperCase().includes("SEEK")) {
+    return Response.json({ pairs: [seekPair()] });
+  }
+  if (url.includes(`/latest/dex/tokens/${SEEK}`)) return Response.json({ pairs: [seekPair()] });
+  return new Response("{}", { status: 404, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
 
 const liveBroker = vi.hoisted(() => ({
   executeLiveSwap: vi.fn(async (req: { side: string; mint: string; sizeUsd?: number }) => {
@@ -66,9 +91,11 @@ beforeAll(async () => {
       mode: "live",
       liveRequested: true,
       startingBalanceUsd: 1000,
-      readWalletSecret: () => JSON.stringify(Array.from(key.secretKey))
+      readWalletSecret: () => JSON.stringify(Array.from(key.secretKey)),
+      rpcUrl: "",
+      rugcheckUrl: ""
     }),
-    { walletBalances: rich }
+    { walletBalances: rich, lookupFetch }
   );
   desk.updateSettings({
     autoBuy: false,

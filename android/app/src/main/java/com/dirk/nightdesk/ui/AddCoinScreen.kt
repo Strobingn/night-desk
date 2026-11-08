@@ -54,8 +54,8 @@ import java.util.Locale
 private val CHIPS = listOf(10.0, 25.0, 50.0, 100.0, 250.0)
 
 /** v13.6 field label and help: tickers and names work too. */
-const val ADD_COIN_LABEL = "Ticker, name, mint or link"
-const val ADD_COIN_HELP = "Ticker (e.g. QTFALCN, \$ optional), name, mint or link all work. A ticker checks your positions and trades first, then the Tape, then DexScreener search. Links: DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan. Share a link into Night Desk to land here."
+const val ADD_COIN_LABEL = "Name, symbol, mint or link"
+const val ADD_COIN_HELP = "Search by name, symbol or mint. The coin does not have to be on Home or the Tape. A symbol checks open positions first, then DexScreener search. Paste a mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link to add it. Share a link into Night Desk to land here."
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -103,7 +103,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("ADD COIN", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
+            Text("SEARCH", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
             Text(ADD_COIN_HELP, color = Dim, fontSize = 12.sp)
             OutlinedTextField(
                 value = input,
@@ -157,6 +157,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
             }
         } else if (found != null && !found.ok) {
             Text(found.error ?: "Lookup failed. No buy without a reliable price.", color = Coral, fontSize = 14.sp)
+            found.providerNote?.let { Text(it, color = Amber, fontSize = 12.sp) }
         }
         if (found != null && found.ok) {
             Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -164,8 +165,10 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     Column(Modifier.weight(1f)) {
                         Text(found.symbol, style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
                         Text(found.name, color = Dim, fontSize = 12.sp)
+                        Text(found.mint, color = Ink, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         Text(found.tag.uppercase() + (if (found.held) " · HELD" else ""), color = Amber, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         found.matchedBy?.let { Text("Matched " + it, color = Dim, fontSize = 11.sp) }
+                        found.providerNote?.let { Text(it, color = Amber, fontSize = 12.sp) }
                     }
                     TextButton(onClick = {
                         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(found.dexscreenerUrl))) }
@@ -196,7 +199,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     val overCap = size > found.positionCapUsd + 0.005
                     val overPool = size > found.poolMaxUsd + 0.005
                     Row(Modifier.fillMaxWidth()) {
-                        Text("Paper buy size", color = Ink, modifier = Modifier.weight(1f))
+                        Text("Paper size", color = Ink, modifier = Modifier.weight(1f))
                         Text(formatUsd(size), color = Lime, fontFamily = FontFamily.Monospace)
                     }
                     Slider(
@@ -249,6 +252,10 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                             scope.launch { desk.oneTapBuy(found.mint, found.symbol, size) }
                         }
                     }
+                }
+                if (oneTap != null) {
+                    Text("Live book. These buttons are separate from the paper buy above.", color = Dim, fontSize = 12.sp)
+                    LivePair(oneTap, found.mint, found.symbol, compact = true)
                 }
                 TextButton(enabled = !found.watching, onClick = {
                     scope.launch {
