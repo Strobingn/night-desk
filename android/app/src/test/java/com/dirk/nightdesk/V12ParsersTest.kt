@@ -1,6 +1,7 @@
 package com.dirk.nightdesk
 
 import com.dirk.nightdesk.ui.changedOnly
+import com.dirk.nightdesk.ui.settingsPatchAfterOneTap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -85,5 +86,24 @@ class V12ParsersTest {
         assertEquals(emptyMap<String, Any?>(), changedOnly(before, before))
         assertEquals(mapOf("maxPositionPct" to 25.0), changedOnly(before, before + ("maxPositionPct" to 25.0)))
         assertEquals(mapOf("positionSizeUsd" to 40.0), changedOnly(before, before + ("positionSizeUsd" to 40.0)))
+    }
+
+    @Test
+    fun oneTapSlippageJoinsTheDraftSoALaterSaveDoesNotRestoreTheOldCap() {
+        val saved = mapOf("maxEntrySlippage" to 3.0, "liveTradeUsd" to 5.0)
+        // Entry slider moved to 4 and live size to 8, then one-tap commits 5.2 (rounds to 5).
+        // Saving the dirty draft without folding the tap would send 4 and wipe the tap.
+        val dirty = saved + ("maxEntrySlippage" to 4.0) + ("liveTradeUsd" to 8.0)
+        assertEquals(4.0, changedOnly(saved, dirty)["maxEntrySlippage"])
+        val patch = settingsPatchAfterOneTap(saved, dirty, 5.2)
+        assertEquals(5.0, patch["maxEntrySlippage"])
+        assertEquals(8.0, patch["liveTradeUsd"])
+        assertEquals(false, patch.containsValue(3.0))
+        assertEquals(false, patch.containsValue(4.0))
+        // A draft that was dirty for another field and still held the saved slip also picks up the tap.
+        val otherDirty = saved + ("liveTradeUsd" to 8.0)
+        val later = settingsPatchAfterOneTap(saved, otherDirty, 5.0)
+        assertEquals(5.0, later["maxEntrySlippage"])
+        assertEquals(8.0, later["liveTradeUsd"])
     }
 }

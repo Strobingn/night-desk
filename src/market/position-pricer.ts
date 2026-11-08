@@ -211,7 +211,7 @@ export class PositionPricer {
       ? this.quotes.fetchSources(held, sources, fetchImpl, now, bust ? { bust } : {})
       : Promise.resolve([]);
     const chainTask = chainDue
-      ? chain!.read(wanted, now, skipFresh).then(
+      ? chain!.read(wanted, now, skipFresh, () => this.now()).then(
           (reads) => {
             chain!.gate.ok(this.now());
             return { reads } as { reads?: Map<string, ChainRead>; error?: string };
@@ -276,7 +276,9 @@ export class PositionPricer {
       const reads = chainResult?.reads;
       if (!reads || !this.opts.live) return;
       for (const [mint, read] of reads) {
-        this.sample(mint, read, prices.get(mint) ?? [], now);
+        // read.at is the RPC decode time, or the websocket notification time for a cache hit.
+        // Do not replace it with this.now(): that would present a stale cached copy as fresh.
+        this.sample(mint, read, prices.get(mint) ?? [], read.at);
         const factor = this.factor(mint, read.kind, this.now());
         if (factor == null) continue;
         const usd = read.native * factor;

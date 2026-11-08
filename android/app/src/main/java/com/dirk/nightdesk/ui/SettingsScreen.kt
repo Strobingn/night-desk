@@ -176,7 +176,13 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
                     color = Dim,
                     fontSize = 12.sp
                 )
-                OneTapBar(oneTap)
+                // Slippage joins the draft. Saving it immediately left draft.slip on the old
+                // value, and a later Save of any dirty draft wrote that old cap back.
+                OneTapBar(
+                    oneTap,
+                    slipPct = draft.slip.toDouble(),
+                    onSlip = { pct -> draft = draft.copy(slip = oneTapSlipPct(pct).toFloat()) },
+                )
             }
         }
         Group("Live wallet") {
@@ -283,6 +289,20 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
 /** Only the keys Dirk changed are sent, so a save never rewrites a value he did not touch. */
 internal fun changedOnly(before: Map<String, Any?>, after: Map<String, Any?>): Map<String, Any?> =
     after.filter { (key, value) -> before[key] != value }
+
+/** Same 0.5% steps as the one-tap slip control. */
+internal fun oneTapSlipPct(raw: Double): Double =
+    (kotlin.math.round(raw * 2.0) / 2.0).coerceIn(0.5, 50.0)
+
+/**
+ * Settings one-tap slippage edits the draft. The Save that follows sends that slip,
+ * not the cap that was on the draft before the tap.
+ */
+internal fun settingsPatchAfterOneTap(
+    saved: Map<String, Any?>,
+    draft: Map<String, Any?>,
+    oneTapRaw: Double,
+): Map<String, Any?> = changedOnly(saved, draft + ("maxEntrySlippage" to oneTapSlipPct(oneTapRaw)))
 
 private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "minVolume1hUsd" to draft.volume.toDouble(),
