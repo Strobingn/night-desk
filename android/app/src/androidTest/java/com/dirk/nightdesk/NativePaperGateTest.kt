@@ -3,6 +3,7 @@ package com.dirk.nightdesk
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.swipe
@@ -83,13 +84,19 @@ class NativePaperGateTest {
         tap("Look up")
         waitFor("2HNb")
         closeIme()
-        val hardKill = rule.onAllNodesWithText("anyway", substring = true).fetchSemanticsNodes().isNotEmpty()
-        scrollIntoView(if (hardKill) "anyway" else "Paper buy")
+        // The hard-kill sentence also contains "anyway". Only the button opens the confirm.
+        val hardButton = hasText("anyway…", substring = true) and hasClickAction()
+        val paperButton = hasText("Paper buy", substring = true) and hasClickAction()
+        val hardKill = rule.onAllNodes(hardButton).fetchSemanticsNodes().isNotEmpty()
+        val action = if (hardKill) hardButton else paperButton
+        scrollClickable(action)
         shot("search")
-        clickOnScreen(if (hardKill) "anyway" else "Paper buy")
+        rule.onNode(action).performClick()
+        rule.waitForIdle()
         if (hardKill) {
-            // Exact label. The card button is "Buy SEEK anyway…" and must not take this click.
-            tapExact("Buy anyway")
+            val confirm = hasText("Buy anyway") and hasClickAction()
+            scrollClickable(confirm)
+            rule.onNode(confirm).performClick()
         } else {
             tapRightmost("Buy")
         }
@@ -246,6 +253,25 @@ class NativePaperGateTest {
         if (!shown) return
         device.pressBack()
         Thread.sleep(400)
+    }
+
+    private fun scrollClickable(matcher: SemanticsMatcher) {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < 20_000) {
+            val nodes = rule.onAllNodes(matcher)
+            val found = nodes.fetchSemanticsNodes()
+            if (found.isNotEmpty()) {
+                runCatching { nodes[0].performScrollTo() }
+                val bounds = nodes[0].fetchSemanticsNode().boundsInRoot
+                val root = rule.onRoot().fetchSemanticsNode().boundsInRoot
+                if (bounds.top >= root.top && bounds.bottom <= root.bottom - 80f && bounds.height > 1f) return
+            }
+            rule.onRoot().performTouchInput {
+                swipe(Offset(centerX, bottom * 0.7f), Offset(centerX, bottom * 0.35f), durationMillis = 180)
+            }
+            Thread.sleep(250)
+        }
+        error("Clickable control was not on screen\n" + runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 8) }.getOrDefault(""))
     }
 
     private fun scrollIntoView(snippet: String) {

@@ -112,7 +112,12 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
     ) {
         Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("SEARCH", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
-            Text(ADD_COIN_HELP, color = Dim, fontSize = 12.sp)
+            Text(
+                if (result?.ok == true) "Paper asks before it fills. Live stays on the separate live buttons."
+                else ADD_COIN_HELP,
+                color = Dim,
+                fontSize = 12.sp
+            )
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it.trimStart() },
@@ -189,17 +194,26 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     }) { Text("DexScreener", color = Sky) }
                 }
                 StatLine(when (found.priceSource) { "jupiter" -> "Price (Jupiter)"; "chain" -> "Price (pump.fun curve)"; else -> "Price" }, "$" + priceText(found.priceUsd))
-                StatLine("Liquidity", compact(found.liquidityUsd))
-                StatLine("1h volume", compact(found.volume1hUsd))
-                StatLine("Mcap", found.marketCapUsd?.let { compact(it) } ?: "—")
-                StatLine("Age", ageText(found.ageSeconds))
-                StatLine("Analyst", "%.2f vs line %.2f".format(Locale.US, found.analystScore, found.analystLine), if (found.analystPass) Mint else Coral)
                 val verdict = when {
                     found.filterPass && found.analystPass -> "Clears every Filter gate and the Analyst line." to Mint
                     found.hardKills.isNotEmpty() -> ("Hard kill: " + found.hardKills.joinToString { it.code } + ". Buy needs Buy anyway.") to Coral
                     else -> "Misses at least one gate. You can still paper-buy it." to Amber
                 }
                 Text(verdict.first, color = verdict.second, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                if (found.canBuy) {
+                    Button(
+                        onClick = { askBuy = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = OnAccent)
+                    ) { Text(if (found.hardKills.isEmpty()) "Paper buy ${formatUsd(size)}" else "Buy ${found.symbol} anyway…") }
+                } else {
+                    Text(found.buyBlockedReason ?: "Buy is blocked.", color = Amber, fontSize = 13.sp)
+                }
+                StatLine("Liquidity", compact(found.liquidityUsd))
+                StatLine("1h volume", compact(found.volume1hUsd))
+                StatLine("Mcap", found.marketCapUsd?.let { compact(it) } ?: "—")
+                StatLine("Age", ageText(found.ageSeconds))
+                StatLine("Analyst", "%.2f vs line %.2f".format(Locale.US, found.analystScore, found.analystLine), if (found.analystPass) Mint else Coral)
                 found.checks.forEach { check ->
                     Text((if (check.pass) "✓ " else "✕ ") + check.code + "  " + check.message, color = if (check.pass) Dim else Coral, fontSize = 12.sp)
                 }
@@ -245,11 +259,6 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     if (overPool) {
                         Text("This pool only takes about ${formatUsd(found.poolMaxUsd)} under the slippage cap and pool-depth check. The desk refuses a bigger fill.", color = Amber, fontSize = 12.sp)
                     }
-                    Button(
-                        onClick = { askBuy = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = OnAccent)
-                    ) { Text(if (found.hardKills.isEmpty()) "Paper buy ${formatUsd(size)}" else "Buy ${found.symbol} anyway…") }
                     if (found.hardKills.isEmpty()) {
                         // v13.3 one tap at this size: no dialog, every desk check still runs.
                         val inFlight = tapping.contains("buy:${found.mint}")
