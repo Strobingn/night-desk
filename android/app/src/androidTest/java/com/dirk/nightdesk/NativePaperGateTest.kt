@@ -40,12 +40,10 @@ class NativePaperGateTest {
         rule.waitForIdle()
         Thread.sleep(2_000)
         rule.onAllNodes(hasSetText())[0].performTextReplacement("http://10.0.2.2:8791")
+        scrollUntil("Hold this URL instead of the beacon")
         rule.onNode(isToggleable()).performClick()
         rule.waitForIdle()
-        if (rule.onAllNodesWithText("Save and hold this URL").fetchSemanticsNodes().isEmpty()) {
-            rule.onNode(isToggleable()).performClick()
-        }
-        waitFor("Save and hold this URL")
+        scrollUntil("Save and hold this URL")
         tap("Save and hold this URL")
         waitFor("10.0.2.2:8791", 40_000)
 

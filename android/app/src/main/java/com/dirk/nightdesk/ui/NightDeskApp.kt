@@ -1695,7 +1695,7 @@ private fun LinkScreen(desk: DeskRepository) {
         useManual = link.useManual
         loaded = true
     }
-    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Desk link", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
         Text(
             "The phone reads the live tunnel from the desk beacon on its own. A new trycloudflare host shows up here without pasting. Hold a URL only when you want to override that.",
