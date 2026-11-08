@@ -14,6 +14,7 @@ android {
         targetSdk = 35
         versionCode = 1316
         versionName = "13.16"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -58,6 +59,11 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("com.solanamobile:mobile-wallet-adapter-clientlib-ktx:2.0.5")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation(bom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
