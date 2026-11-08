@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Drive the exact 13.16 and 13.17 APKs on a hosted emulator and screencap every tab.
+"""Drive the exact 13.16 and 13.17 APKs and screencap every tab.
 
-No mainnet. The desk is the local gate on 10.0.2.2:8791. Paper buy of GATE is a
-local mock so Home is populated the same way on both builds.
+No mainnet. The desk is the local gate on 10.0.2.2:8791. The paper buy of GATE
+is a local mock so Home is populated the same way on both builds. The APKs are
+not modified and this script does not look for test tags.
 """
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import sys
@@ -19,6 +19,7 @@ ACTIVITY = "com.dirk.nightdesk/.MainActivity"
 URL = "http://10.0.2.2:8791"
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "shot-raw")
 VERSION = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+SCREEN = (1080, 2400)
 
 
 def sh(*args: str, timeout: int = 30) -> str:
@@ -30,133 +31,121 @@ def adb(*args: str, timeout: int = 30) -> str:
     return sh("adb", *args, timeout=timeout)
 
 
-def dismiss_overlay() -> None:
-    xml = dump()
-    if "isn't responding" in xml or "isn’t responding" in xml:
-        node = find(xml, "Wait")
-        if node:
-            tap(node)
-            time.sleep(0.4)
-    focus = adb("shell", "dumpsys", "window")
-    if "com.android.settings" in focus or "permissioncontroller" in focus:
-        adb("shell", "input", "keyevent", "KEYCODE_BACK")
-        time.sleep(0.4)
-        adb("shell", "am", "start", "-n", ACTIVITY)
-        time.sleep(0.8)
+def read_screen() -> tuple[int, int]:
+    raw = adb("shell", "wm", "size")
+    match = re.search(r"(\d+)x(\d+)", raw)
+    if not match:
+        return SCREEN
+    return int(match.group(1)), int(match.group(2))
 
 
 def dump() -> str:
-    dismiss_only_anr = False
-    adb("shell", "uiautomator", "dump", "/sdcard/uidump.xml", timeout=20)
+    adb("shell", "uiautomator", "dump", "/sdcard/uidump.xml", timeout=25)
     xml = adb("shell", "cat", "/sdcard/uidump.xml", timeout=15)
     if "<?xml" not in xml:
-        time.sleep(0.5)
-        adb("shell", "uiautomator", "dump", "/sdcard/uidump.xml", timeout=20)
+        time.sleep(0.6)
+        adb("shell", "uiautomator", "dump", "/sdcard/uidump.xml", timeout=25)
         xml = adb("shell", "cat", "/sdcard/uidump.xml", timeout=15)
     return xml
 
 
-def bounds_of(node: ET.Element) -> tuple[int, int, int, int] | None:
-    raw = node.attrib.get("bounds") or ""
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", raw)
-    if not m:
-        return None
-    return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
-
-
 def nodes(xml: str) -> list[ET.Element]:
+    start = xml.find("<?xml")
     try:
-        root = ET.fromstring(xml[xml.find("<?xml") :] if "<?xml" in xml else xml)
+        root = ET.fromstring(xml[start:] if start >= 0 else xml)
     except ET.ParseError:
         return []
     return list(root.iter("node"))
 
 
-def find(xml: str, text: str, exact: bool = False) -> tuple[int, int, int, int] | None:
-    hits = []
-    for node in nodes(xml):
-        blob = (node.attrib.get("text") or "") + "\n" + (node.attrib.get("content-desc") or "")
-        ok = blob == text or blob.startswith(text + "\n") or blob.endswith("\n" + text) if exact else text in blob
-        if not ok:
-            continue
-        b = bounds_of(node)
-        if b and b[2] - b[0] > 2 and b[3] - b[1] > 2:
-            hits.append(b)
-    if not hits:
+def bounds_of(node: ET.Element) -> tuple[int, int, int, int] | None:
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds") or "")
+    if not match:
         return None
-    # Prefer a node that is actually on the 2400-tall screen.
-    visible = [b for b in hits if 0 <= b[1] < 2300 and b[3] > 40]
-    return (visible or hits)[0]
+    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
-def tap(b: tuple[int, int, int, int]) -> None:
-    x = (b[0] + b[2]) // 2
-    y = (b[1] + b[3]) // 2
-    adb("shell", "input", "tap", str(x), str(y))
-    time.sleep(0.6)
+def blob_of(node: ET.Element) -> str:
+    return (node.attrib.get("text") or "") + "\n" + (node.attrib.get("content-desc") or "")
 
 
-def swipe_up() -> None:
-    adb("shell", "input", "swipe", "540", "1700", "540", "700", "250")
-    time.sleep(0.5)
+def focus_pkg() -> str:
+    raw = adb("shell", "dumpsys", "window")
+    match = re.search(r"mCurrentFocus=Window\{[^ ]* u0 ([^\s}/]+)", raw)
+    if match:
+        return match.group(1)
+    match = re.search(r"mCurrentFocus=Window\{[^ ]+ ([^\s}/]+)", raw)
+    return match.group(1) if match else ""
 
 
-def swipe_down() -> None:
-    adb("shell", "input", "swipe", "540", "700", "540", "1700", "250")
-    time.sleep(0.5)
+def on_screen(bounds: tuple[int, int, int, int], height: int | None = None) -> bool:
+    _, screen_h = SCREEN if height is None else (SCREEN[0], height)
+    top, bottom = bounds[1], bounds[3]
+    return bottom > 80 and top < screen_h - 140 and bottom - top > 8
 
 
-def swipe_nav() -> None:
-    adb("shell", "input", "swipe", "980", "2280", "120", "2280", "200")
-    time.sleep(0.4)
+def matches(xml: str, text: str) -> list[tuple[int, int, int, int]]:
+    found = []
+    for node in nodes(xml):
+        if text not in blob_of(node):
+            continue
+        bounds = bounds_of(node)
+        if bounds and bounds[2] - bounds[0] > 2 and bounds[3] - bounds[1] > 2:
+            found.append(bounds)
+    return found
 
 
-def wait_for(options: list[str], timeout: float = 25, exact: bool = False) -> tuple[str, tuple[int, int, int, int]] | None:
-    end = time.time() + timeout
-    while time.time() < end:
-        dismiss_overlay()
-        xml = dump()
-        for opt in options:
-            b = find(xml, opt, exact=exact)
-            if b:
-                return opt, b
-        time.sleep(0.8)
-    return None
-
-
-def scroll_to(options: list[str], swipes: int = 6) -> tuple[str, tuple[int, int, int, int]] | None:
-    for _ in range(swipes):
-        xml = dump()
-        for opt in options:
-            b = find(xml, opt)
-            if b and b[1] < 2100:
-                return opt, b
-        swipe_up()
-    return None
+def find(xml: str, text: str) -> tuple[int, int, int, int] | None:
+    hits = matches(xml, text)
+    visible = [bounds for bounds in hits if on_screen(bounds)]
+    return (visible or hits or [None])[0]
 
 
 def shot(name: str) -> None:
-    dismiss_overlay()
+    """Raw framebuffer. Never presses Back or restarts the app."""
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"{VERSION}-{name}.png"
     data = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=20).stdout
-    # adb on Windows adds CR; GitHub's adb usually does not. Drop a stray CR before LF.
     data = data.replace(b"\r\n", b"\n")
     path.write_bytes(data)
     print(f"shot {path} {len(data)}", flush=True)
 
 
-def open_tab(names: list[str]) -> None:
-    for _ in range(4):
-        xml = dump()
-        for name in names:
-            b = find(xml, name)
-            if b and b[1] > 1800:
-                tap(b)
-                time.sleep(0.4)
-                return
-        swipe_nav()
-    raise SystemExit(f"tab not found: {names}")
+def save_dump(name: str, xml: str | None = None) -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    text = xml if xml is not None else dump()
+    (OUT / f"{VERSION}-{name}.xml").write_text(text, encoding="utf-8")
+
+
+def fail(message: str) -> None:
+    print(message, flush=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", message.lower()).strip("-")[:48]
+    try:
+        shot(f"setup-failure-{slug}")
+        save_dump(f"setup-failure-{slug}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"failure capture failed: {exc}", flush=True)
+    raise SystemExit(message)
+
+
+def tap(bounds: tuple[int, int, int, int]) -> None:
+    adb("shell", "input", "tap", str((bounds[0] + bounds[2]) // 2), str((bounds[1] + bounds[3]) // 2))
+    time.sleep(0.5)
+
+
+def swipe(x1: int, y1: int, x2: int, y2: int) -> None:
+    adb("shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), "280")
+    time.sleep(0.45)
+
+
+def swipe_up() -> None:
+    width, height = SCREEN
+    swipe(width // 2, int(height * 0.72), width // 2, int(height * 0.38))
+
+
+def swipe_down() -> None:
+    width, height = SCREEN
+    swipe(width // 2, int(height * 0.38), width // 2, int(height * 0.72))
 
 
 def ime_open() -> bool:
@@ -166,156 +155,260 @@ def ime_open() -> bool:
 def hide_ime() -> None:
     if ime_open():
         adb("shell", "input", "keyevent", "KEYCODE_BACK")
+        time.sleep(0.5)
+
+
+def dismiss_anr(xml: str) -> str:
+    if "isn't responding" not in xml and "isn’t responding" not in xml:
+        return xml
+    button = find(xml, "Wait")
+    if button:
+        tap(button)
         time.sleep(0.4)
+    return dump()
+
+
+def ensure_app() -> None:
+    for _ in range(8):
+        xml = dismiss_anr(dump())
+        pkg = focus_pkg()
+        if PKG in pkg and (find(xml, "Night") or find(xml, "Home")):
+            return
+        if pkg and PKG not in pkg:
+            adb("shell", "input", "keyevent", "KEYCODE_BACK")
+            time.sleep(0.4)
+        adb("shell", "am", "start", "-n", ACTIVITY)
+        time.sleep(1.2)
+    fail(f"Night Desk was not in front. Focus was {focus_pkg() or 'unknown'}")
+
+
+def open_tab(names: list[str]) -> None:
+    _, height = SCREEN
+    for _ in range(4):
+        xml = dismiss_anr(dump())
+        for name in names:
+            for bounds in matches(xml, name):
+                if bounds[1] > height * 0.75:
+                    tap(bounds)
+                    time.sleep(0.4)
+                    return
+        # Link is the 6th of 7 labels on both releases. Swipe the bar, then try a fixed tap.
+        swipe(int(SCREEN[0] * 0.9), height - 80, int(SCREEN[0] * 0.1), height - 80)
+    # Last resort: both releases use the same seven-tab order.
+    index = {"Home": 0, "Tape": 1, "Search": 2, "Add coin": 2, "Add": 2, "Recap": 3, "Settings": 4, "Link": 5, "Pump": 6}
+    slot = next((index[name] for name in names if name in index), None)
+    if slot is None:
+        fail(f"tab not found: {names}")
+    x = int(SCREEN[0] * (slot + 0.5) / 7)
+    adb("shell", "input", "tap", str(x), str(height - 90))
+    time.sleep(0.6)
+    xml = dump()
+    if not any(find(xml, name) for name in names):
+        fail(f"tab not found: {names}")
+
+
+def wait_for(options: list[str], timeout: float = 25) -> tuple[str, tuple[int, int, int, int]] | None:
+    end = time.time() + timeout
+    while time.time() < end:
+        xml = dismiss_anr(dump())
+        for option in options:
+            bounds = find(xml, option)
+            if bounds and on_screen(bounds):
+                return option, bounds
+        time.sleep(0.7)
+    return None
+
+
+def scroll_to(options: list[str], swipes: int = 6) -> tuple[str, tuple[int, int, int, int]] | None:
+    for attempt in range(swipes):
+        xml = dismiss_anr(dump())
+        for option in options:
+            visible = [bounds for bounds in matches(xml, option) if on_screen(bounds)]
+            if visible:
+                return option, visible[0]
+            below = [bounds for bounds in matches(xml, option) if bounds[1] >= SCREEN[1] - 140]
+            if below:
+                swipe_up()
+                break
+        else:
+            if attempt % 2 == 0:
+                swipe_up()
+            else:
+                swipe_down()
+    return None
 
 
 def clear_and_type(text: str) -> None:
-    adb("shell", "input", "keycombination", "113", "29")  # CTRL+A
-    time.sleep(0.1)
-    for _ in range(8):
+    adb("shell", "input", "keycombination", "113", "29")
+    time.sleep(0.15)
+    for _ in range(40):
         adb("shell", "input", "keyevent", "KEYCODE_DEL")
     adb("shell", "cmd", "clipboard", "set-text", text)
-    time.sleep(0.3)
-    adb("shell", "input", "keycombination", "113", "50")  # CTRL+V
-    time.sleep(0.5)
+    time.sleep(0.2)
+    adb("shell", "input", "keycombination", "113", "50")
+    time.sleep(0.4)
 
 
 def connect() -> None:
-    adb("shell", "am", "start", "-n", ACTIVITY)
-    time.sleep(2)
-    for _ in range(8):
-        dismiss_overlay()
-        xml = dump()
-        if find(xml, "Night"):
-            break
-        adb("shell", "input", "keyevent", "KEYCODE_BACK")
-        time.sleep(0.3)
-        adb("shell", "am", "start", "-n", ACTIVITY)
-        time.sleep(1)
+    ensure_app()
+    hide_ime()
+    # Home before the desk is linked. This frame is the disconnected app, not the fixture.
+    open_tab(["Home"])
+    time.sleep(0.6)
+    shot("home-top-disconnected")
+    save_dump("home-top-disconnected")
+
     open_tab(["Link"])
-    found = wait_for(["Override URL"], 20)
+    found = wait_for(["Override URL", "Desk link"], 20)
     if not found:
-        raise SystemExit("link screen did not open")
-    time.sleep(2.2)  # the screen reloads the saved URL after the first frame
-    tap(found[1])
-    time.sleep(0.4)
+        fail("link screen did not open")
+    time.sleep(2.2)  # the screen replaces the field from storage after the first frame
+    hide_ime()
+    shot("link-before-type")
+    field = find(dump(), "Override URL")
+    if not field:
+        fail("override field missing")
+    tap(field)
+    time.sleep(0.3)
     clear_and_type(URL)
-    held = scroll_to(["Hold this URL instead of the beacon"])
+    hide_ime()
+    typed = dump()
+    if "10.0.2.2" not in typed:
+        field = find(typed, "Override URL") or field
+        tap(field)
+        time.sleep(0.2)
+        adb("shell", "input", "text", URL)
+        time.sleep(0.4)
+        hide_ime()
+    shot("link-typed")
+
+    held = scroll_to(["instead of the beacon", "Hold this URL"])
     if not held:
-        raise SystemExit("hold switch not found")
+        fail("hold switch not found")
     row = held[1]
-    # The switch is the right-hand control on a 1080-wide phone.
-    tap((900, row[1], 1040, row[3]))
-    time.sleep(0.5)
+    xml = dump()
+    switch = None
+    for node in nodes(xml):
+        if node.attrib.get("checkable") != "true":
+            continue
+        bounds = bounds_of(node)
+        if not bounds:
+            continue
+        same_row = abs(((bounds[1] + bounds[3]) / 2) - ((row[1] + row[3]) / 2)) < 90
+        if same_row:
+            switch = bounds
+            break
+    tap(switch or (max(row[2] - 20, SCREEN[0] - 180), row[1], SCREEN[0] - 24, row[3]))
+    time.sleep(0.4)
     saved = scroll_to(["Save and hold this URL"])
     if not saved:
-        # Toggle may have missed. Tap the row text itself, which is not the switch,
-        # then look again. Fall back to the beacon button only if the hold label never appears.
-        raise SystemExit("save-and-hold button not found")
+        fail("save-and-hold button not found")
     tap(saved[1])
     if not wait_for(["10.0.2.2"], 40):
-        raise SystemExit("desk URL was not held")
+        fail("desk URL was not held")
+    shot("link-held")
 
 
 def paper_fill_gate() -> None:
     open_tab(["Tape"])
-    found = scroll_to(["GATE"], swipes=8)
+    found = scroll_to(["GATE"], swipes=4)
     if not found:
-        # The first connect waits out the blocked beacon.
         found = wait_for(["GATE"], 70)
-        if found:
-            found = (found[0], found[1])
     if not found:
-        shot("tape-missing-gate")
-        raise SystemExit("GATE never appeared")
+        fail("GATE never appeared")
     buy = None
-    for _ in range(6):
+    for _ in range(5):
         xml = dump()
         candidates = []
         for node in nodes(xml):
-            blob = (node.attrib.get("text") or "") + (node.attrib.get("content-desc") or "")
-            if "LIVE" in blob or "Sell" in blob or "Buy" not in blob:
+            text = blob_of(node)
+            if "LIVE" in text or "Sell" in text:
                 continue
-            b = bounds_of(node)
-            if b and b[2] - b[0] > 40:
-                candidates.append(b)
+            if "⚡" not in text and "Buy $" not in text:
+                continue
+            bounds = bounds_of(node)
+            if bounds and on_screen(bounds) and bounds[2] - bounds[0] > 80:
+                candidates.append(bounds)
         if candidates:
             buy = candidates[0]
             break
         swipe_up()
     if not buy:
-        shot("tape-no-buy")
-        raise SystemExit("paper buy button missing")
+        fail("paper buy button missing")
     tap(buy)
-    if wait_for(["Dismiss", "paper"], 20):
-        xml = dump()
-        b = find(xml, "Dismiss")
-        if b:
-            tap(b)
+    if wait_for(["Dismiss"], 20):
+        button = find(dump(), "Dismiss")
+        if button:
+            tap(button)
 
 
 def capture() -> None:
-    # Top of Home: hero and header.
     open_tab(["Home"])
-    time.sleep(1)
+    time.sleep(0.8)
     for _ in range(3):
         swipe_down()
     shot("home-top")
     scroll_to(["Sell 25%", "Sell now"])
     shot("home-position")
-    scroll_to(["Take profit", "ORDERS", "Orders"])
+    scroll_to(["Take profit", "Orders"])
     shot("home-orders")
-    tp = scroll_to(["Take profit"])
-    if tp:
-        tap(tp[1])
-        time.sleep(0.6)
+    take_profit = scroll_to(["▲ Take profit", "Take profit"])
+    if take_profit:
+        tap(take_profit[1])
+        time.sleep(0.5)
         shot("dialog-take-profit")
         adb("shell", "input", "keyevent", "KEYCODE_BACK")
-        time.sleep(0.4)
-    stop = scroll_to(["▼ Stop", "Stop"])
+        time.sleep(0.3)
+    stop = scroll_to(["▼ Stop"])
     if stop:
         tap(stop[1])
-        time.sleep(0.6)
+        time.sleep(0.5)
         shot("dialog-stop")
         adb("shell", "input", "keyevent", "KEYCODE_BACK")
-        time.sleep(0.4)
+        time.sleep(0.3)
 
     open_tab(["Tape"])
-    time.sleep(0.8)
+    time.sleep(0.6)
     shot("tape")
 
-    open_tab(["Search", "Add coin", "Add"])
-    time.sleep(0.6)
+    open_tab(["Search", "Add coin"])
+    time.sleep(0.5)
     shot("search-empty")
-    field = wait_for(["Name, symbol, mint or link", "Ticker, name, mint or link"], 10)
-    if field:
+    field = wait_for(["Name, symbol, mint or link", "Ticker, name, mint or link"], 12)
+    if not field:
+        fail("search field missing")
+    tap(field[1])
+    time.sleep(0.3)
+    clear_and_type("SEEK")
+    hide_ime()
+    if "SEEK" not in dump():
         tap(field[1])
-        time.sleep(0.3)
-        clear_and_type("SEEK")
+        adb("shell", "input", "text", "SEEK")
         hide_ime()
-        look = scroll_to(["Look up"])
-        if look:
-            tap(look[1])
-            wait_for(["2HNb", "Seek Coin", "No Solana", "rate limited", "LOOKUP", "DexScreener"], 25)
-            time.sleep(0.8)
-            hide_ime()
+    look = scroll_to(["Look up"])
+    if not look:
+        fail("look up button missing")
+    tap(look[1])
+    wait_for(["2HNb", "Seek Coin", "No Solana", "rate limited", "LOOKUP", "DexScreener"], 25)
+    hide_ime()
+    time.sleep(0.6)
     shot("search-result")
     swipe_up()
     shot("search-result-lower")
 
     open_tab(["Recap"])
-    time.sleep(0.6)
+    time.sleep(0.5)
     shot("recap")
     open_tab(["Settings"])
-    time.sleep(0.6)
+    time.sleep(0.5)
     shot("settings")
     swipe_up()
     shot("settings-lower")
     open_tab(["Link"])
-    time.sleep(0.5)
+    time.sleep(0.4)
     shot("link")
     open_tab(["Pump"])
-    time.sleep(0.8)
+    time.sleep(0.6)
     shot("pump")
     scroll_to(["Bonding curve", "Mint", "Watch"])
     shot("pump-curve")
@@ -325,7 +418,7 @@ def stitch(raw: Path, dest: Path) -> None:
     from PIL import Image, ImageDraw, ImageFont
 
     dest.mkdir(parents=True, exist_ok=True)
-    names = sorted({p.name.split("-", 1)[1] for p in raw.glob("*.png") if "-" in p.name})
+    names = sorted({path.name.split("-", 1)[1] for path in raw.glob("*.png") if "-" in path.name})
     font = ImageFont.load_default()
     for name in names:
         left = raw / f"13.16-{name}"
@@ -333,36 +426,49 @@ def stitch(raw: Path, dest: Path) -> None:
         if not left.exists() or not right.exists():
             print(f"missing pair {name}", flush=True)
             continue
-        a = Image.open(left).convert("RGB")
-        b = Image.open(right).convert("RGB")
-        # Keep the phone pixels. Do not scale one build to hide a size difference.
-        height = max(a.height, b.height) + 64
-        canvas = Image.new("RGB", (a.width + b.width + 24, height), (12, 12, 12))
-        canvas.paste(a, (0, 64))
-        canvas.paste(b, (a.width + 24, 64))
+        first = Image.open(left).convert("RGB")
+        second = Image.open(right).convert("RGB")
+        if first.width < 200 or second.width < 200:
+            print(f"skip tiny capture {name}", flush=True)
+            continue
+        canvas = Image.new("RGB", (first.width + second.width + 24, max(first.height, second.height) + 72), (12, 12, 12))
+        canvas.paste(first, (0, 72))
+        canvas.paste(second, (first.width + 24, 72))
         draw = ImageDraw.Draw(canvas)
-        draw.text((16, 16), f"13.16  {name.replace('.png','')}  exact 80fe13b", fill=(255, 255, 255), font=font)
-        draw.text((a.width + 40, 16), f"13.17  {name.replace('.png','')}  exact ed4c200", fill=(255, 255, 255), font=font)
+        label = name.replace(".png", "").replace("-", " ")
+        draw.text((16, 12), f"13.16  {label}", fill=(255, 255, 255), font=font)
+        draw.text((16, 36), "exact APK 80fe13b", fill=(180, 180, 180), font=font)
+        draw.text((first.width + 40, 12), f"13.17  {label}", fill=(255, 255, 255), font=font)
+        draw.text((first.width + 40, 36), "exact APK ed4c200", fill=(180, 180, 180), font=font)
         out = dest / name
         canvas.save(out)
         print(f"pair {out}", flush=True)
 
 
 def main() -> None:
+    global SCREEN
     OUT.mkdir(parents=True, exist_ok=True)
-    ver = adb("shell", "dumpsys", "package", PKG)
-    name = "unknown"
-    code = "unknown"
-    for line in ver.splitlines():
+    SCREEN = read_screen()
+    print(f"screen {SCREEN[0]}x{SCREEN[1]}", flush=True)
+    version_name = "unknown"
+    version_code = "unknown"
+    for line in adb("shell", "dumpsys", "package", PKG).splitlines():
         if "versionName=" in line:
-            name = line.strip().split("versionName=")[-1]
+            version_name = line.strip().split("versionName=")[-1]
         if "versionCode=" in line:
-            code = line.strip().split("versionCode=")[-1].split()[0]
-    (OUT / f"{VERSION}-version.txt").write_text(f"{name} {code}\n", encoding="utf-8")
-    print(f"installed {name} {code}", flush=True)
-    connect()
-    paper_fill_gate()
-    capture()
+            version_code = line.strip().split("versionCode=")[-1].split()[0]
+    (OUT / f"{VERSION}-version.txt").write_text(f"{version_name} {version_code}\n", encoding="utf-8")
+    print(f"installed {version_name} {version_code}", flush=True)
+    if version_name != VERSION:
+        fail(f"installed {version_name} but expected {VERSION}")
+    try:
+        connect()
+        paper_fill_gate()
+        capture()
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        fail(f"capture crashed: {exc}")
     print("capture done", flush=True)
 
 
