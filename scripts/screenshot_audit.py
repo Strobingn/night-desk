@@ -145,7 +145,8 @@ def swipe(x1: int, y1: int, x2: int, y2: int) -> None:
 
 def swipe_up() -> None:
     width, height = SCREEN
-    swipe(width // 2, int(height * 0.72), width // 2, int(height * 0.38))
+    # Left of center. A swipe through the slippage slider does not move the page.
+    swipe(width // 3, int(height * 0.78), width // 3, int(height * 0.28))
 
 
 def swipe_down() -> None:
@@ -267,10 +268,7 @@ def scroll_to(options: list[str], swipes: int = 6) -> tuple[str, tuple[int, int,
                 swipe_up()
                 break
         else:
-            if attempt % 2 == 0:
-                swipe_up()
-            else:
-                swipe_down()
+            swipe_up()
     return None
 
 
@@ -380,6 +378,14 @@ def paper_fill_gate() -> None:
             break
         swipe_up()
     if not buy:
+        xml = dump()
+        paper_sell = any(
+            "Sell" in blob_of(node) and "LIVE" not in blob_of(node)
+            for node in nodes(xml)
+        )
+        if paper_sell:
+            shot("tape-already-held")
+            return
         shot("tape-no-buy")
         fail("paper buy button missing")
     tap(buy)
@@ -391,7 +397,7 @@ def paper_fill_gate() -> None:
         if button:
             tap(button)
     open_tab(["Home"])
-    if not scroll_to(["Sell 25%", "Sell now"], swipes=6):
+    if not scroll_to(["Sell 25%", "Sell now", "Take profit"], swipes=12):
         shot("home-no-position")
         fail("paper buy did not leave a held position")
 
