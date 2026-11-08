@@ -173,18 +173,26 @@ def dismiss_anr(xml: str) -> str:
     return dump()
 
 
+def dump_pkg(xml: str) -> str:
+    match = re.search(r'package="([^"]+)"', xml)
+    return match.group(1) if match else ""
+
+
 def ensure_app() -> None:
+    # The accessibility tree is the screen we are about to shoot. dumpsys focus can
+    # name a Google window while Night Desk is the window uiautomator actually dumped.
     for _ in range(8):
         xml = dismiss_anr(dump())
-        pkg = focus_pkg()
-        if PKG in pkg and (find(xml, "Night") or find(xml, "Home")):
+        if dump_pkg(xml) == PKG and (find(xml, "Night") or find(xml, "Home")):
             return
-        if pkg and PKG not in pkg:
+        other = dump_pkg(xml)
+        if other and other != PKG:
             adb("shell", "input", "keyevent", "KEYCODE_BACK")
             time.sleep(0.4)
         adb("shell", "am", "start", "-n", ACTIVITY)
         time.sleep(1.2)
-    fail(f"Night Desk was not in front. Focus was {focus_pkg() or 'unknown'}")
+    xml = dump()
+    fail(f"Night Desk was not in front. Shown package was {dump_pkg(xml) or 'unknown'}")
 
 
 def open_tab(names: list[str]) -> None:
