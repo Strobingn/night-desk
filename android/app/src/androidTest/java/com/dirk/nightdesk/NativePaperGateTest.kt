@@ -37,6 +37,7 @@ class NativePaperGateTest {
     fun paperButtonsFillPaperThenLiveTimesOutWithoutASecondSend() {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         dismissBlockers(device)
+        waitForDesk(device)
         openTab("Link")
         waitFor("Override URL")
         // The screen loads the saved link after the first frame and would wipe a URL typed too early.
@@ -103,8 +104,27 @@ class NativePaperGateTest {
                 continue
             }
             if (pkg == "com.dirk.nightdesk") return
+            device.pressBack()
             device.wait(Until.hasObject(By.pkg("com.dirk.nightdesk")), 1_000)
         }
+    }
+
+    /** The battery prompt can cover the desk. Come back and wait until Compose has drawn. */
+    private fun waitForDesk(device: UiDevice) {
+        val deadline = System.currentTimeMillis() + 40_000
+        while (System.currentTimeMillis() < deadline) {
+            val drawn = runCatching {
+                rule.onAllNodesWithText("Night", substring = true).fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
+            if (drawn) return
+            val pkg = device.currentPackageName ?: ""
+            if (pkg != "com.dirk.nightdesk") {
+                device.pressBack()
+                device.executeShellCommand("am start -n com.dirk.nightdesk/.MainActivity")
+            }
+            Thread.sleep(700)
+        }
+        error("Night Desk never drew. Last package ${device.currentPackageName}")
     }
 
     private fun openTab(label: String) {
