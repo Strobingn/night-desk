@@ -14,7 +14,12 @@ import { inspectDeskWallet, type WalletBalances } from "../src/market/wallet-sta
 import { testConfig } from "./helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
+const pumpLive = vi.hoisted(() => ({ executePumpLiveSwap: vi.fn() }));
 vi.mock("../src/market/live-broker.js", () => ({ executeLiveSwap: liveBroker.executeLiveSwap }));
+vi.mock("../src/market/pump-live.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/market/pump-live.js")>("../src/market/pump-live.js");
+  return { ...actual, executePumpLiveSwap: pumpLive.executePumpLiveSwap };
+});
 
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 function base58Encode(bytes: Uint8Array): string {
@@ -42,7 +47,7 @@ function base58Encode(bytes: Uint8Array): string {
 
 const rich = async (): Promise<WalletBalances> => ({ sol: 0.5, usdc: 100, at: Date.now(), error: null });
 
-function liveDesk(balances: () => Promise<WalletBalances> = rich, dbDir?: string): Desk {
+function liveDesk(balances: () => Promise<WalletBalances> = rich, dbDir?: string, lookupFetch?: typeof fetch): Desk {
   const key = Keypair.generate();
   const secret = base58Encode(key.secretKey);
   const cfg = testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret });
@@ -52,7 +57,7 @@ function liveDesk(balances: () => Promise<WalletBalances> = rich, dbDir?: string
     cfg.logPath = path.join(dbDir, "desk.log");
     cfg.resetPaper = false;
   }
-  return new Desk(cfg, { walletBalances: balances });
+  return new Desk(cfg, { walletBalances: balances, lookupFetch });
 }
 
 function liveFill(sizeUsd: number, price = 1.01) {
@@ -60,6 +65,7 @@ function liveFill(sizeUsd: number, price = 1.01) {
 }
 
 beforeEach(() => {
+  pumpLive.executePumpLiveSwap.mockReset();
   liveBroker.executeLiveSwap.mockReset();
   liveBroker.executeLiveSwap.mockImplementation(async (req: { side: string; sizeUsd?: number; qty?: number }) =>
     req.side === "buy" ? liveFill(req.sizeUsd ?? 0) : { signature: "sig-sell", fillPriceUsd: 1, qty: req.qty ?? 0, notionalUsd: req.qty ?? 0, feeUsd: 0.01, slippage: 0.01 }
@@ -451,6 +457,39 @@ describe("v13.5 .env wallet keys and the $100 live cap", () => {
       await desk.submitCandidate(makeToken({ mint: m, symbol: "HUN", priceUsd: 1, liquidityUsd: 900_000 }));
       expect(await desk.manualBuy(m, 1223)).toMatchObject({ ok: true, sizeUsd: 100 });
       expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ sizeUsd: 100 });
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("routes a pump.fun curve buy and sell through the pump SDK at the $5 live size", async () => {
+    const solMint = "So11111111111111111111111111111111111111112";
+    const lookup = async () => new Response(JSON.stringify({ [solMint]: { usdPrice: 150 } }), { status: 200 });
+    pumpLive.executePumpLiveSwap.mockImplementation(async (req: { side: string; sizeUsd?: number; qty?: number; markPriceUsd?: number }) => ({
+      signature: req.side === "buy" ? "sig-pump-buy" : "sig-pump-sell",
+      fillPriceUsd: 1,
+      qty: req.side === "buy" ? 5 : req.qty ?? 0,
+      notionalUsd: req.side === "buy" ? 5 : 4.9,
+      feeUsd: 0.02,
+      slippage: 0.01
+    }));
+    const desk = liveDesk(rich, undefined, lookup);
+    try {
+      desk.updateSettings({ autoBuy: false, liveDailyCapUsd: 20 });
+      const m = "PumpCurve111111111111111111111111111111111";
+      await desk.submitCandidate(makeToken({ mint: m, symbol: "PCURVE", priceUsd: 1, liquidityUsd: 180_000, dex: "pump.fun curve", priceFeed: "chain" }));
+      const bought = await desk.manualBuy(m, 80);
+      expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 5 });
+      expect(pumpLive.executePumpLiveSwap).toHaveBeenCalledTimes(1);
+      expect(pumpLive.executePumpLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint: m, sizeUsd: 5, solPriceUsd: 150 });
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+      expect(desk.liveBook!.positions.get(m)?.dex).toBe("pump.fun curve");
+      expect(desk.book.positions.has(m)).toBe(false);
+      const sold = await desk.closePosition(m, 1, "live");
+      expect(sold.ok).toBe(true);
+      expect(pumpLive.executePumpLiveSwap).toHaveBeenCalledTimes(2);
+      expect(pumpLive.executePumpLiveSwap.mock.calls[1]?.[0]).toMatchObject({ side: "sell", mint: m });
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
     } finally {
       desk.stop();
     }

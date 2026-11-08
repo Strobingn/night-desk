@@ -121,7 +121,7 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
             <>
               <WalletCard snap={snap} />
               <p className="fine">
-                AI auto-buys stay on the paper book. The server refuses a request to send them live, including a saved “AI buys live” flag. Your live buys, sells, limits and stops are separate and default to $5. These limits are not a tested profit system. The paper sizing below does not spend the wallet, and the paper ledger is left as it is.
+                AI auto-buys stay on the paper book. The server refuses a request to send them live. Your live buys, sells, limits and stops are separate. Live size stays $5 and the saved live daily cap is kept. Paper position size and the paper cap are a different book: a saved cap (including 29.5%) and a blank paper dollar size are not rewritten. These limits are not a tested profit system. Turning live on does not place a trade, and the paper cash ledger is left as it is.
               </p>
             </>
           ) : null}

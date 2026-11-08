@@ -32,6 +32,8 @@ import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
 import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
+import { usesPumpRoute } from "../market/pump-live.js";
+import type { LiveSwapResult } from "../market/live-broker.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { PumpCore } from "../pump/index.js";
 import { DeskStore } from "../store/db.js";
@@ -286,6 +288,8 @@ export class Desk {
    * book (`this.book`) always keeps running the AI; live holds real-money positions only.
    */
   liveBook: PaperBook | null = null;
+  /** Live orders ignore prices taken before this process armed. */
+  private liveEnabledAt = 0;
   private liveStartingUsd = 0;
   private liveStartedAt = Date.now();
   /** v13.7 false (default): only Dirk's manual buys go live; the AI keeps buying on paper. */
@@ -425,6 +429,7 @@ export class Desk {
     this.config.startingBalanceUsd = starting;
     this.book = new PaperBook(restored?.cashUsd ?? starting);
     if (live) {
+      this.liveEnabledAt = Date.now();
       const liveSaved = this.store.loadBook("book:live");
       this.liveBook = new PaperBook(liveSaved?.cashUsd ?? 0);
       this.liveStartingUsd = liveSaved?.startingBalanceUsd ?? 0;
@@ -1074,6 +1079,14 @@ export class Desk {
       if (o.note?.startsWith("waiting:")) {
         delete o.note;
         changed = true;
+      }
+      if (o.book === "live" && mark.at < this.liveEnabledAt) {
+        const note = "rechecked: waiting for a price taken after live was enabled";
+        if (o.note !== note) {
+          o.note = note;
+          changed = true;
+        }
+        continue;
       }
       if (crosses(o, mark.price)) {
         // Not tracked with the pipeline jobs: the sell path drains those, and would wait on itself.
@@ -1821,7 +1834,11 @@ export class Desk {
         : this.walletStatus.keyInvalid
           ? "WALLET_PRIVATE_KEY in Austin's .env is not a valid Solana private key (base58 from Phantom, or a JSON byte array)."
           : "No wallet key on the Austin desk host. Paste the wallet's private key into WALLET_PRIVATE_KEY= in C:\\Users\\Austin\\ndesk2\\.env on that machine. Never into the phone or a chat.",
-      rpcPresent ? "RPC is set on the desk host. The URL is not shown here." : "SOLANA_RPC_URL is missing on the desk host.",
+      rpcPresent ? "RPC is set on the desk host (SOLANA_RPC_URL or DESK_WALLET_RPC_URL). The URL is not shown here." : "SOLANA_RPC_URL is missing on the desk host.",
+      `Live trade size $${this.liveTradeUsd}. Live daily cap ${this.liveDailyCapUsd == null ? "off (liveDailyCapUsd)" : `$${this.liveDailyCapUsd} (liveDailyCapUsd)`}.`,
+      "AI auto-buys stay on the paper book. liveAutoBuy cannot be turned on. Enabling live does not place a trade.",
+      "A pump.fun curve or PumpSwap coin uses @pump-fun/pump-sdk on that RPC. It does not call frontend-api-v3.pump.fun or PumpPortal trade-local. Other coins use JUPITER_QUOTE_URL and JUPITER_SWAP_URL.",
+      "Open live orders are rechecked when the process arms and do not fire on a price from before that.",
       mode === "live"
         ? `Live swaps are on. Austin restarted with LIVE_TRADING=true and a wallet key. ${this.liveScopeLine()}`
         : "Still paper. Real money starts only after Austin sets LIVE_TRADING=true (with WALLET_PRIVATE_KEY filled) in .env, then restarts the desk.",
@@ -2126,7 +2143,7 @@ export class Desk {
       // v13.5: every live buy uses the live size. A larger request (e.g. the phone's
       // paper one-tap amount) is cut to it. Never the paper position size.
       requestedUsd = requestedUsd != null && requestedUsd > 0 ? Math.min(requestedUsd, this.liveTradeUsd) : this.liveTradeUsd;
-      const ready = await this.liveBuyReady(requestedUsd);
+      const ready = await this.liveBuyReady(requestedUsd, usesPumpRoute(token));
       if (!ready.ok) {
         this.pipeline.executorSkips += 1;
         this.bus.emit("executor.skip", { token, reason: { code: ready.code, message: ready.error }, score });
@@ -2274,19 +2291,14 @@ export class Desk {
     try {
       if (isLive) {
         try {
-          const { executeLiveSwap } = await import("../market/live-broker.js");
-          const live = await executeLiveSwap({
+          const live = await this.runLiveSwap({
             side: "buy",
             mint: token.mint,
             sizeUsd: sized.sizeUsd,
             decimals: token.decimals,
-            keypairPath: this.config.walletKeypairPath,
-            readEnvSecret: this.config.readWalletSecret,
-            rpcUrl: this.config.walletRpcUrl,
-            quoteUrl: this.config.jupiterQuoteUrl,
-            swapUrl: this.config.jupiterSwapUrl,
             markPriceUsd: token.priceUsd,
-            maxEntrySlippage: this.config.rules.maxEntrySlippage
+            dex: token.dex,
+            priceFeed: token.priceFeed
           });
           this.noteLiveSpend(sized.sizeUsd);
           void this.refreshWallet();
@@ -2489,19 +2501,15 @@ export class Desk {
     if (!pos) return;
     try {
       if (kind === "live") {
-        const { executeLiveSwap } = await import("../market/live-broker.js");
-        const live = await executeLiveSwap({
+        const live = await this.runLiveSwap({
           side: "sell",
           mint: order.mint,
           qty: pos.qty,
           decimals: pos.decimals,
-          keypairPath: this.config.walletKeypairPath,
-          readEnvSecret: this.config.readWalletSecret,
-          rpcUrl: this.config.walletRpcUrl,
-          quoteUrl: this.config.jupiterQuoteUrl,
-          swapUrl: this.config.jupiterSwapUrl,
-          maxEntrySlippage: this.config.rules.maxEntrySlippage,
-          maxExitSlippage: this.maxExitSlippage ?? undefined
+          markPriceUsd: order.markPrice,
+          dex: pos.dex,
+          priceFeed: pos.priceFeed,
+          exit: true
         });
         void this.refreshWallet();
         this.applySell(pos, {
@@ -3605,10 +3613,11 @@ export class Desk {
   }
 
   /**
-   * v13.5 fail-closed live pre-checks: a fresh wallet read, enough USDC for the trade and SOL for
-   * fees, and the optional live daily cap. Any unknown refuses the buy.
+   * Fail-closed live pre-checks. Jupiter buys need USDC plus fee SOL.
+   * A pump.fun curve or PumpSwap buy spends SOL, so it checks SOL against the $ size.
+   * The live daily cap still counts dollars. An unknown balance refuses the buy.
    */
-  private async liveBuyReady(sizeUsd: number): Promise<{ ok: true } | { ok: false; error: string; code: "LIVE_WALLET" | "LIVE_DAILY_CAP" | "LIVE_NOT_ARMED" }> {
+  private async liveBuyReady(sizeUsd: number, pump = false): Promise<{ ok: true } | { ok: false; error: string; code: "LIVE_WALLET" | "LIVE_DAILY_CAP" | "LIVE_NOT_ARMED" }> {
     if (this.liveDailyCapUsd != null) {
       const spent = this.liveSpentTodayUsd();
       if (spent + sizeUsd > this.liveDailyCapUsd + 1e-9) {
@@ -3620,16 +3629,75 @@ export class Desk {
       }
     }
     const read = await this.refreshWallet();
-    if (!read || read.error != null || read.sol == null || read.usdc == null) {
+    if (!read || read.error != null || read.sol == null || (!pump && read.usdc == null)) {
       return { ok: false, error: `Wallet balance unknown${read?.error ? ` (${read.error})` : ""}. Live buy refused.`, code: "LIVE_WALLET" };
+    }
+    if (pump) {
+      const solPx = await this.solUsd();
+      if (!solPx) return { ok: false, error: "No fresh SOL/USD price. Live pump buy refused. Nothing was sent.", code: "LIVE_WALLET" };
+      const need = sizeUsd / solPx + MIN_FEE_SOL;
+      if (read.sol < need) {
+        return { ok: false, error: `Wallet has ${read.sol.toFixed(4)} SOL. This pump buy needs about ${need.toFixed(4)} SOL (${money(sizeUsd)} plus fees).`, code: "LIVE_WALLET" };
+      }
+      return { ok: true };
     }
     if (read.sol < MIN_FEE_SOL) {
       return { ok: false, error: `Wallet has ${read.sol.toFixed(4)} SOL. Keep at least ${MIN_FEE_SOL} SOL for fees.`, code: "LIVE_WALLET" };
     }
-    if (read.usdc < sizeUsd) {
-      return { ok: false, error: `Wallet has ${money(read.usdc)} USDC. A live buy spends ${money(sizeUsd)} USDC.`, code: "LIVE_WALLET" };
+    if ((read.usdc ?? 0) < sizeUsd) {
+      return { ok: false, error: `Wallet has ${money(read.usdc ?? 0)} USDC. A live buy spends ${money(sizeUsd)} USDC.`, code: "LIVE_WALLET" };
     }
     return { ok: true };
+  }
+
+  /** Jupiter for listed coins. The official pump SDK for a pump.fun curve or PumpSwap coin. */
+  private async runLiveSwap(input: {
+    side: "buy" | "sell";
+    mint: string;
+    sizeUsd?: number;
+    qty?: number;
+    decimals?: number | null;
+    markPriceUsd?: number;
+    dex?: string;
+    priceFeed?: string;
+    exit?: boolean;
+  }): Promise<LiveSwapResult> {
+    const slip = input.exit ? (this.maxExitSlippage ?? this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack) : this.config.rules.maxEntrySlippage;
+    if (usesPumpRoute(input)) {
+      const sol = await this.solUsd();
+      if (!sol) throw new Error("LIVE_SWAP_FAILED: no fresh SOL/USD price. Nothing was sent.");
+      if (!this.config.walletRpcUrl?.trim()) throw new Error("LIVE_SWAP_FAILED: SOLANA_RPC_URL is missing. Nothing was sent.");
+      const { executePumpLiveSwap } = await import("../market/pump-live.js");
+      return executePumpLiveSwap({
+        side: input.side,
+        mint: input.mint,
+        sizeUsd: input.sizeUsd,
+        qty: input.qty,
+        decimals: input.decimals,
+        solPriceUsd: sol,
+        markPriceUsd: input.markPriceUsd,
+        slippageFraction: slip,
+        keypairPath: this.config.walletKeypairPath,
+        readEnvSecret: this.config.readWalletSecret,
+        rpcUrl: this.config.walletRpcUrl
+      });
+    }
+    const { executeLiveSwap } = await import("../market/live-broker.js");
+    return executeLiveSwap({
+      side: input.side,
+      mint: input.mint,
+      sizeUsd: input.sizeUsd,
+      qty: input.qty,
+      decimals: input.decimals,
+      keypairPath: this.config.walletKeypairPath,
+      readEnvSecret: this.config.readWalletSecret,
+      rpcUrl: this.config.walletRpcUrl,
+      quoteUrl: this.config.jupiterQuoteUrl,
+      swapUrl: this.config.jupiterSwapUrl,
+      markPriceUsd: input.markPriceUsd,
+      maxEntrySlippage: this.config.rules.maxEntrySlippage,
+      maxExitSlippage: input.exit ? slip : undefined
+    });
   }
 
   /** v13.5 wallet card. Public address and balances only. */
