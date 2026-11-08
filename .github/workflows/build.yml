@@ -83,7 +83,14 @@ jobs:
 
       - name: Build Debug APK
         working-directory: ./android
-        run: ./gradlew assembleDebug --stacktrace
+        run: |
+          # Maven and GitHub release redirects have returned 504s mid-download. Retry the same build.
+          for attempt in 1 2 3; do
+            ./gradlew assembleDebug --stacktrace && exit 0
+            echo "assembleDebug attempt ${attempt} failed"
+            if [ "$attempt" = "3" ]; then exit 1; fi
+            sleep 20
+          done
 
       - name: Rename APK Artifact
         id: apk_pkg
