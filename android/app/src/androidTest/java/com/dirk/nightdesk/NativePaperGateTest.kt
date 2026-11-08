@@ -2,6 +2,7 @@ package com.dirk.nightdesk
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
@@ -185,7 +186,7 @@ class NativePaperGateTest {
                 rule.waitForIdle()
                 return
             }
-            rule.onRoot().performTouchInput {
+            appRoot().performTouchInput {
                 swipe(Offset(right - 8f, bottom - 8f), Offset(8f, bottom - 8f), durationMillis = 200)
             }
             rule.waitForIdle()
@@ -225,7 +226,7 @@ class NativePaperGateTest {
                 return
             }
             runCatching {
-                rule.onRoot().performTouchInput {
+                appRoot().performTouchInput {
                     swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 150)
                 }
             }
@@ -244,6 +245,7 @@ class NativePaperGateTest {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < timeoutMs) {
+            dismissAnr()
             // Real-time wait so the desk can answer, then a Compose check. Some notices are in
             // the semantics tree and not in the accessibility text UiAutomator searches.
             if (device.wait(Until.hasObject(By.textContains(text)), 1_000)) return
@@ -252,7 +254,7 @@ class NativePaperGateTest {
             }.getOrDefault(false)
             if (seen) return
         }
-        val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 12) }.getOrElse { it.message ?: "" }
+        val tree = runCatching { appRoot().printToString(maxDepth = 12) }.getOrElse { it.message ?: "" }
         throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(2500)}")
     }
 
@@ -265,11 +267,21 @@ class NativePaperGateTest {
         Thread.sleep(400)
     }
 
+    /** The activity root. A confirm dialog is a second Compose root and must not be used for scrolling. */
+    private fun appRoot(): SemanticsNodeInteraction {
+        val roots = rule.onAllNodes(isRoot())
+        val found = roots.fetchSemanticsNodes()
+        val index = found.indices.maxByOrNull { found[it].boundsInRoot.width * found[it].boundsInRoot.height } ?: 0
+        return roots[index]
+    }
+
     private fun dismissAnr() {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
-        if (device.findObject(By.textContains("isn't responding")) == null) return
-        device.findObject(By.text("Wait"))?.click()
-        Thread.sleep(400)
+        repeat(3) {
+            if (device.findObject(By.textContains("isn't responding")) == null) return
+            device.findObject(By.text("Wait"))?.click()
+            Thread.sleep(400)
+        }
     }
 
     private fun scrollClickable(matcher: SemanticsMatcher) {
@@ -284,9 +296,8 @@ class NativePaperGateTest {
                 val bounds = runCatching { nodes[0].fetchSemanticsNode().boundsInRoot }.getOrNull()
                 if (bounds != null && bounds.height > 1f && bounds.top >= 0f && bounds.bottom <= device.displayHeight - 40) return
             }
-            val roots = rule.onAllNodes(isRoot())
-            if (roots.fetchSemanticsNodes().size == 1) {
-                roots[0].performTouchInput {
+            runCatching {
+                appRoot().performTouchInput {
                     swipe(Offset(centerX, bottom * 0.7f), Offset(centerX, bottom * 0.35f), durationMillis = 180)
                 }
             }
@@ -304,16 +315,16 @@ class NativePaperGateTest {
                 val index = found.indices.maxBy { found[it].boundsInRoot.top }
                 runCatching { nodes[index].performScrollTo() }
                 val bounds = nodes.fetchSemanticsNodes().getOrNull(index)?.boundsInRoot ?: found[index].boundsInRoot
-                val root = rule.onRoot().fetchSemanticsNode().boundsInRoot
+                val root = appRoot().fetchSemanticsNode().boundsInRoot
                 val onScreen = bounds.top >= root.top && bounds.bottom <= root.bottom - 120f && bounds.height > 1f
                 if (onScreen) return
                 val downward = bounds.top > root.bottom - 120f
-                rule.onRoot().performTouchInput {
+                appRoot().performTouchInput {
                     if (downward) swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 180)
                     else swipe(Offset(centerX, bottom * 0.32f), Offset(centerX, bottom * 0.72f), durationMillis = 180)
                 }
             } else {
-                rule.onRoot().performTouchInput {
+                appRoot().performTouchInput {
                     swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 180)
                 }
             }
@@ -346,6 +357,7 @@ class NativePaperGateTest {
     }
 
     private fun shot(name: String) {
+        dismissAnr()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val file = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir, "$name.png")
         check(device.takeScreenshot(file)) { "screenshot $name failed" }

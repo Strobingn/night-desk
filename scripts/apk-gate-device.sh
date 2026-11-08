@@ -25,6 +25,10 @@ adb shell pm grant com.dirk.nightdesk android.permission.POST_NOTIFICATIONS || t
 adb shell settings put global window_animation_scale 0
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
+# Pixel Launcher "isn't responding" is an emulator overlay. Hide those dialogs
+# so they cannot cover Night Desk. The test still has to click the real controls.
+adb shell settings put global hide_error_dialogs 1 || true
+adb shell settings put secure anr_show_background 0 || true
 mkdir -p "${GITHUB_WORKSPACE:-.}/gate-logs"
 set +e
 adb shell am instrument -w -r com.dirk.nightdesk.test/androidx.test.runner.AndroidJUnitRunner | tee "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"
