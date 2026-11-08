@@ -145,7 +145,7 @@ export function TapBuyButton({ mint, symbol, actions, sizeUsd, className = "prim
       aria-label={`One-tap ${liveAction ? "LIVE " : ""}buy ${symbol} for ${usd(size)}`}
       onClick={(event) => {
         event.stopPropagation();
-        if (liveAction) void actions.liveTapBuy(mint, symbol);
+        if (liveAction && actions.liveTapBuy) void actions.liveTapBuy(mint, symbol);
         else void actions.oneTapBuy(mint, symbol, sizeUsd);
       }}
     >

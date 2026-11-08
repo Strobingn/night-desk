@@ -183,4 +183,75 @@ describe("paper button vs live strip", () => {
       desk.stop();
     }
   });
+
+  it("paper buy, paper sell, and /api/state stay fast while a live swap is still hanging", async () => {
+    const desk = armedDesk();
+    desk.setOperatorReady(true);
+    const other = "PaperSlow11111111111111111111111111111111";
+    const fill = { signature: "sig-hang", fillPriceUsd: 1, qty: 5, notionalUsd: 5, feeUsd: 0.01, slippage: 0 };
+    let release: (value: typeof fill) => void = () => undefined;
+    const hung = new Promise<typeof fill>((resolve) => {
+      release = resolve;
+    });
+    liveBroker.executeLiveSwap.mockImplementation(() => hung);
+    const server = startServer(desk, "127.0.0.1", 0);
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      await desk.submitCandidate(makeToken({ mint: MINT, symbol: "MI", priceUsd: 1, liquidityUsd: 180_000 }));
+      await desk.submitCandidate(makeToken({ mint: other, symbol: "PAP", priceUsd: 1, liquidityUsd: 180_000 }));
+      const liveBody = { mint: MINT, sizeUsd: 5, book: "live", idemKey: "live-hang", oneTap: true };
+      const live = fetch(`${base}/api/positions/buy`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(liveBody) });
+      await vi.waitFor(() => expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1));
+
+      const t0 = performance.now();
+      const bought = await fetch(`${base}/api/positions/buy`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...paperButton, mint: other, idemKey: "paper-while-live" })
+      });
+      const boughtBody = (await bought.json()) as { ok: boolean; mode?: string };
+      const buyMs = performance.now() - t0;
+      expect(boughtBody).toMatchObject({ ok: true, mode: "paper" });
+      expect(buyMs).toBeLessThan(500);
+      expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
+
+      const s0 = performance.now();
+      const state = await fetch(`${base}/api/state`);
+      expect(state.status).toBe(200);
+      expect(performance.now() - s0).toBeLessThan(200);
+
+      const tick0 = performance.now();
+      desk.bus.emit("market.tick", { mint: other, priceUsd: 1.01, liquidityUsd: 180_000, at: Date.now(), feed: "test" });
+      expect(performance.now() - tick0).toBeLessThan(50);
+
+      const sold = await fetch(`${base}/api/positions/sell`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mint: other, percent: 100, book: "paper" })
+      });
+      expect(((await sold.json()) as { ok: boolean }).ok).toBe(true);
+      expect(desk.book.positions.has(other)).toBe(false);
+      expect(desk.liveBook!.positions.size).toBe(0);
+      expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
+
+      const again = fetch(`${base}/api/positions/buy`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(liveBody)
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
+      release(fill);
+      const first = (await (await live).json()) as { ok: boolean; mode?: string };
+      const second = (await (await again).json()) as { ok: boolean; mode?: string; replayed?: boolean };
+      expect(first).toMatchObject({ ok: true, mode: "live" });
+      expect(second).toMatchObject({ ok: true, mode: "live", replayed: true });
+    } finally {
+      release(fill);
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      desk.stop();
+    }
+  });
 });
