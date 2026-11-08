@@ -33,7 +33,7 @@ class NativePaperGateTest {
     @get:Rule
     val rule = createAndroidComposeRule<MainActivity>()
 
-    @Test(timeout = 240_000)
+    @Test(timeout = 360_000)
     fun paperButtonsFillPaperThenLiveTimesOutWithoutASecondSend() {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         dismissBlockers(device)
@@ -53,7 +53,8 @@ class NativePaperGateTest {
         waitFor("10.0.2.2:8791", 40_000)
 
         openTab("Tape")
-        scrollUntil("GATE")
+        // The first connect waits out the blocked beacon before the local snapshot arrives.
+        scrollUntil("GATE", 60_000)
         tapContains("⚡ Buy")
         waitFor("· paper")
         dismissNotice()
@@ -155,7 +156,7 @@ class NativePaperGateTest {
         rule.waitForIdle()
     }
 
-    private fun scrollUntil(text: String) {
+    private fun scrollUntil(text: String, timeoutMs: Long = 20_000) {
         val matcher = hasText(text, substring = true)
         repeat(8) {
             if (rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()) {
@@ -168,7 +169,7 @@ class NativePaperGateTest {
             }
             rule.waitForIdle()
         }
-        waitFor(text)
+        waitFor(text, timeoutMs)
     }
 
     private fun waitFor(text: String, timeoutMs: Long = 20_000) {
