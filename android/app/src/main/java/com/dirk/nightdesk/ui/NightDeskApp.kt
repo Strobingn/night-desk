@@ -101,6 +101,7 @@ import com.dirk.nightdesk.CrashLog
 import com.dirk.nightdesk.DeskRepository
 import com.dirk.nightdesk.formatUsd
 import com.dirk.nightdesk.DeskSnapshot
+import com.dirk.nightdesk.LiveBookInfo
 import com.dirk.nightdesk.LiveReadiness
 import com.dirk.nightdesk.MintCooldown
 import com.dirk.nightdesk.PositionRow
