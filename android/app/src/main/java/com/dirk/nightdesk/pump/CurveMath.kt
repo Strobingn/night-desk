@@ -65,7 +65,9 @@ object CurveMath {
         return reserves.virtualQuoteReserves.add(added).multiply(reserves.tokenTotalSupply).divide(endToken)
     }
 
-    fun progressPct(reserves: Reserves): Double {
+    fun progressPct(reserves: Reserves): Double? {
+        if (reserves.virtualTokenReserves.signum() <= 0) return null
+        if (reserves.realTokenReserves > reserves.virtualTokenReserves) return null
         if (reserves.complete || reserves.realTokenReserves.signum() <= 0) return 100.0
         val canonical = canonical()
         val offset = reserves.virtualTokenReserves.subtract(reserves.realTokenReserves)
@@ -74,10 +76,11 @@ object CurveMath {
             val sold = canonical.realTokenReserves.subtract(reserves.realTokenReserves)
             return sold.multiply(BigInteger.valueOf(10_000)).divide(canonical.realTokenReserves).toDouble() / 100.0
         }
-        val left = solRemaining(reserves)
         val inn = reserves.realQuoteReserves
+        if (inn < BigInteger.valueOf(10_000_000L)) return null
+        val left = solRemaining(reserves)
         val denom = inn.add(left)
-        if (denom.signum() <= 0) return 0.0
+        if (denom.signum() <= 0) return null
         return inn.multiply(BigInteger.valueOf(10_000)).divide(denom).toDouble() / 100.0
     }
 

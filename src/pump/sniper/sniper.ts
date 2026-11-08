@@ -129,10 +129,11 @@ export class GraduationSniper {
     return this.list();
   }
 
-  onCurve(state: { mint: string; progressPct: number; complete: boolean }): void {
+  onCurve(state: { mint: string; progressPct: number | null; complete: boolean }): void {
     const job = this.jobs.get(state.mint);
     if (!job) return;
-    this.apply(job, { type: "curve", progressPct: state.progressPct, complete: state.complete });
+    if (state.progressPct == null && !state.complete) return;
+    this.apply(job, { type: "curve", progressPct: state.progressPct ?? 100, complete: state.complete });
   }
 
   onTrade(event: { mint: string; solAmountLamports: string; timestamp: number }): void {

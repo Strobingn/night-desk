@@ -171,11 +171,9 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
         AppearanceGroup()
         Group("Live wallet") {
             WalletCard(snap)
-            ToggleRow("AI buys live too", draft.liveAutoBuy) { draft = draft.copy(liveAutoBuy = it) }
             Text(
-                if (draft.liveAutoBuy) "Live: manual + AI. The desk's auto-buys also send real swaps."
-                else "Live: manual only · AI: paper. Only your one-tap, Add coin and Advisor buys are real; the AI keeps trading the paper book.",
-                color = if (draft.liveAutoBuy) P.down else P.ink,
+                "AI auto-buys stay on the paper book. The server refuses a request to send them live. Your live buys, sells, limits and stops default to \$5. These limits are not a tested profit system.",
+                color = P.ink,
                 fontSize = 12.5.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -317,8 +315,7 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "positionRefreshMs" to Math.round(draft.refresh.toDouble() * 1_000.0),
     "liveTradeUsd" to draft.liveUsd.toDouble(),
     "liveDailyCapUsd" to if (draft.useLiveCap) draft.liveCap.toDouble() else null,
-    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0,
-    "liveAutoBuy" to draft.liveAutoBuy
+    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0
 )
 
 /** v13 group icons and one-line descriptions, same as the web. */

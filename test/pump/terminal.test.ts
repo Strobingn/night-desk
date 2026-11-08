@@ -59,7 +59,7 @@ describe("bonding curve terminal", () => {
   it("pre-fills a target mcap within 0.5% of the server reverse quote", () => {
     const curve = curveState("canonical", CANONICAL_SOL_CURVE);
     const start = BigInt(curve.marketCapLamports);
-    for (const target of [start + 1n, start * 2n, BigInt(curve.graduationMarketCapLamports)]) {
+    for (const target of [start + 1n, start * 2n, BigInt(curve.graduationMarketCapLamports!)]) {
       const client = prefillForTarget(curve, target);
       const server = solToReachMarketCap(CANONICAL_SOL_CURVE, target);
       expect(client.reachable).toBe(server.reachable);

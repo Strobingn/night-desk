@@ -1,3 +1,4 @@
+import { PUMP_API_CHALLENGE } from "../market/http-class.js";
 import type { BucketStats, SourceId } from "../market/net.js";
 import type { FeedSourceState, FeedSourceStatus } from "../types.js";
 
@@ -22,6 +23,8 @@ interface Health {
   failingSince: number | null;
   lastError?: string;
   unavailable?: string;
+  /** Cloudflare challenge, or the Pump HTTP list we refuse to call. Not a key or plan failure. */
+  challenge?: string;
   sightings: number[];
 }
 
@@ -47,6 +50,7 @@ export class FeedHealth {
     h.failingSince = null;
     h.lastError = undefined;
     h.unavailable = undefined;
+    h.challenge = undefined;
   }
 
   fail(id: SourceId, message: string, now = Date.now()): void {
@@ -55,11 +59,22 @@ export class FeedHealth {
     h.lastError = message;
   }
 
-  /** The endpoint is gone (HTTP 410). Shown as down in Scout status, never as a banner. */
+  /** The endpoint is gone (HTTP 410) or a key/plan/forbidden response. Shown as down, never as a banner. */
   unavailable(id: SourceId, message: string): void {
     const h = this.get(id);
     h.unavailable = message;
     h.lastError = message;
+    h.challenge = undefined;
+    h.failingSince = null;
+  }
+
+  /** A challenge or a host this process will not call. Distinct from a rejected key. */
+  blocked(id: SourceId, message: string): void {
+    const h = this.get(id);
+    h.challenge = message;
+    h.lastError = message;
+    h.unavailable = undefined;
+    h.failingSince = null;
   }
 
   isUnavailable(id: SourceId): boolean {
@@ -87,6 +102,12 @@ export class FeedHealth {
     if (!opts.enabled) {
       state = "off";
       detail = opts.idleReason;
+    } else if (id === "pumpapi") {
+      state = "blocked";
+      detail = PUMP_API_CHALLENGE;
+    } else if (h.challenge) {
+      state = "blocked";
+      detail = h.challenge;
     } else if (h.unavailable) {
       state = "down";
       detail = h.unavailable;

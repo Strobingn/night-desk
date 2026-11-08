@@ -19,12 +19,13 @@ export function slipText(fraction: number | null | undefined): string {
 export function scoutSummary(sources: readonly Source[]): { text: string; badge: string | null; tone: "ok" | "warn" | "down" } {
   const live = sources.filter((s) => s.state === "live").length;
   const down = sources.filter((s) => s.state === "down").length;
+  const blocked = sources.filter((s) => s.state === "blocked").length;
   const slow = sources.filter((s) => s.state === "backoff" || s.state === "stale").length;
   const perMin = sources.reduce((n, s) => n + s.sightingsPerMin, 0);
   return {
     text: `${live}/${sources.length} live · ${perMin}/min`,
-    badge: down > 0 ? `${down} down` : slow > 0 ? `${slow} slow` : null,
-    tone: down > 0 ? "down" : slow > 0 ? "warn" : "ok"
+    badge: down > 0 ? `${down} down` : blocked > 0 ? `${blocked} blocked` : slow > 0 ? `${slow} slow` : null,
+    tone: down > 0 ? "down" : blocked > 0 || slow > 0 ? "warn" : "ok"
   };
 }
 

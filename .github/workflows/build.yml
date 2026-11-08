@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - gemini
+      - main
   pull_request:
     branches:
       - gemini
+      - main
   workflow_dispatch:
 
 permissions:
@@ -43,7 +45,8 @@ jobs:
         id: server_pkg
         run: |
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          BUNDLE="night-desk-app-${GITHUB_REF_NAME}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.tar.gz"
+          SAFE_REF=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          BUNDLE="night-desk-app-${SAFE_REF}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.tar.gz"
           tar -czf "$BUNDLE" \
             dist/ web/dist/ scripts/ deploy/ \
             package.json package-lock.json ecosystem.config.cjs Dockerfile docker-compose.yml .env.example
@@ -86,8 +89,9 @@ jobs:
         id: apk_pkg
         run: |
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          SAFE_REF=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
           RAW_APK=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          APK_NAME="night-desk-${GITHUB_REF_NAME}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.apk"
+          APK_NAME="night-desk-${SAFE_REF}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.apk"
           cp "$RAW_APK" "./${APK_NAME}"
           echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
 

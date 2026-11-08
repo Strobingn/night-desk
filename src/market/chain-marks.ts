@@ -18,6 +18,7 @@
  * confirmation forward. Marks never move the stop, the peak, or a fill on their own.
  */
 import { PublicKey, type AccountInfo } from "@solana/web3.js";
+import { BONDING_CURVE_DISC } from "../pump/curve.js";
 import { PUMP_AMM_SDK } from "../pump/sdk.js";
 import { SourceGate } from "./source-gate.js";
 import { pumpReserveAddresses } from "./exclusions.js";
@@ -140,7 +141,8 @@ export function decodePool(p: PoolInfo, datas: Array<Uint8Array | null>): number
   switch (p.kind) {
     case "curve": {
       const parsed = d0 ? parseCurve(d0, p.decimals) : null;
-      if (!parsed || parsed.complete) return "gone";
+      if (!parsed || !parsed.traded) return Number.NaN;
+      if (parsed.complete) return "gone";
       return parsed.native;
     }
     case "pumpswap": {
@@ -207,13 +209,69 @@ interface RpcAccount {
   data: [string, string];
 }
 
-/** Pump curve: 8 disc, vTok u64 @8, vSol u64 @16, realTok @24, realSol @32, supply @40, complete @48. */
-export function parseCurve(data: Uint8Array, decimals: number): { native: number; complete: boolean; realSol: number } | null {
-  if (data.length < 49) return null;
+/**
+ * BondingCurve (pump IDL): 8 disc, virtual_token u64 @8, virtual_quote u64 @16,
+ * real_token @24, real_quote @32, supply @40, complete @48, creator @49,
+ * is_mayhem @81, is_cashback @82, quote_mint @83, initial_virtual_quote_reserves @142.
+ * Quote atoms are lamports only for the default pubkey or WSOL. A non-SOL quote is not a SOL price.
+ * `traded` is true when real quote is at least 0.01 SOL, or when virtual quote has moved
+ * at least 0.01 SOL from the stored initial (Mayhem leaves real quote at 1 lamport).
+ */
+export function parseCurve(data: Uint8Array, decimals: number): { native: number; complete: boolean; realSol: number; traded: boolean } | null {
+  if (!curveDiscOk(data) || data.length < 49) return null;
+  if (curveQuoteKind(data) === "other") return null;
   const vTok = u64(data, 8);
   const vSol = u64(data, 16);
   if (!(vTok > 0) || !(vSol > 0)) return null;
-  return { native: vSol / 1e9 / (vTok / 10 ** decimals), complete: data[48] === 1, realSol: u64(data, 32) / 1e9 };
+  return {
+    native: vSol / 1e9 / (vTok / 10 ** decimals),
+    complete: data[48] === 1,
+    realSol: u64(data, 32) / 1e9,
+    traded: curveQuoteMoved(data)
+  };
+}
+
+function u64bi(data: Uint8Array, offset: number): bigint {
+  if (data.length < offset + 8) return 0n;
+  return new DataView(data.buffer, data.byteOffset + offset, 8).getBigUint64(0, true);
+}
+
+function curveDiscOk(data: Uint8Array): boolean {
+  if (data.length < 8) return false;
+  let nonzero = false;
+  for (let i = 0; i < 8; i += 1) if (data[i] !== 0) nonzero = true;
+  if (!nonzero) return true;
+  for (let i = 0; i < 8; i += 1) if (data[i] !== BONDING_CURVE_DISC[i]) return false;
+  return true;
+}
+
+function curveQuoteKind(data: Uint8Array): "sol" | "other" | "short" {
+  if (data.length < 115) return "short";
+  const mint = base58(data.subarray(83, 115));
+  if (mint === "11111111111111111111111111111111" || mint === WSOL_MINT) return "sol";
+  return "other";
+}
+
+function curveQuoteMoved(data: Uint8Array): boolean {
+  const realQuote = u64bi(data, 32);
+  if (realQuote >= 10_000_000n) return true;
+  if (data.length < 150) return false;
+  const initial = u64bi(data, 142);
+  const virtualQuote = u64bi(data, 16);
+  if (initial <= 0n) return false;
+  const delta = virtualQuote > initial ? virtualQuote - initial : initial - virtualQuote;
+  return delta >= 10_000_000n;
+}
+
+/** Why a curve cannot be a SOL mark. Null means `parseCurve` is usable. */
+export function curveMarkReason(data: Uint8Array, decimals: number): string | null {
+  if (!curveDiscOk(data)) return "bonding curve account did not match the pump IDL";
+  if (curveQuoteKind(data) === "other") return "quote mint is not SOL, so the curve is not a SOL price";
+  const parsed = parseCurve(data, decimals);
+  if (!parsed || !(parsed.native > 0) || !Number.isFinite(parsed.native)) return "the bonding curve is empty";
+  if (parsed.complete) return "the bonding curve is complete (the coin migrated to a pool)";
+  if (!parsed.traded) return "no SOL has traded on its bonding curve, so the curve price is not real";
+  return null;
 }
 
 /**
@@ -645,17 +703,14 @@ export class ChainMarkReader {
         return;
       }
       const data = Buffer.from(acc.data[0], "base64");
+      const reason = curveMarkReason(data, decimals);
+      if (reason) {
+        missing.set(mint, reason);
+        return;
+      }
       const parsed = parseCurve(data, decimals);
-      if (!parsed || !(parsed.native > 0) || !Number.isFinite(parsed.native)) {
+      if (!parsed) {
         missing.set(mint, "the bonding curve is empty");
-        return;
-      }
-      if (parsed.complete) {
-        missing.set(mint, "the bonding curve is complete (the coin migrated to a pool)");
-        return;
-      }
-      if (!(parsed.realSol >= CURVE_MIN_REAL_SOL)) {
-        missing.set(mint, "no SOL has traded on its bonding curve, so the curve price is not real");
         return;
       }
       quotes.set(mint, { mint, curve, native: parsed.native, virtualSol: u64(data, 16) / 1e9, complete: false, decimals });

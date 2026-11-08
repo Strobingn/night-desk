@@ -64,8 +64,8 @@ class V137Test {
         assertTrue(repo.contains("if (live) body.put(\"book\", \"live\")"))
         assertTrue(repo.contains("\"sell:live:\$mint\""))
         val settings = File("src/main/java/com/dirk/nightdesk/ui/SettingsScreen.kt").readText()
-        assertTrue(settings.contains("\"liveAutoBuy\" to draft.liveAutoBuy"))
-        assertTrue(settings.contains("AI buys live too"))
+        assertFalse(settings.contains("\"liveAutoBuy\" to draft.liveAutoBuy"))
+        assertTrue(settings.contains("AI auto-buys stay on the paper book"))
         // existing live controls kept
         assertTrue(settings.contains("Live \$ per trade"))
         assertTrue(settings.contains("Live daily cap"))

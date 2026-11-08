@@ -3,6 +3,7 @@
  * on the scout socket. No second socket, and no PumpPortal local-transaction API.
  */
 import { PublicKey } from "@solana/web3.js";
+import { WSOL_MINT } from "./curve.js";
 import { PUMP_SDK, pumpIdl } from "./sdk.js";
 import type { TradeEvent } from "./types.js";
 
@@ -21,10 +22,17 @@ function quoteMintOf(value: { toBase58?: () => string } | string | undefined | n
   return text === PublicKey.default.toBase58() ? null : text;
 }
 
+/** Default pubkey and WSOL are SOL. Any other mint is a different quote unit. */
+export function isSolQuoteMint(mint: string | null | undefined): boolean {
+  return mint == null || mint === "" || mint === PublicKey.default.toBase58() || mint === WSOL_MINT;
+}
+
 /** `Program data:` base64, or the raw event bytes (with the 8-byte discriminator). */
 export function decodeTradeEventLog(data: Buffer, meta: { signature?: string; slot?: number } = {}): TradeEvent | null {
   if (data.length < 8 || !data.subarray(0, 8).equals(TRADE_DISC)) return null;
   const event = PUMP_SDK.decodeTradeEventBc(data.subarray(8));
+  const quoteMint = quoteMintOf(event.quoteMint);
+  if (!isSolQuoteMint(quoteMint)) return null;
   const sol = event.quoteAmount && !event.quoteAmount.isZero() ? event.quoteAmount : event.solAmount;
   const virtualQuote = event.virtualQuoteReserves && !event.virtualQuoteReserves.isZero() ? event.virtualQuoteReserves : event.virtualSolReserves;
   const realQuote = event.realQuoteReserves && !event.realQuoteReserves.isZero() ? event.realQuoteReserves : event.realSolReserves;
@@ -96,23 +104,11 @@ function tokenRaw(value: number | string | undefined): string {
   return BigInt(Math.round(n * 1_000_000)).toString();
 }
 
-/** PumpPortal `buy` / `sell` / `create` / `migrate` frame. Returns null for acks and other methods. */
-export function decodePumpPortalFrame(raw: string, now = Date.now()): { kind: "trade"; event: TradeEvent } | { kind: "coin"; mint: string; name?: string; symbol?: string; creator?: string; txType: string } | null {
-  let msg: PortalFrame;
-  try {
-    msg = JSON.parse(raw) as PortalFrame;
-  } catch {
-    return null;
-  }
-  if (!msg.mint || !msg.txType) return null;
-  if (msg.txType === "create" || msg.txType === "migrate") {
-    return { kind: "coin", mint: msg.mint, name: msg.name, symbol: msg.symbol, creator: msg.traderPublicKey, txType: msg.txType };
-  }
-  if (msg.txType !== "buy" && msg.txType !== "sell") return null;
-  const event: TradeEvent = {
-    mint: msg.mint,
+function portalTrade(msg: PortalFrame, now: number, isBuy: boolean): TradeEvent {
+  return {
+    mint: msg.mint!,
     signature: msg.signature,
-    isBuy: msg.txType === "buy",
+    isBuy,
     user: msg.traderPublicKey ?? PublicKey.default.toBase58(),
     solAmountLamports: solToLamports(msg.solAmount),
     tokenAmount: tokenRaw(msg.tokenAmount),
@@ -126,8 +122,36 @@ export function decodePumpPortalFrame(raw: string, now = Date.now()): { kind: "t
     quoteMint: null,
     source: "pumpportal"
   };
-  return { kind: "trade", event };
 }
+
+/**
+ * PumpPortal `buy` / `sell` / `create` / `migrate` frame. Returns null for acks and other methods.
+ * A create frame that already carries a buy amount is one real print. Later trades are not on this socket.
+ */
+export function decodePumpPortalFrame(
+  raw: string,
+  now = Date.now()
+): { kind: "trade"; event: TradeEvent } | { kind: "coin"; mint: string; name?: string; symbol?: string; creator?: string; txType: string; trade?: TradeEvent } | null {
+  let msg: PortalFrame;
+  try {
+    msg = JSON.parse(raw) as PortalFrame;
+  } catch {
+    return null;
+  }
+  if (!msg.mint || !msg.txType) return null;
+  if (msg.txType === "create" || msg.txType === "migrate") {
+    const trade = portalTrade(msg, now, true);
+    const creation =
+      msg.txType === "create" && trade.solAmountLamports !== "0" && trade.tokenAmount !== "0" ? trade : undefined;
+    return { kind: "coin", mint: msg.mint, name: msg.name, symbol: msg.symbol, creator: msg.traderPublicKey, txType: msg.txType, trade: creation };
+  }
+  if (msg.txType !== "buy" && msg.txType !== "sell") return null;
+  return { kind: "trade", event: portalTrade(msg, now, msg.txType === "buy") };
+}
+
+/** Why `/api/pump/trades` can be empty while the curve is moving. */
+export const TAPE_PROVIDER_LIMIT =
+  "Free PumpPortal delivers subscribeNewToken and subscribeMigration only. subscribeTokenTrade is metered and is not enabled. Curve account updates are not trades. Prints are not invented. A create frame that already includes a buy is the only extra row this socket can add.";
 
 export function tradeId(event: TradeEvent): string {
   return event.signature ?? `${event.mint}:${event.timestamp}:${event.user}:${event.solAmountLamports}:${event.isBuy ? "b" : "s"}`;

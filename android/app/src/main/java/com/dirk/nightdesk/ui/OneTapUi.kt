@@ -53,7 +53,7 @@ class OneTapUi(
     val liveTrailPct: Double = 0.01,
     /** v13.6 the sentence naming which cap limits the size. */
     val capLine: String? = null,
-    /** v13.7 armed desk with a separate live book (AI on paper unless liveAutoBuy). */
+    /** Armed desk with a separate live book. AI auto-buys stay on paper. */
     val split: Boolean = false,
     val aiLive: Boolean = false,
     val onSellLive: (mint: String, symbol: String) -> Unit = { _, _ -> },
@@ -208,7 +208,7 @@ private fun sliderColors() = SliderDefaults.colors(
 private fun fmt(n: Double): String = if (n == kotlin.math.floor(n)) "%.0f".format(Locale.US, n) else "%.1f".format(Locale.US, n)
 private fun fmtUsd(n: Double): String = "$" + "%.2f".format(Locale.US, n)
 
-private val LivePink = Color(0xFFFF2E7E)
+internal val LivePink = Color(0xFFFF2E7E)
 private val LiveGreen = Color(0xFF00E676)
 private val LiveGreenInk = Color(0xFF00210C)
 

@@ -118,6 +118,17 @@ fun LimitBuyTicket(actions: OrderActions, mint: String, symbol: String, mark: Do
     OrderTicketCard(actions, mint, symbol, sides = listOf("limit_buy"), fixedLive = null, mark = mark, entry = null, stopPrice = null, onClose = onClose)
 }
 
+/** A live-only limit, or a live stop / take profit when that coin is already held live. */
+@Composable
+fun LiveOrderTicket(actions: OrderActions, mint: String, symbol: String, held: Boolean, mark: Double?, entry: Double?, stopPrice: Double?, onClose: () -> Unit) {
+    OrderTicketCard(
+        actions, mint, symbol,
+        sides = if (held) listOf("stop_sell", "take_profit") else listOf("limit_buy"),
+        fixedLive = true,
+        mark = mark, entry = entry, stopPrice = stopPrice, onClose = onClose
+    )
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun OrderChips(actions: OrderActions, rows: List<DeskOrder>) {

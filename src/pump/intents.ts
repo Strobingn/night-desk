@@ -26,7 +26,7 @@ import {
   type SwapSolanaState
 } from "./sdk.js";
 import { isTokenProgram, PUMP_FEE_PROGRAM, PUMP_PROGRAM, PUMP_SWAP_PROGRAM, SWAP_FEE_CONFIG, tokenProgramId } from "./constants.js";
-import { buyTokens, quoteCurve, sellProceeds, type CurveReserves } from "./curve.js";
+import { buyTokens, quoteCurve, quoteIsSolMint, sellProceeds, type CurveReserves } from "./curve.js";
 import { readCurveFees, readPoolFees } from "./fees.js";
 import { decodePoolAccount, effectiveQuote, poolStateFromParts } from "./pumpswap.js";
 import type { PumpConnection } from "./rpc.js";
@@ -230,6 +230,9 @@ async function buildCurve(
     slip: bigint;
   }
 ): Promise<BuiltIntent> {
+  if (!quoteIsSolMint(args.loaded.reserves.quoteMint)) {
+    throw new IntentError(422, "QUOTE_MINT", "This curve is not quoted in SOL. No SOL buy or sell was built.");
+  }
   const globalRaw = await connection.getAccountInfo(GLOBAL_PDA.toBase58());
   if (!globalRaw) throw new IntentError(422, "GLOBAL_MISSING", "Pump Global account was not found, so the fee recipient is unknown.");
   const global = PUMP_SDK.decodeGlobal(accountInfo(globalRaw.data, globalRaw.owner || PUMP_PROGRAM.toBase58()));
@@ -307,6 +310,9 @@ async function buildPool(
 ): Promise<BuiltIntent> {
   const loaded = await loadPool(connection, args.mint);
   if (!loaded) throw new IntentError(422, "MARKET_MISSING", "No PumpSwap pool for that mint.");
+  if (!quoteIsSolMint(loaded.pool.quoteMint?.toBase58?.() ?? null)) {
+    throw new IntentError(422, "QUOTE_MINT", "This PumpSwap pool is not quoted in SOL. No SOL buy or sell was built.");
+  }
   const globalRaw = await connection.getAccountInfo(GLOBAL_CONFIG_PDA.toBase58());
   if (!globalRaw) throw new IntentError(422, "GLOBAL_MISSING", "PumpSwap global config was not found.");
   const globalConfig = PUMP_AMM_SDK.decodeGlobalConfig(accountInfo(globalRaw.data, globalRaw.owner));
