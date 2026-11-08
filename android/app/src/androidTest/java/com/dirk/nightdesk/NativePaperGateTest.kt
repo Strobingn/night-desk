@@ -1,8 +1,11 @@
 package com.dirk.nightdesk
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -40,6 +43,7 @@ class NativePaperGateTest {
         rule.waitForIdle()
         Thread.sleep(2_000)
         rule.onAllNodes(hasSetText())[0].performTextReplacement("http://10.0.2.2:8791")
+        rule.waitForIdle()
         scrollUntil("Hold this URL instead of the beacon")
         rule.onNode(isToggleable()).performClick()
         rule.waitForIdle()
@@ -104,14 +108,16 @@ class NativePaperGateTest {
     }
 
     private fun openTab(label: String) {
-        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val matcher = hasText(label)
         repeat(5) {
-            if (rule.onAllNodes(hasText(label)).fetchSemanticsNodes().isNotEmpty()) {
-                rule.onNode(hasText(label)).performTouchInput { click() }
+            if (rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()) {
+                rule.onNode(matcher).performTouchInput { click() }
                 rule.waitForIdle()
                 return
             }
-            device.swipe(device.displayWidth - 40, device.displayHeight - 40, 40, device.displayHeight - 40, 12)
+            rule.onRoot().performTouchInput {
+                swipe(Offset(right - 8f, bottom - 8f), Offset(8f, bottom - 8f), durationMillis = 200)
+            }
             rule.waitForIdle()
         }
         error("Tab $label is not on screen")
@@ -130,10 +136,16 @@ class NativePaperGateTest {
     }
 
     private fun scrollUntil(text: String) {
-        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val matcher = hasText(text, substring = true)
         repeat(8) {
-            if (rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()) return
-            device.swipe(device.displayWidth / 2, (device.displayHeight * 0.7).toInt(), device.displayWidth / 2, (device.displayHeight * 0.35).toInt(), 16)
+            if (rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()) {
+                runCatching { rule.onNode(matcher).performScrollTo() }
+                rule.waitForIdle()
+                return
+            }
+            rule.onRoot().performTouchInput {
+                swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 200)
+            }
             rule.waitForIdle()
         }
         waitFor(text)
