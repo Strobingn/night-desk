@@ -128,6 +128,40 @@ describe("v13.2 source pacing and backoff", () => {
     expect(urls.filter((u) => u.includes("api.jup.ag")).length).toBe(jupCalls + 1);
   });
 
+  it("publishes the Dex mark while a pool read is still waiting on the RPC queue", async () => {
+    let now = 0;
+    let release: () => void = () => {};
+    const queued = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ticks: number[] = [];
+    const fetchImpl = (async (url: string) => {
+      if (url.startsWith("http://rpc")) {
+        await queued;
+        return Response.json({ jsonrpc: "2.0", result: { value: [null, null] } });
+      }
+      if (url.includes("dexscreener")) {
+        return Response.json([{ baseToken: { address: MINT }, priceUsd: "1.25", liquidity: { usd: 30_000 }, pairAddress: POOL, dexId: "pumpswap" }]);
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const pricer = new PositionPricer({
+      heldMints: () => [MINT],
+      pairFor: () => POOL,
+      tick: (_mint, price) => ticks.push(price),
+      onStale: () => {},
+      fetchImpl,
+      now: () => now,
+      chain: new ChainMarkReader("http://rpc", fetchImpl, 10_000)
+    });
+    await pricer.cycle(false);
+    expect(ticks).toEqual([1.25]);
+    now = 4_000;
+    await pricer.cycle(false);
+    expect(ticks).toEqual([1.25, 1.25]);
+    release();
+  });
+
   it("runs a 1.5 s cycle but asks DexScreener at most every 3 s and Jupiter every 5 s", async () => {
     let now = 0;
     const urls: string[] = [];

@@ -144,7 +144,7 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
 }
 
 @Composable
-fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
+fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<String, Any?>) -> Unit) {
     var draft by remember { mutableStateOf(draftOf(snap)) }
     var saved by remember { mutableStateOf(draftOf(snap)) }
     val incoming = draftOf(snap)
@@ -169,6 +169,16 @@ fun SettingsScreen(snap: DeskSnapshot?, onSave: (Map<String, Any?>) -> Unit) {
             )
         }
         AppearanceGroup()
+        if (oneTap != null) {
+            Group("One tap") {
+                Text(
+                    "Size and slippage for the Buy and Sell buttons on Home, Tape and Add coin. Sell all stays here.",
+                    color = Dim,
+                    fontSize = 12.sp
+                )
+                OneTapBar(oneTap)
+            }
+        }
         Group("Live wallet") {
             WalletCard(snap)
             Text(

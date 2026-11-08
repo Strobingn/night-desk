@@ -503,7 +503,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
-                4 -> SettingsScreen(snap) { patch -> scope.launch { desk.saveSettings(patch) } }
+                4 -> SettingsScreen(snap, oneTap) { patch -> scope.launch { desk.saveSettings(patch) } }
                 6 -> PumpScreen()
                 else -> LinkScreen(desk)
             }
@@ -661,7 +661,6 @@ private fun BookScreen(
                 if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
             )
         }
-        if (oneTap != null) item { OneTapBar(oneTap) }
         if (snap == null || snap.positions.isEmpty()) {
             item {
                 Text(
