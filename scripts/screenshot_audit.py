@@ -102,12 +102,17 @@ def find(xml: str, text: str) -> tuple[int, int, int, int] | None:
 
 
 def shot(name: str) -> None:
-    """Raw framebuffer. Never presses Back or restarts the app."""
+    """Raw framebuffer via adb pull. Do not rewrite PNG bytes; a previous pass
+    turned the real signature into a broken file and the stitch uploaded nothing usable.
+    """
     OUT.mkdir(parents=True, exist_ok=True)
+    remote = "/sdcard/ndshot.png"
+    adb("shell", "screencap", "-p", remote, timeout=20)
     path = OUT / f"{VERSION}-{name}.png"
-    data = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=20).stdout
-    data = data.replace(b"\r\n", b"\n")
-    path.write_bytes(data)
+    proc = subprocess.run(["adb", "pull", remote, str(path)], capture_output=True, timeout=20)
+    data = path.read_bytes() if path.exists() else b""
+    if proc.returncode != 0 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise SystemExit(f"screencap failed for {name}: {(proc.stderr or proc.stdout).decode()[:200]} head={data[:8]!r}")
     print(f"shot {path} {len(data)}", flush=True)
 
 
@@ -410,7 +415,7 @@ def capture() -> None:
     open_tab(["Pump"])
     time.sleep(0.6)
     shot("pump")
-    scroll_to(["Bonding curve", "Mint", "Watch"])
+    scroll_to(["No key on this phone", "Wallet not connected", "Bonding curve"])
     shot("pump-curve")
 
 

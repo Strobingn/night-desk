@@ -40,6 +40,21 @@ capture_one 13.17 "$APK17"
 code17=$?
 set -e
 python3 scripts/screenshot_audit.py --stitch shot-out/raw shot-out/pairs
+python3 - << 'PY'
+from pathlib import Path
+from PIL import Image
+bad = []
+for path in sorted(Path("shot-out").rglob("*.png")):
+    try:
+        image = Image.open(path)
+        image.load()
+    except Exception as exc:
+        bad.append(f"{path}: {exc}")
+if bad:
+    print("\n".join(bad))
+    raise SystemExit(f"{len(bad)} screenshots are not readable PNGs")
+print(f"readable pngs {len(list(Path('shot-out').rglob('*.png')))}")
+PY
 find shot-out -type f -printf '%p %s\n' | sort
 test "$code16" = 0
 test "$code17" = 0
