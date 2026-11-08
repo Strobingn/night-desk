@@ -18,7 +18,7 @@ import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, typ
 export const TABS = [
   { id: "home", label: "Home", icon: "home" },
   { id: "tape", label: "Tape", icon: "tape" },
-  { id: "add", label: "Add coin", icon: "add" },
+  { id: "add", label: "Search", icon: "add" },
   { id: "recap", label: "Recap", icon: "recap" },
   { id: "settings", label: "Settings", icon: "settings" },
   { id: "pump", label: "Pump", icon: "radar" }

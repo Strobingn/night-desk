@@ -92,7 +92,7 @@ fun TerminalScreen() {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var targetSol by remember { mutableStateOf("") }
     var solField by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf("Simulate-only until this process is armed. The wallet signs. Night Desk does not broadcast or retry.") }
+    var note by remember { mutableStateOf("Paste the mint and tap Watch to read the curve. Simulate-only until this process is armed. An armed buy is signed by the desk host wallet. Night Desk does not broadcast or retry.") }
     var live by remember { mutableStateOf(false) }
     var armed by remember { mutableStateOf(false) }
     var cap by remember { mutableStateOf("5000000") }
@@ -179,7 +179,12 @@ fun TerminalScreen() {
         if (shown != null && shown.quoteIsSol && shown.solInCurveLamports == null && shown.realQuoteReserves != BigInteger.ZERO) {
             Text("Real quote is ${shown.realQuoteReserves} raw and is not SOL deposited.", color = P.dim, fontSize = 12.sp)
         }
-        Text(if (wallet.isBlank()) "Wallet not connected" else "Wallet ${wallet.take(4)}…${wallet.takeLast(4)}", color = P.dim, fontSize = 12.sp)
+        Text(
+            if (wallet.isBlank()) "No key on this phone. That is expected. Watch only reads the curve. An armed buy is signed by the desk host wallet."
+            else "Phone key ${wallet.take(4)}…${wallet.takeLast(4)}. Curve buys are still signed by the desk host, not this phone.",
+            color = P.dim,
+            fontSize = 12.sp
+        )
         Canvas(Modifier.fillMaxWidth().height(120.dp)) {
             if (points.size < 2) return@Canvas
             val vals = points.map { it.toDouble() }

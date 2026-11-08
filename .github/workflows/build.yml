@@ -98,6 +98,23 @@ jobs:
             sleep 20
           done
 
+      - name: Rename APK Artifact
+        id: apk_pkg
+        run: |
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          SAFE_REF=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          RAW_APK=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          APK_NAME="night-desk-${SAFE_REF}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.apk"
+          cp "$RAW_APK" "./${APK_NAME}"
+          echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk_pkg.outputs.apk_name }}
+          path: ./${{ steps.apk_pkg.outputs.apk_name }}
+          retention-days: 30
+
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
@@ -156,23 +173,6 @@ jobs:
           path: gate-logs/
           retention-days: 14
           if-no-files-found: warn
-
-      - name: Rename APK Artifact
-        id: apk_pkg
-        run: |
-          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          SAFE_REF=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
-          RAW_APK=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          APK_NAME="night-desk-${SAFE_REF}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.apk"
-          cp "$RAW_APK" "./${APK_NAME}"
-          echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Upload Android APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.apk_pkg.outputs.apk_name }}
-          path: ./${{ steps.apk_pkg.outputs.apk_name }}
-          retention-days: 30
 
       - name: Create GitHub Release on Code Push (gemini branch)
         if: github.ref == 'refs/heads/gemini' && github.event_name == 'push'

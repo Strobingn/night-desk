@@ -79,7 +79,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
     <div className="add-screen">
       <section className="card add-card">
         <header>
-          <h3>Add coin</h3>
+          <h3>Search</h3>
           <span>paper only</span>
         </header>
         <form
@@ -102,7 +102,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
             {looking ? "Looking" : "Look up"}
           </button>
         </form>
-        <p className="fine">Ticker, name, mint or link all work. A ticker ($ optional, any case) checks your positions and trades first, then the Tape, then DexScreener search (Solana only). Links: DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan. A DexScreener pair resolves to its token.</p>
+        <p className="fine">Search by name, symbol or mint. The coin does not have to be on Home or the Tape. A symbol checks open positions first, then DexScreener (Solana only). Paste a mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link to add it.</p>
         {error ? <div className="banner">{error}</div> : null}
         {candidates ? (
           <div className="pick-list" role="list" aria-label={`Coins matching ${candidates.query}`}>
@@ -139,6 +139,8 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
               <p className="sub">
                 {result.name} · <span className="chip tag">{result.tag}</span>
                 {result.matchedBy ? <> · <span className="chip">{result.matchedBy}</span></> : null}
+                {" · "}
+                <span className="mono">{result.mint}</span>
                 {result.held ? <> · <span className="chip held-badge">HELD</span></> : null}
                 {result.dex ? ` · ${result.dex}` : ""}
               </p>
@@ -147,6 +149,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
               DexScreener
             </a>
           </header>
+          {result.providerNote ? <p className="fine">{result.providerNote}</p> : null}
           <dl>
             <div>
               <dt>Price</dt>

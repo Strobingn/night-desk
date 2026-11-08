@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -39,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -54,8 +57,8 @@ import java.util.Locale
 private val CHIPS = listOf(10.0, 25.0, 50.0, 100.0, 250.0)
 
 /** v13.6 field label and help: tickers and names work too. */
-const val ADD_COIN_LABEL = "Ticker, name, mint or link"
-const val ADD_COIN_HELP = "Ticker (e.g. QTFALCN, \$ optional), name, mint or link all work. A ticker checks your positions and trades first, then the Tape, then DexScreener search. Links: DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan. Share a link into Night Desk to land here."
+const val ADD_COIN_LABEL = "Name, symbol, mint or link"
+const val ADD_COIN_HELP = "Search by name, symbol or mint. The coin does not have to be on Home or the Tape. A symbol checks open positions first, then DexScreener search. Paste a mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link to add it. Share a link into Night Desk to land here."
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -65,6 +68,8 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
     val tapping by desk.tapping.collectAsState()
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     var input by remember { mutableStateOf(preview?.first ?: prefill?.first.orEmpty()) }
     var looking by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf(preview?.second) }
@@ -73,6 +78,9 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
     var askBuy by remember { mutableStateOf(false) }
 
     fun lookup(q: String) {
+        // The result and the paper button sit below this field. Leave the keyboard up and they stay covered.
+        focus.clearFocus(force = true)
+        keyboard?.hide()
         if (q.isBlank()) {
             result = CoinLookup(ok = false, error = "Type a ticker (e.g. QTFALCN) or name, or paste a Solana mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link.")
             return
@@ -103,14 +111,25 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("ADD COIN", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
-            Text(ADD_COIN_HELP, color = Dim, fontSize = 12.sp)
+            Text("SEARCH", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 1.4.sp)
+            Text(
+                if (result?.ok == true) "Paper asks before it fills. Live stays on the separate live buttons."
+                else ADD_COIN_HELP,
+                color = Dim,
+                fontSize = 12.sp
+            )
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it.trimStart() },
                 singleLine = true,
                 label = { Text(ADD_COIN_LABEL) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrect = false, capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Ascii,
+                    autoCorrectEnabled = false,
+                    capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { lookup(input) }),
                 modifier = Modifier.fillMaxWidth(),
                 colors = addFieldColors()
             )
@@ -157,6 +176,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
             }
         } else if (found != null && !found.ok) {
             Text(found.error ?: "Lookup failed. No buy without a reliable price.", color = Coral, fontSize = 14.sp)
+            found.providerNote?.let { Text(it, color = Amber, fontSize = 12.sp) }
         }
         if (found != null && found.ok) {
             Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -164,25 +184,36 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     Column(Modifier.weight(1f)) {
                         Text(found.symbol, style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
                         Text(found.name, color = Dim, fontSize = 12.sp)
+                        Text(found.mint, color = Ink, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         Text(found.tag.uppercase() + (if (found.held) " · HELD" else ""), color = Amber, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         found.matchedBy?.let { Text("Matched " + it, color = Dim, fontSize = 11.sp) }
+                        found.providerNote?.let { Text(it, color = Amber, fontSize = 12.sp) }
                     }
                     TextButton(onClick = {
                         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(found.dexscreenerUrl))) }
                     }) { Text("DexScreener", color = Sky) }
                 }
                 StatLine(when (found.priceSource) { "jupiter" -> "Price (Jupiter)"; "chain" -> "Price (pump.fun curve)"; else -> "Price" }, "$" + priceText(found.priceUsd))
-                StatLine("Liquidity", compact(found.liquidityUsd))
-                StatLine("1h volume", compact(found.volume1hUsd))
-                StatLine("Mcap", found.marketCapUsd?.let { compact(it) } ?: "—")
-                StatLine("Age", ageText(found.ageSeconds))
-                StatLine("Analyst", "%.2f vs line %.2f".format(Locale.US, found.analystScore, found.analystLine), if (found.analystPass) Mint else Coral)
                 val verdict = when {
                     found.filterPass && found.analystPass -> "Clears every Filter gate and the Analyst line." to Mint
                     found.hardKills.isNotEmpty() -> ("Hard kill: " + found.hardKills.joinToString { it.code } + ". Buy needs Buy anyway.") to Coral
                     else -> "Misses at least one gate. You can still paper-buy it." to Amber
                 }
                 Text(verdict.first, color = verdict.second, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                if (found.canBuy) {
+                    Button(
+                        onClick = { askBuy = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = OnAccent)
+                    ) { Text(if (found.hardKills.isEmpty()) "Paper buy ${formatUsd(size)}" else "Buy ${found.symbol} anyway…") }
+                } else {
+                    Text(found.buyBlockedReason ?: "Buy is blocked.", color = Amber, fontSize = 13.sp)
+                }
+                StatLine("Liquidity", compact(found.liquidityUsd))
+                StatLine("1h volume", compact(found.volume1hUsd))
+                StatLine("Mcap", found.marketCapUsd?.let { compact(it) } ?: "—")
+                StatLine("Age", ageText(found.ageSeconds))
+                StatLine("Analyst", "%.2f vs line %.2f".format(Locale.US, found.analystScore, found.analystLine), if (found.analystPass) Mint else Coral)
                 found.checks.forEach { check ->
                     Text((if (check.pass) "✓ " else "✕ ") + check.code + "  " + check.message, color = if (check.pass) Dim else Coral, fontSize = 12.sp)
                 }
@@ -196,7 +227,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     val overCap = size > found.positionCapUsd + 0.005
                     val overPool = size > found.poolMaxUsd + 0.005
                     Row(Modifier.fillMaxWidth()) {
-                        Text("Paper buy size", color = Ink, modifier = Modifier.weight(1f))
+                        Text("Paper size", color = Ink, modifier = Modifier.weight(1f))
                         Text(formatUsd(size), color = Lime, fontFamily = FontFamily.Monospace)
                     }
                     Slider(
@@ -228,11 +259,6 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                     if (overPool) {
                         Text("This pool only takes about ${formatUsd(found.poolMaxUsd)} under the slippage cap and pool-depth check. The desk refuses a bigger fill.", color = Amber, fontSize = 12.sp)
                     }
-                    Button(
-                        onClick = { askBuy = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = if (found.hardKills.isEmpty()) Lime else Coral, contentColor = OnAccent)
-                    ) { Text(if (found.hardKills.isEmpty()) "Paper buy ${formatUsd(size)}" else "Buy ${found.symbol} anyway…") }
                     if (found.hardKills.isEmpty()) {
                         // v13.3 one tap at this size: no dialog, every desk check still runs.
                         val inFlight = tapping.contains("buy:${found.mint}")
@@ -249,6 +275,10 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                             scope.launch { desk.oneTapBuy(found.mint, found.symbol, size) }
                         }
                     }
+                }
+                if (oneTap != null) {
+                    Text("Live book. These buttons are separate from the paper buy above.", color = Dim, fontSize = 12.sp)
+                    LivePair(oneTap, found.mint, found.symbol, compact = true)
                 }
                 TextButton(enabled = !found.watching, onClick = {
                     scope.launch {

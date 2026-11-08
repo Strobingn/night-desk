@@ -542,6 +542,8 @@ export interface CoinLookup {
   buyBlockedReason: string | null;
   /** v13.6 set when a ticker/name resolved to this coin, e.g. "QTFALCN · held / traded". */
   matchedBy?: string;
+  /** v13.17 DexScreener search failed, was rate limited, or the list is cached (up to 60s). */
+  providerNote?: string;
 }
 
 /** v13.6 which limit set the buy cap, in words, for the one-tap hint. */
@@ -579,6 +581,8 @@ export interface CoinLookupError {
   mint?: string;
   query?: string;
   candidates?: CoinCandidate[];
+  /** v13.17 DexScreener search failed, was rate limited, or the list is cached (up to 60s). */
+  providerNote?: string;
 }
 
 /** v12 watchlist row. Persisted in the desk store under data/. */

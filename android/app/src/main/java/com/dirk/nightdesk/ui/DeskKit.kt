@@ -53,6 +53,7 @@ private val ICON_PATHS: Map<String, List<String>> = mapOf(
     "home" to listOf("M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"),
     "tape" to listOf("M3 12h4l3-8 4 16 3-8h4"),
     "add" to listOf(circle(12f, 12f, 9f), "M12 8v8M8 12h8"),
+    "search" to listOf(circle(10.5f, 10.5f, 6.5f), "M15.5 15.5 21 21"),
     "recap" to listOf("M5 20V10M12 20V4M19 20v-7"),
     "settings" to listOf("M4 7h10M18 7h2M4 17h4M12 17h8", circle(16f, 7f, 2f), circle(10f, 17f, 2f)),
     "link" to listOf("M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"),
@@ -329,16 +330,21 @@ fun StopTrailBar(model: StopBarModel) {
 
 @Composable
 fun BigButton(label: String, bg: Color, fg: Color, modifier: Modifier = Modifier, border: Color? = null, height: Dp = 52.dp, enabled: Boolean = true, onClick: () -> Unit) {
+    // Visual size can be compact. The clickable area stays at least 48dp.
+    val touch = if (height < 48.dp) 48.dp else height
     Box(
-        modifier
-            .height(height)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (enabled) bg else bg.copy(alpha = 0.4f))
-            .then(if (border != null) Modifier.border(BorderStroke(1.dp, border), RoundedCornerShape(14.dp)) else Modifier)
-            .clickable(enabled = enabled, onClick = onClick),
+        modifier.height(touch).clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, color = fg, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(height)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (enabled) bg else bg.copy(alpha = 0.4f))
+                .then(if (border != null) Modifier.border(BorderStroke(1.dp, border), RoundedCornerShape(12.dp)) else Modifier)
+        )
+        Text(label, color = fg, fontSize = if (height < 40.dp) 13.sp else 15.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
     }
 }
 

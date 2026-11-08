@@ -177,6 +177,8 @@ data class CoinLookup(
     val buyBlockedReason: String? = null,
     /** v13.6 "QTFALCN · held / traded" when a ticker resolved to this coin. */
     val matchedBy: String? = null,
+    /** v13.17 provider failure, not-found detail, or a cached search list (up to 60s). */
+    val providerNote: String? = null,
     /** v13.6 code AMBIGUOUS: several coins match a ticker/name; pick one. */
     val query: String? = null,
     val candidates: List<CoinCandidate> = emptyList()
@@ -254,7 +256,8 @@ fun parseLookup(raw: String): CoinLookup {
             error = root.optText("error", "Lookup failed. No buy without a reliable price."),
             code = root.optText("code", "LOOKUP_FAILED"),
             query = root.optText("query").ifBlank { null },
-            candidates = parseCandidates(root.optJSONArray("candidates"))
+            candidates = parseCandidates(root.optJSONArray("candidates")),
+            providerNote = root.optText("providerNote").ifBlank { null }
         )
     }
     fun checks(key: String): List<LookupCheck> = buildList {
@@ -296,7 +299,8 @@ fun parseLookup(raw: String): CoinLookup {
         watching = root.optBoolean("watching", false),
         canBuy = root.optBoolean("canBuy", false),
         buyBlockedReason = root.optText("buyBlockedReason").ifBlank { null },
-        matchedBy = root.optText("matchedBy").ifBlank { null }
+        matchedBy = root.optText("matchedBy").ifBlank { null },
+        providerNote = root.optText("providerNote").ifBlank { null }
     )
 }
 

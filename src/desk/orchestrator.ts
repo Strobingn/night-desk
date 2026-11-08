@@ -16,7 +16,7 @@ import { scoreToken } from "../agents/analyst.js";
 import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd, maxSizeForPool, planOrder, quotePaperBuy, quotePaperSell, realizablePnl, resolveManualSize, roundUsd, splitPosition } from "../agents/execution-math.js";
 import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
 import { resolveCoinMint } from "../market/coin-lookup.js";
-import { DexSearchClient, matchLocal, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
+import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
 import { enrichSighting } from "../market/enrich.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
@@ -1458,8 +1458,10 @@ export class Desk {
   }
 
   /**
-   * v13.6 Add coin by ticker or name ($ optional, any case). Held and traded coins first,
-   * then the Tape, then DexScreener search. One coin → the normal lookup card;
+   * v13.6 / v13.17 Search by ticker or name ($ optional, any case). One held or previously
+   * traded coin answers without a network call. The Tape is merged with DexScreener search
+   * so a coin does not have to be on Home or the Tape, and a Tape hit does not hide others.
+   * A provider failure keeps the local rows and says why. One coin → the lookup card;
    * several → code AMBIGUOUS with a pick list (HTTP 200 so old apps still show the text).
    */
   async lookupTicker(query: string): Promise<CoinLookup | CoinLookupError> {
@@ -1509,16 +1511,49 @@ export class Desk {
     for (const entry of this.lookups.values()) tier2.push({ mint: entry.token.mint, symbol: entry.token.symbol, name: entry.token.name, liquidityUsd: entry.token.liquidityUsd, volume1hUsd: entry.token.volume1hUsd, origin: "tape" });
     for (const item of this.watchlist) tier2.push({ mint: item.mint, symbol: item.symbol, name: item.name, origin: "tape" });
     const local2 = enrich(matchLocal(query, tier2)).sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0));
-    if (local2.length) return pick(local2.slice(0, 8), "on the Tape");
     this.dexSearch ??= new DexSearchClient(this.lookupFetch);
     const searched = await this.dexSearch.search(query);
-    if (!searched.ok) return { ok: false, error: searched.error, code: "LOOKUP_FAILED" };
-    const ranked = rankDexSearch(query, searched.body, heldMints);
-    if (!ranked.length) {
-      return { ok: false, error: `No Solana coin called “${query}” in your positions, trades, the Tape or DexScreener search. Paste the mint or a link.`, code: "LOOKUP_FAILED" };
+    let providerNote: string | undefined;
+    let ranked: TickerCandidate[] = [];
+    if (!searched.ok) providerNote = searched.error;
+    else {
+      ranked = rankDexSearch(query, searched.body, heldMints);
+      if (searched.cached) providerNote = "DexScreener search is cached and can be up to 60s old. Open a coin for a fresh price.";
     }
-    if (!ranked.some((r) => r.exact)) return { ok: false, code: "AMBIGUOUS", query, error: `No exact “${query}” on Solana. Close matches below; tap one.`, candidates: ranked };
-    return pick(ranked, "DexScreener search");
+    const merged = mergeTickerCandidates(local2, ranked);
+    if (!merged.length) {
+      return {
+        ok: false,
+        code: "LOOKUP_FAILED",
+        providerNote,
+        error: providerNote
+          ? providerNote
+          : `No Solana coin called “${query}” in your positions, trades, the Tape or DexScreener search. Paste the mint or a link.`
+      };
+    }
+    const where = merged.every((row) => row.origin !== "dexscreener")
+      ? "on the Tape"
+      : merged.every((row) => row.origin === "dexscreener")
+        ? "DexScreener search"
+        : "the Tape and DexScreener";
+    if (merged.length === 1 && merged[0]!.exact) {
+      const found = await this.lookupCoin(merged[0]!.mint);
+      if (!found.ok) return providerNote ? { ...found, providerNote } : found;
+      return { ...found, matchedBy: `${query.toUpperCase()} · ${where}`, ...(providerNote ? { providerNote } : {}) };
+    }
+    const noun = `${merged.length} coin${merged.length === 1 ? "" : "s"}`;
+    const listed = providerNote ? `${providerNote} ${noun} still listed.` : null;
+    return {
+      ok: false,
+      code: "AMBIGUOUS",
+      query,
+      providerNote,
+      error: listed
+        ?? (merged.some((row) => !row.exact)
+          ? `No exact “${query}” on Solana. Close matches below; tap one.`
+          : `${noun} match “${query}” (${where}). Tap the one you mean. Home and the Tape are not required.`),
+      candidates: merged
+    };
   }
 
   /** Positions saved in the other mode's book (live when paper, paper when live). Read-only. */
