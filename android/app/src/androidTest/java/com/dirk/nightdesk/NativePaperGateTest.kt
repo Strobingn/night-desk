@@ -120,8 +120,8 @@ class NativePaperGateTest {
         dismissNotice()
 
         openTab("Tape")
-        scrollUntil("LIVE BUY $5")
-        tap("LIVE BUY $5")
+        // SEEK is on the tape too, so both cards show LIVE BUY $5. The live checks stay on GATE.
+        tapBelow("GATE", "LIVE BUY $5")
         waitFor("OPERATOR_NOT_READY")
         dismissNotice()
 
@@ -131,11 +131,10 @@ class NativePaperGateTest {
         Thread.sleep(2_000)
 
         openTab("Tape")
-        scrollUntil("LIVE BUY $5")
-        tap("LIVE BUY $5")
+        tapBelow("GATE", "LIVE BUY $5")
         waitFor("did not answer in time", 55_000)
         dismissNotice()
-        tap("LIVE BUY $5")
+        tapBelow("GATE", "LIVE BUY $5")
         Thread.sleep(4_000)
     }
 
@@ -201,6 +200,20 @@ class NativePaperGateTest {
         val found = nodes.fetchSemanticsNodes()
         val index = found.indices.maxBy { found[it].boundsInRoot.left }
         nodes[index].performTouchInput { click() }
+        rule.waitForIdle()
+    }
+
+    /** Clicks the label on the card that owns the anchor, not the same label on another coin. */
+    private fun tapBelow(anchor: String, label: String) {
+        scrollUntil(anchor)
+        val anchorTop = rule.onAllNodes(hasText(anchor)).fetchSemanticsNodes().minOf { it.boundsInRoot.top }
+        val buttons = rule.onAllNodes(hasText(label) and hasClickAction())
+        val found = buttons.fetchSemanticsNodes()
+        check(found.isNotEmpty()) { "No clickable \"$label\" under $anchor" }
+        val below = found.indices.filter { found[it].boundsInRoot.top >= anchorTop - 1f }
+        val index = (if (below.isNotEmpty()) below else found.indices).minBy { found[it].boundsInRoot.top }
+        runCatching { buttons[index].performScrollTo() }
+        buttons[index].performTouchInput { click() }
         rule.waitForIdle()
     }
 
