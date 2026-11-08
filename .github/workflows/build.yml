@@ -120,7 +120,7 @@ jobs:
           exit 1
 
       - name: Install emulator libraries
-        run: sudo apt-get update && sudo apt-get install -y libpulse0
+        run: sudo apt-get update && sudo apt-get install -y libpulse0 libx11-xcb1 libxcb-cursor0 libxkbcommon0
 
       - name: Enable KVM
         run: |
@@ -130,12 +130,14 @@ jobs:
 
       - name: Native paper gate on emulator
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          QT_QPA_PLATFORM: offscreen
         with:
           api-level: 34
           target: google_apis
           arch: x86_64
           force-avd-creation: false
-          emulator-options: -no-snapshot-save -noaudio -no-boot-anim -gpu swiftshader_indirect
+          emulator-options: -no-window -no-snapshot-save -noaudio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
           script: bash scripts/apk-gate-device.sh
 
