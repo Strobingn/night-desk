@@ -216,12 +216,15 @@ class NativePaperGateTest {
     /** Clicks the label on the card that owns the anchor, not the same label on another coin. */
     private fun tapBelow(anchor: String, label: String) {
         scrollUntil(anchor)
-        val anchorTop = rule.onAllNodes(hasText(anchor)).fetchSemanticsNodes().minOf { it.boundsInRoot.top }
+        // The holding row reads "GATE ›", so an exact "GATE" match finds nothing.
+        val anchors = rule.onAllNodes(hasText(anchor, substring = true)).fetchSemanticsNodes()
+        check(anchors.isNotEmpty()) { "No \"$anchor\" to anchor \"$label\"" }
+        val anchorTop = anchors.minOf { it.boundsInRoot.top }
         val buttons = rule.onAllNodes(hasText(label) and hasClickAction())
         val found = buttons.fetchSemanticsNodes()
-        check(found.isNotEmpty()) { "No clickable \"$label\" under $anchor" }
         val below = found.indices.filter { found[it].boundsInRoot.top >= anchorTop - 1f }
-        val index = (if (below.isNotEmpty()) below else found.indices).minBy { found[it].boundsInRoot.top }
+        check(below.isNotEmpty()) { "No clickable \"$label\" under $anchor" }
+        val index = below.minBy { found[it].boundsInRoot.top }
         runCatching { buttons[index].performScrollTo() }
         buttons[index].performTouchInput { click() }
         rule.waitForIdle()
