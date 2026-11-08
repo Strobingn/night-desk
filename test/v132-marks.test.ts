@@ -135,8 +135,10 @@ describe("v13.2 source pacing and backoff", () => {
       release = resolve;
     });
     const ticks: number[] = [];
+    let rpcStarts = 0;
     const fetchImpl = (async (url: string) => {
       if (url.startsWith("http://rpc")) {
+        rpcStarts += 1;
         await queued;
         return Response.json({ jsonrpc: "2.0", result: { value: [null, null] } });
       }
@@ -156,9 +158,12 @@ describe("v13.2 source pacing and backoff", () => {
     });
     await pricer.cycle(false);
     expect(ticks).toEqual([1.25]);
+    expect(rpcStarts).toBe(1);
     now = 4_000;
     await pricer.cycle(false);
     expect(ticks).toEqual([1.25, 1.25]);
+    // The 9/min pool read is still queued. A second Dex mark must not wait for it or start another read.
+    expect(rpcStarts).toBe(1);
     release();
   });
 

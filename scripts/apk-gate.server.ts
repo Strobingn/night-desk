@@ -101,12 +101,24 @@ beforeAll(async () => {
     autoBuy: false,
     maxPositionPct: 0.1,
     positionSizeUsd: null,
-    maxExposurePct: 0.25,
-    maxOpenPositions: 2,
+    maxExposurePct: 0.8,
+    maxOpenPositions: 6,
     liveTradeUsd: 5,
     liveDailyCapUsd: 20,
     liveAutoBuy: false
   });
+  // Extra paper holdings so the 13.18 Home shot shows several collapsed coins.
+  // These stay on the paper book. The gate's live taps still hang and send nothing.
+  const held = [
+    { mint: "DrcMint1111111111111111111111111111111111", symbol: "DRC", name: "Drc Coin", priceUsd: 0.42 },
+    { mint: "SpcxMint111111111111111111111111111111111", symbol: "SPCX", name: "Spcx Coin", priceUsd: 1.15 },
+    { mint: "NovaMint111111111111111111111111111111111", symbol: "NOVA", name: "Nova Coin", priceUsd: 0.08 }
+  ];
+  for (const row of held) {
+    await desk.submitCandidate(makeToken({ mint: row.mint, symbol: row.symbol, name: row.name, priceUsd: row.priceUsd, liquidityUsd: 180_000, dex: "raydium", priceFeed: "jupiter" }));
+    const filled = await desk.manualBuy(row.mint, 25, { book: "paper", confirmHardKill: true });
+    if (!filled.ok) throw new Error(`gate seed ${row.symbol} refused: ${filled.error}`);
+  }
   await desk.submitCandidate(
     makeToken({
       mint: MINT,
