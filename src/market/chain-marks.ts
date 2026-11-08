@@ -724,7 +724,13 @@ export class ChainMarkReader {
    * v13.8: a pool whose websocket copy is fresher than `skipFreshMs` is decoded from that copy
    * instead of being polled (fewer RPC calls); a migrated pool is followed to its successor.
    */
-  async read(wanted: Array<{ mint: string; pair: string }>, now: number, skipFreshMs = 0): Promise<Map<string, ChainRead>> {
+  async read(
+    wanted: Array<{ mint: string; pair: string }>,
+    now: number,
+    skipFreshMs = 0,
+    /** Clock read after a polled RPC body is decoded. Cached websocket copies keep their own `at`. */
+    clock?: () => number
+  ): Promise<Map<string, ChainRead>> {
     const out = new Map<string, ChainRead>();
     if (!wanted.length) return out;
     const mapped = wanted.map((w) => ({ mint: w.mint, pair: this.target(w.pair), anchored: w.pair }));
@@ -755,6 +761,10 @@ export class ChainMarkReader {
     const keys: string[] = [];
     for (const p of pools) keys.push(...p.keys);
     const accounts = await this.rpc(keys);
+    // The accounts are the chain state at the moment this response was decoded. The caller's
+    // `now` is when the read was queued; a public-RPC wait longer than the live-mark window
+    // would make a fresh decode look stale. A cache hit above keeps the notification time.
+    const polledAt = clock ? clock() : now;
     let k = 0;
     for (const p of pools) {
       const datas = p.keys.map(() => {
@@ -773,7 +783,7 @@ export class ChainMarkReader {
         this.why.set(p.mint, p.kind === "curve" ? "its pump.fun curve completed" : "its Meteora DBC pool migrated");
         continue;
       }
-      if (native > 0 && Number.isFinite(native)) out.set(p.mint, { mint: p.mint, pair: p.pair, kind: p.kind, native, at: now });
+      if (native > 0 && Number.isFinite(native)) out.set(p.mint, { mint: p.mint, pair: p.pair, kind: p.kind, native, at: polledAt });
     }
     return out;
   }

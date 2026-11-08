@@ -6,7 +6,7 @@ import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { ChainMarkReader, PUMPSWAP_PROGRAM, PUMP_PROGRAM, WSOL_MINT, base58, isPubkey, parseCurve, parsePumpSwapPool, tokenAmount } from "../src/market/chain-marks.js";
 import { HeldQuoteBook, SOURCE_MIN_MS } from "../src/market/dex-prices.js";
-import { reanchorCandidate } from "../src/market/mark-guard.js";
+import { LIVE_FRESH_MS, reanchorCandidate } from "../src/market/mark-guard.js";
 import { CAL_MIN, PositionPricer } from "../src/market/position-pricer.js";
 import { ERROR_BACKOFF, RATE_LIMIT_BACKOFF, SourceGate } from "../src/market/source-gate.js";
 import { parseCoinInput } from "../src/market/coin-input.js";
@@ -128,6 +128,97 @@ describe("v13.2 source pacing and backoff", () => {
     expect(urls.filter((u) => u.includes("api.jup.ag")).length).toBe(jupCalls + 1);
   });
 
+  it("publishes the Dex mark while a pool read is still waiting on the RPC queue", async () => {
+    let now = 0;
+    let release: () => void = () => {};
+    const queued = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ticks: number[] = [];
+    let rpcStarts = 0;
+    const fetchImpl = (async (url: string) => {
+      if (url.startsWith("http://rpc")) {
+        rpcStarts += 1;
+        await queued;
+        return Response.json({ jsonrpc: "2.0", result: { value: [null, null] } });
+      }
+      if (url.includes("dexscreener")) {
+        return Response.json([{ baseToken: { address: MINT }, priceUsd: "1.25", liquidity: { usd: 30_000 }, pairAddress: POOL, dexId: "pumpswap" }]);
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const pricer = new PositionPricer({
+      heldMints: () => [MINT],
+      pairFor: () => POOL,
+      tick: (_mint, price) => ticks.push(price),
+      onStale: () => {},
+      fetchImpl,
+      now: () => now,
+      chain: new ChainMarkReader("http://rpc", fetchImpl, 10_000)
+    });
+    await pricer.cycle(false);
+    expect(ticks).toEqual([1.25]);
+    expect(rpcStarts).toBe(1);
+    now = 4_000;
+    await pricer.cycle(false);
+    expect(ticks).toEqual([1.25, 1.25]);
+    // The 9/min pool read is still queued. A second Dex mark must not wait for it or start another read.
+    expect(rpcStarts).toBe(1);
+    release();
+  });
+
+  it("stamps a pool read that waited out the public RPC queue with the decode time", async () => {
+    let now = 0;
+    let release: () => void = () => {};
+    const queued = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let rpcStarts = 0;
+    const live: Array<{ at: number }> = [];
+    const curve = curveData(1_000_000_000_000_000n, 30_000_000_000n);
+    u64le(curve, 32, 1_000_000_000n);
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("http://rpc")) {
+        rpcStarts += 1;
+        await queued;
+        const body = JSON.parse(String(init?.body)) as { params: [string[]] };
+        const value = body.params[0].map((key) => {
+          if (key === CURVE) return { owner: PUMP_PROGRAM, data: [b64(curve), "base64"] };
+          if (key === MINT) return { owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", data: [b64(mintData()), "base64"] };
+          return null;
+        });
+        return Response.json({ jsonrpc: "2.0", id: 1, result: { context: { slot: 1 }, value } });
+      }
+      if (url.includes("dexscreener")) {
+        return Response.json([{ baseToken: { address: MINT }, priceUsd: "0.0000045", liquidity: { usd: 30_000 }, pairAddress: CURVE, dexId: "pumpfun" }]);
+      }
+      if (url.includes("api.jup.ag")) return Response.json({ [WSOL_MINT]: { usdPrice: 150 } });
+      return Response.json({});
+    }) as typeof fetch;
+    const pricer = new PositionPricer({
+      heldMints: () => [MINT],
+      pairFor: () => CURVE,
+      tick: () => {},
+      live: (_mint, _price, origin) => live.push({ at: origin.at }),
+      onStale: () => {},
+      fetchImpl,
+      now: () => now,
+      chain: new ChainMarkReader("http://rpc", fetchImpl, 10_000)
+    });
+    await pricer.cycle(false);
+    expect(rpcStarts).toBe(1);
+    now = 4_000;
+    await pricer.cycle(false);
+    expect(rpcStarts).toBe(1);
+    now = 8_000;
+    expect(now - 0).toBeGreaterThan(LIVE_FRESH_MS);
+    release();
+    await vi.waitUntil(() => live.length === 1);
+    // A cycle-start stamp of 0 would already be older than the 5s live window.
+    expect(live[0].at).toBe(8_000);
+    expect(now - live[0].at).toBeLessThanOrEqual(LIVE_FRESH_MS);
+  });
+
   it("runs a 1.5 s cycle but asks DexScreener at most every 3 s and Jupiter every 5 s", async () => {
     let now = 0;
     const urls: string[] = [];
@@ -189,6 +280,31 @@ describe("v13.2 on-chain pool marks", () => {
     const pool = parsePumpSwapPool(poolData());
     expect(pool).toEqual({ baseMint: MINT, quoteMint: WSOL_MINT, baseVault: BASE_VAULT, quoteVault: QUOTE_VAULT, virtualQuoteReserves: 0n });
     expect(tokenAmount(tokenAccount(123n))).toBe(123);
+  });
+
+  it("does not restamp a websocket copy when the poll clock has moved on", async () => {
+    let calls = 0;
+    const curve = curveData(1_000_000_000_000_000n, 30_000_000_000n);
+    u64le(curve, 32, 1_000_000_000n);
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      const body = JSON.parse(String(init?.body)) as { params: [string[]] };
+      const value = body.params[0].map((key) => {
+        if (key === CURVE) return { owner: PUMP_PROGRAM, data: [b64(curve), "base64"] };
+        if (key === MINT) return { owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", data: [b64(mintData()), "base64"] };
+        return null;
+      });
+      return Response.json({ jsonrpc: "2.0", id: 1, result: { context: { slot: 1 }, value } });
+    }) as typeof fetch;
+    const reader = new ChainMarkReader("http://rpc", fetchImpl, 0);
+    const first = await reader.read([{ mint: MINT, pair: CURVE }], 1_000);
+    expect(first.get(MINT)?.at).toBe(1_000);
+    reader.noteAccount(CURVE, curve, 1_000);
+    const callsAfterPoll = calls;
+    const cached = await reader.read([{ mint: MINT, pair: CURVE }], 20_000, 60_000, () => 99_000);
+    expect(cached.get(MINT)?.at).toBe(1_000);
+    expect(calls).toBe(callsAfterPoll);
+    expect(99_000 - 1_000).toBeGreaterThan(LIVE_FRESH_MS);
   });
 
   it("reads a PumpSwap pool in one batched call, skips fixtures and dead curves", async () => {

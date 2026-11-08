@@ -503,7 +503,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
-                4 -> SettingsScreen(snap) { patch -> scope.launch { desk.saveSettings(patch) } }
+                4 -> SettingsScreen(snap, oneTap) { patch -> scope.launch { desk.saveSettings(patch) } }
                 6 -> PumpScreen()
                 else -> LinkScreen(desk)
             }
@@ -618,7 +618,7 @@ private fun BookScreen(
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     val liveBook = snap?.liveBook
-    LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { LastCrashCard() }
         if (!snap?.lastClientCrash.isNullOrBlank()) {
             item {
@@ -628,30 +628,17 @@ private fun BookScreen(
                 }
             }
         }
-        item { HeroCard(snap, openPnl) }
-        if (liveBook != null) {
-            item {
-                SectionTitle(
-                    "LIVE",
-                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · ${liveCashLabel(liveBook)}",
-                    P.down
-                )
-            }
-            item {
-                Text(
-                    (if (liveBook.manualOnly) "Live: manual only · AI: paper. " else "Live: manual + AI. ") +
-                        "${money(liveBook.tradeUsd)} per trade · trail ${"%.1f".format(Locale.US, liveBook.trailPct * 100)}% · hard stop −${"%.0f".format(Locale.US, snap.stopLossPct * 100)}% · " +
-                        (liveBook.dailyCapUsd?.let { "daily cap ${money(it)}" } ?: "no daily max") + ".",
-                    color = P.ink,
-                    fontSize = 13.sp
-                )
-            }
-            if (liveBook.positions.isEmpty()) {
-                item { Text("No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real ${money(liveBook.tradeUsd)} buy.", color = Dim, fontSize = 14.sp) }
-            } else {
-                itemsIndexed(liveBook.positions, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
-                    OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
+        item {
+            Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(money(snap?.equityUsd ?: 0.0), color = P.ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
+                    Text(
+                        if (liveBook != null) "Paper · AI · ${snap?.positions?.size ?: 0} open" else "${snap?.positions?.size ?: 0} open",
+                        color = P.muted,
+                        fontSize = 12.sp
+                    )
                 }
+                Text(signed(openPnl), color = if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         }
         item {
@@ -661,7 +648,6 @@ private fun BookScreen(
                 if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
             )
         }
-        if (oneTap != null) item { OneTapBar(oneTap) }
         if (snap == null || snap.positions.isEmpty()) {
             item {
                 Text(
@@ -676,6 +662,32 @@ private fun BookScreen(
                 OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
             }
         }
+        if (liveBook != null) {
+            item {
+                SectionTitle(
+                    "LIVE",
+                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · ${liveCashLabel(liveBook)}",
+                    P.down
+                )
+            }
+            if (liveBook.positions.isEmpty()) {
+                item { Text("No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real ${money(liveBook.tradeUsd)} buy.", color = Dim, fontSize = 14.sp) }
+            } else {
+                itemsIndexed(liveBook.positions, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
+                    OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
+                }
+            }
+            item {
+                Text(
+                    (if (liveBook.manualOnly) "Live: manual only · AI: paper. " else "Live: manual + AI. ") +
+                        "${money(liveBook.tradeUsd)} per trade · trail ${"%.1f".format(Locale.US, liveBook.trailPct * 100)}% · hard stop −${"%.0f".format(Locale.US, snap.stopLossPct * 100)}% · " +
+                        (liveBook.dailyCapUsd?.let { "daily cap ${money(it)}" } ?: "no daily max") + ".",
+                    color = P.ink,
+                    fontSize = 13.sp
+                )
+            }
+        }
+        item { HeroCard(snap, openPnl) }
         if (orders != null) item { OrdersCard(orders) }
         item { WalletCard(snap) }
         item { LiveReadyCard(snap?.readiness, onReady) }
@@ -1097,54 +1109,65 @@ private fun OpenPositionCard(
     val up = pos.pnlUsd >= 0
     val context = LocalContext.current
     var sellAsk by remember { mutableStateOf<Int?>(null) }
-    Column(Modifier.deskCard().padding(12.dp)) {
+    var expanded by rememberSaveable(pos.mint) { mutableStateOf(false) }
+    Column(Modifier.deskCard().padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth().clickable(onClickLabel = "Open ${pos.symbol} coin card") { onOpenCoin(pos.mint) }, verticalAlignment = Alignment.CenterVertically) {
-            CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null)
-            Spacer(Modifier.width(12.dp))
+            CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null, size = if (expanded) 44.dp else 32.dp)
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(pos.symbol + " ›", color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (pos.live) {
-                        Chip("LIVE", P.onDown, P.down, size = 10)
-                        Spacer(Modifier.width(6.dp))
-                    } else if (oneTap != null) {
-                        // v13.9: paper numbers are labelled PAPER; the LIVE strip below is the real-money side.
-                        BookTag(live = false)
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
-                    else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
+                    Text(pos.symbol + " ›", color = P.ink, fontSize = if (expanded) 18.sp else 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.width(6.dp))
-                    Text("score ${num(pos.score, "%.2f")}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (pos.live) Chip("LIVE", P.onDown, P.down, size = 10)
+                    else if (oneTap != null) BookTag(live = false)
                 }
-                if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
+                if (expanded) {
+                    val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
+                        else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
+                        Spacer(Modifier.width(6.dp))
+                        Text("score ${num(pos.score, "%.2f")}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 PnlChip(pos.pnlUsd, pos.pnlPct)
-                Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
-                val net = pos.netPnlUsd
-                val netText = if (net != null && net.isFinite()) {
-                    val pct = pos.netPnlPct
-                    val slip = pos.exitSlippage
-                    buildString {
-                        append("Net ")
-                        append(signed(net))
-                        if (pct != null && pct.isFinite()) append(" · ${"%.1f".format(java.util.Locale.US, pct * 100)}%")
-                        if (slip != null && slip.isFinite()) append(" · slip ${"%.2f".format(java.util.Locale.US, slip * 100)}%")
-                    }
-                } else "Net —"
-                Text(
-                    netText,
-                    color = if (net == null || !net.isFinite()) P.muted else if (net >= 0) P.up else P.down,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+                if (expanded) {
+                    val net = pos.netPnlUsd
+                    val netText = if (net != null && net.isFinite()) {
+                        val pct = pos.netPnlPct
+                        val slip = pos.exitSlippage
+                        buildString {
+                            append("Net ")
+                            append(signed(net))
+                            if (pct != null && pct.isFinite()) append(" · ${"%.1f".format(java.util.Locale.US, pct * 100)}%")
+                            if (slip != null && slip.isFinite()) append(" · slip ${"%.2f".format(java.util.Locale.US, slip * 100)}%")
+                        }
+                    } else "Net —"
+                    Text(
+                        netText,
+                        color = if (net == null || !net.isFinite()) P.muted else if (net >= 0) P.up else P.down,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
         MarkUpdated(pos)
-        CoinSpark(pos.marks, pos.entryPrice)
+        CoinSpark(pos.marks, pos.entryPrice, height = if (expanded) 36.dp else 18.dp)
+        if (!expanded) {
+            Text(
+                "Details",
+                color = P.accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 2.dp).clickable { expanded = true }
+            )
+        } else {
         StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
         Column(
             Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(12.dp)).background(P.surface).border(1.dp, P.line, RoundedCornerShape(12.dp)).padding(10.dp),
@@ -1208,6 +1231,14 @@ private fun OpenPositionCard(
                 )
             }
         }
+            Text(
+                "Hide",
+                color = P.accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 6.dp).clickable { expanded = false }
+            )
+        }
     }
     val pending = sellAsk
     if (pending != null) {
@@ -1238,12 +1269,12 @@ private fun OpenPositionCard(
 }
 
 @Composable
-private fun CoinSpark(points: List<PricePoint>, entry: Double) {
+private fun CoinSpark(points: List<PricePoint>, entry: Double, height: androidx.compose.ui.unit.Dp = 36.dp) {
     if (points.isEmpty()) return
     val drawn = if (points.size >= 2) points else listOf(points[0], points[0])
     val up = drawn.last().priceUsd >= entry
     val color = if (up) P.up else P.down
-    Canvas(Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp)) {
+    Canvas(Modifier.fillMaxWidth().height(height).padding(top = 4.dp)) {
         var min = drawn[0].priceUsd
         var max = drawn[0].priceUsd
         for (p in drawn) {

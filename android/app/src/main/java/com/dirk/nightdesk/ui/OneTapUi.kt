@@ -79,10 +79,16 @@ class OneTapUi(
 
 /** One-tap size and max slippage, right by the Buy buttons, plus Sell all. Slider + number box each. */
 @Composable
-fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean = true) {
+fun OneTapBar(
+    ui: OneTapUi,
+    modifier: Modifier = Modifier,
+    showSellAll: Boolean = true,
+    slipPct: Double = ui.slipPct,
+    onSlip: (Double) -> Unit = ui.onSlip,
+) {
     var sizeText by remember(ui.tapUsd) { mutableStateOf(fmt(ui.tapUsd)) }
-    var slip by remember(ui.slipPct) { mutableStateOf(ui.slipPct.toFloat()) }
-    var slipText by remember(ui.slipPct) { mutableStateOf(fmt(ui.slipPct)) }
+    var slip by remember(slipPct) { mutableStateOf(slipPct.toFloat()) }
+    var slipText by remember(slipPct) { mutableStateOf(fmt(slipPct)) }
     var armed by remember { mutableStateOf(false) }
     LaunchedEffect(armed) {
         if (armed) {
@@ -95,7 +101,7 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
         val c = (kotlin.math.round(v * 2.0) / 2.0).coerceIn(0.5, 50.0)
         slip = c.toFloat()
         slipText = fmt(c)
-        if (kotlin.math.abs(c - ui.slipPct) > 1e-9) ui.onSlip(c)
+        if (kotlin.math.abs(c - slipPct) > 1e-9) onSlip(c)
     }
     val maxSize = kotlin.math.max(10.0, kotlin.math.max(ui.maxUsd, kotlin.math.max(ui.capUsd, ui.tapUsd))).toFloat()
     val realTap = ui.live && !ui.split

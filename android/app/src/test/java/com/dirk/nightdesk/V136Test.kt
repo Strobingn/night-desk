@@ -66,8 +66,8 @@ class V136Test {
 
     @Test
     fun addCoinFieldSaysTickersWork() {
-        assertEquals("Ticker, name, mint or link", ADD_COIN_LABEL)
-        assertTrue(ADD_COIN_HELP.contains("Ticker"))
+        assertEquals("Name, symbol, mint or link", ADD_COIN_LABEL)
+        assertTrue(ADD_COIN_HELP.contains("symbol"))
         assertTrue(ADD_COIN_HELP.contains("DexScreener search"))
     }
 }

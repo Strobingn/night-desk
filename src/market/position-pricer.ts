@@ -4,8 +4,9 @@ import { HeldQuoteBook, mergeResults, type DexQuote, type QuoteSource } from "./
 /**
  * v13.2: held mints are priced on their own fast clock (default 1.5s, the "Position price
  * refresh" setting). The cycle runs at that pace, but each API only gets its own slice:
- * on-chain pool reserves every cycle, DexScreener every 3s (its CDN caches 30s anyway),
- * Jupiter every 5s (its keyless bucket is shared with the Scout).
+ * DexScreener every 3s (its CDN caches 30s anyway), Jupiter every 5s (its keyless
+ * bucket is shared with the Scout). A pool read starts on its own gate and does not
+ * hold those quotes: on the public RPC it can sit in the 9/min queue.
  */
 export const HELD_MARK_POLL_MS = 1_500;
 export const POLL_FLOOR_MS = 1_000;
@@ -98,6 +99,8 @@ export class PositionPricer {
   private subKey = new Map<string, string>();
   private heldNow = new Set<string>();
   private readonly lastStreamEmit = new Map<string, number>();
+  /** A public-RPC pool read can sit in the rate-limit queue. It must not hold Dex/Jupiter marks. */
+  private chainBusy = false;
 
   constructor(private readonly opts: PositionPricerOptions) {
     this.now = opts.now ?? (() => Date.now());
@@ -197,26 +200,42 @@ export class PositionPricer {
       ? held.map((mint) => ({ mint, pair: this.opts.pairFor?.(mint) ?? this.lastPair.get(mint) ?? this.opts.fallbackPair?.(mint) ?? "" })).filter((w) => w.pair)
       : [];
     this.heldNow = new Set(held);
-    const chainDue = chain && wanted.length > 0 && chain.gate.due(now, force);
+    const chainDue = chain && wanted.length > 0 && chain.gate.due(now, force) && !this.chainBusy;
     if (chainDue) chain!.gate.started(now);
     const skipFresh = this.opts.stream?.connected() ? STREAM_FRESH_MS : 0;
 
-    const [results, chainResult] = await Promise.all([
-      sources.length ? this.quotes.fetchSources(held, sources, fetchImpl, now, bust ? { bust } : {}) : Promise.resolve([]),
-      chainDue
-        ? chain!.read(wanted, now, skipFresh).then(
-            (reads) => {
-              chain!.gate.ok(now);
-              return { reads } as { reads?: Map<string, ChainRead>; error?: string };
-            },
-            (err: unknown) => {
-              const message = `chain ${err instanceof Error ? err.message : String(err)}`;
-              chain!.gate.fail(message, now);
-              return { error: message } as { reads?: Map<string, ChainRead>; error?: string };
-            }
-          )
-        : Promise.resolve(null)
-    ]);
+    // Quotes and the pool read start together. The read is applied when it returns.
+    // A public Solana read can wait in the 9/min queue while Dex itself is healthy
+    // (measured 8 Nov 2026: Dex 429 count 0, both held coins still moved only when the cycle ended).
+    const quoteTask = sources.length
+      ? this.quotes.fetchSources(held, sources, fetchImpl, now, bust ? { bust } : {})
+      : Promise.resolve([]);
+    const chainTask = chainDue
+      ? chain!.read(wanted, now, skipFresh, () => this.now()).then(
+          (reads) => {
+            chain!.gate.ok(this.now());
+            return { reads } as { reads?: Map<string, ChainRead>; error?: string };
+          },
+          (err: unknown) => {
+            const message = `chain ${err instanceof Error ? err.message : String(err)}`;
+            chain!.gate.fail(message, this.now());
+            return { error: message } as { reads?: Map<string, ChainRead>; error?: string };
+          }
+        )
+      : null;
+    if (chainTask) {
+      this.chainBusy = true;
+      void chainTask.finally(() => {
+        this.chainBusy = false;
+      });
+    }
+
+    let results: Awaited<ReturnType<HeldQuoteBook["fetchSources"]>> = [];
+    try {
+      results = await quoteTask;
+    } catch (err) {
+      this.opts.onError?.(err instanceof Error ? err.message : String(err));
+    }
 
     let prices = new Map<string, DexQuote[]>();
     if (results.length) {
@@ -249,15 +268,25 @@ export class PositionPricer {
       this.subKey = chain.subscriptions(wanted.map((w) => w.pair));
       this.opts.stream.setKeys(this.subKey.keys());
     }
-    const reads = chainResult?.reads;
-    if (!reads || !this.opts.live) return;
-    for (const [mint, read] of reads) {
-      this.sample(mint, read, prices.get(mint) ?? [], now);
-      const factor = this.factor(mint, read.kind, now);
-      if (factor == null) continue;
-      const usd = read.native * factor;
-      if (usd > 0 && Number.isFinite(usd)) this.opts.live(mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at });
-    }
+    if (!chainTask) return;
+    // A forced poll (tests, manual reprice) still waits so calibration sees this cycle's read.
+    // The 1.5s loop does not: the next Dex pass starts while this read is still queued.
+    const applyChain = async () => {
+      const chainResult = await chainTask;
+      const reads = chainResult?.reads;
+      if (!reads || !this.opts.live) return;
+      for (const [mint, read] of reads) {
+        // read.at is the RPC decode time, or the websocket notification time for a cache hit.
+        // Do not replace it with this.now(): that would present a stale cached copy as fresh.
+        this.sample(mint, read, prices.get(mint) ?? [], read.at);
+        const factor = this.factor(mint, read.kind, this.now());
+        if (factor == null) continue;
+        const usd = read.native * factor;
+        if (usd > 0 && Number.isFinite(usd)) this.opts.live(mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at });
+      }
+    };
+    if (force) await applyChain();
+    else void applyChain().catch((err) => this.opts.onError?.(err instanceof Error ? err.message : String(err)));
   }
 
   /** v13.8 a websocket account update: decode that pool now and push a live mark. */

@@ -4,7 +4,7 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
-Android `13.17` (versionCode 1317) keeps the 13.16 paper and live routing. Search looks up a coin by name, symbol or mint without it already being on Home or the Tape. Home cards use smaller buttons with a 48dp touch target. A paper button always names the paper book. A live buy is only the LIVE button, and only after `operatorReady` is marked. An unknown wallet read shows as unknown, and a later failure keeps the last figure as stale. A live send whose confirmation times out keeps its signature and is not sent again.
+Android `13.18` (versionCode 1318) keeps the 13.17 paper and live routing. Home opens on a one-line equity strip and a collapsed holdings list, so several coins fit on the screen. Details on a coin opens the PnL, entry, mark, stop, sparkline, paper 25/50/100, live buy and sell, orders and chart links. The one-tap size, slippage and Sell all sit in Settings. Search looks up a coin by name, symbol or mint without it already being on Home or the Tape. Home cards use smaller buttons with a 48dp touch target. A paper button always names the paper book. A live buy is only the LIVE button, and only after `operatorReady` is marked. An unknown wallet read shows as unknown, and a later failure keeps the last figure as stale. A live send whose confirmation times out keeps its signature and is not sent again.
 
 This is a trading tool, not a promise of profit. Defaults are deliberately tight.
 
