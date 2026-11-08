@@ -25,5 +25,11 @@ adb shell pm grant com.dirk.nightdesk android.permission.POST_NOTIFICATIONS || t
 adb shell settings put global window_animation_scale 0
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
-adb shell am instrument -w -r com.dirk.nightdesk.test/androidx.test.runner.AndroidJUnitRunner
+mkdir -p "${GITHUB_WORKSPACE:-.}/gate-logs"
+set +e
+adb shell am instrument -w -r com.dirk.nightdesk.test/androidx.test.runner.AndroidJUnitRunner | tee "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"
+set -e
+if grep -q "FAILURES!!!" "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"; then
+  exit 1
+fi
 node "${GITHUB_WORKSPACE:-/agent/repos/night-desk}/scripts/apk-gate-assert.mjs" /tmp/nd-gate/http.jsonl /tmp/nd-gate/swaps.jsonl

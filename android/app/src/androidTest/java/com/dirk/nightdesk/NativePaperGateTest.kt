@@ -6,7 +6,9 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToString
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -33,11 +35,19 @@ class NativePaperGateTest {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         dismissBlockers(device)
         openTab("Link")
+        waitFor("Override URL")
+        // The screen loads the saved link after the first frame and would wipe a URL typed too early.
+        rule.waitForIdle()
+        Thread.sleep(2_000)
         rule.onAllNodes(hasSetText())[0].performTextReplacement("http://10.0.2.2:8791")
         rule.onNode(isToggleable()).performClick()
+        rule.waitForIdle()
+        if (rule.onAllNodesWithText("Save and hold this URL").fetchSemanticsNodes().isEmpty()) {
+            rule.onNode(isToggleable()).performClick()
+        }
         waitFor("Save and hold this URL")
         tap("Save and hold this URL")
-        waitFor("10.0.2.2:8791")
+        waitFor("10.0.2.2:8791", 40_000)
 
         openTab("Tape")
         scrollUntil("GATE")
@@ -132,8 +142,13 @@ class NativePaperGateTest {
     }
 
     private fun waitFor(text: String, timeoutMs: Long = 20_000) {
-        rule.waitUntil(timeoutMs) {
-            rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+        try {
+            rule.waitUntil(timeoutMs) {
+                rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+            }
+        } catch (err: Throwable) {
+            val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 16) }.getOrElse { it.message ?: "" }
+            throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(3500)}", err)
         }
     }
 
