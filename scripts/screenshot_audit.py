@@ -151,7 +151,8 @@ def swipe_up() -> None:
 
 def swipe_down() -> None:
     width, height = SCREEN
-    swipe(width // 2, int(height * 0.38), width // 2, int(height * 0.72))
+    # Same left column as swipe_up. A swipe through the slippage slider does not move the page.
+    swipe(width // 3, int(height * 0.38), width // 3, int(height * 0.72))
 
 
 def ime_open() -> bool:
@@ -224,10 +225,28 @@ def open_tab(names: list[str]) -> None:
     _, height = SCREEN
     index = {"Home": 0, "Tape": 1, "Search": 2, "Add coin": 2, "Add": 2, "Recap": 3, "Settings": 4, "Link": 5, "Pump": 6}
     slot = next((index[name] for name in names if name in index), None)
-    for _ in range(5):
+    for _ in range(6):
         xml = dismiss_anr(dump())
+        # Back from a dialog can leave the launcher in front. Bring the app back
+        # before tapping a tab coordinate, or the tap hits the home screen.
+        if dump_pkg(xml) != PKG:
+            ensure_app()
+            xml = dump()
         if tab_open(names, xml):
             return
+        # Already on Home, scrolled onto a coin: "Marked equity" is above the fold
+        # and tapping the selected Home tab does not scroll back up.
+        home_tab = [
+            bounds
+            for bounds in matches(xml, "Home")
+            if on_screen(bounds) and (bounds[1] + bounds[3]) / 2 > height - 230
+        ]
+        if "Home" in names and find(xml, "Night") and home_tab:
+            for _swipe in range(5):
+                swipe_down()
+                xml = dump()
+                if tab_open(names, xml):
+                    return
         tapped = False
         for name in names:
             for bounds in matches(xml, name):
