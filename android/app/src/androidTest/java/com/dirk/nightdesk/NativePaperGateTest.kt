@@ -7,6 +7,7 @@ import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.swipe
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -89,13 +90,22 @@ class NativePaperGateTest {
         val paperButton = hasText("Paper buy", substring = true) and hasClickAction()
         val hardKill = rule.onAllNodes(hardButton).fetchSemanticsNodes().isNotEmpty()
         val action = if (hardKill) hardButton else paperButton
+        dismissAnr()
         scrollClickable(action)
+        dismissAnr()
         shot("search")
         rule.onNode(action).performClick()
         rule.waitForIdle()
         if (hardKill) {
+            // The confirm dialog is its own Compose root. onRoot() throws once it is open.
             val confirm = hasText("Buy anyway") and hasClickAction()
-            scrollClickable(confirm)
+            val deadline = System.currentTimeMillis() + 10_000
+            while (rule.onAllNodes(confirm).fetchSemanticsNodes().isEmpty()) {
+                if (System.currentTimeMillis() > deadline) error("Paper confirm did not open")
+                dismissAnr()
+                Thread.sleep(200)
+            }
+            dismissAnr()
             rule.onNode(confirm).performClick()
         } else {
             tapRightmost("Buy")
@@ -255,23 +265,34 @@ class NativePaperGateTest {
         Thread.sleep(400)
     }
 
+    private fun dismissAnr() {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        if (device.findObject(By.textContains("isn't responding")) == null) return
+        device.findObject(By.text("Wait"))?.click()
+        Thread.sleep(400)
+    }
+
     private fun scrollClickable(matcher: SemanticsMatcher) {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < 20_000) {
+            dismissAnr()
             val nodes = rule.onAllNodes(matcher)
             val found = nodes.fetchSemanticsNodes()
             if (found.isNotEmpty()) {
                 runCatching { nodes[0].performScrollTo() }
-                val bounds = nodes[0].fetchSemanticsNode().boundsInRoot
-                val root = rule.onRoot().fetchSemanticsNode().boundsInRoot
-                if (bounds.top >= root.top && bounds.bottom <= root.bottom - 80f && bounds.height > 1f) return
+                val bounds = runCatching { nodes[0].fetchSemanticsNode().boundsInRoot }.getOrNull()
+                if (bounds != null && bounds.height > 1f && bounds.top >= 0f && bounds.bottom <= device.displayHeight - 40) return
             }
-            rule.onRoot().performTouchInput {
-                swipe(Offset(centerX, bottom * 0.7f), Offset(centerX, bottom * 0.35f), durationMillis = 180)
+            val roots = rule.onAllNodes(isRoot())
+            if (roots.fetchSemanticsNodes().size == 1) {
+                roots[0].performTouchInput {
+                    swipe(Offset(centerX, bottom * 0.7f), Offset(centerX, bottom * 0.35f), durationMillis = 180)
+                }
             }
             Thread.sleep(250)
         }
-        error("Clickable control was not on screen\n" + runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 8) }.getOrDefault(""))
+        error("Clickable control was not on screen")
     }
 
     private fun scrollIntoView(snippet: String) {
