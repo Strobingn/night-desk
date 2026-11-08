@@ -130,6 +130,24 @@ describe("pump live route", () => {
         mint: mint.toBase58(),
         sizeUsd: 5,
         solPriceUsd: 150,
+        markPriceUsd: 0.00000419851,
+        slippageFraction: 0.03,
+        readEnvSecret: () => JSON.stringify(Array.from(signer.secretKey)),
+        rpcUrl: "http://127.0.0.1",
+        connection: world(mint),
+        broadcast: async () => {
+          calls += 1;
+          return { signature: "sig-unknown", err: "confirmation timed out", state: "unknown" as const };
+        }
+      })
+    ).rejects.toMatchObject({ code: "LIVE_UNCONFIRMED", signature: "sig-unknown", submitState: "submitted_unknown" });
+    expect(calls).toBe(1);
+    await expect(
+      executePumpLiveSwap({
+        side: "buy",
+        mint: mint.toBase58(),
+        sizeUsd: 5,
+        solPriceUsd: 150,
         readEnvSecret: () => JSON.stringify(Array.from(signer.secretKey)),
         rpcUrl: ""
       })

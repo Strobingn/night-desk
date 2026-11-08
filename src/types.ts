@@ -49,7 +49,15 @@ export type ReasonCode =
   /** v13.5 live: the optional live daily spend cap is used up. */
   | "LIVE_DAILY_CAP"
   /** v13.5 live: wallet balance unknown, or not enough USDC / SOL for the trade and fees. */
-  | "LIVE_WALLET";
+  | "LIVE_WALLET"
+  /** Quote or simulation failed before a transaction was sent. */
+  | "LIVE_NOT_SUBMITTED"
+  /** A signature was sent, or the send itself timed out. Not a fill, and not safe to send again. */
+  | "LIVE_UNCONFIRMED"
+  /** Armed desk received a buy that did not name paper or live. */
+  | "BOOK_REQUIRED"
+  /** Explicit live buy while the checklist is off. Nothing was sent. */
+  | "OPERATOR_NOT_READY";
 
 export interface Rejection {
   code: ReasonCode;
@@ -445,6 +453,10 @@ export interface ManualBuyRefusal {
   ok: false;
   error: string;
   code: string;
+  /** Set when a transaction was signed or may already be on the network. */
+  signature?: string;
+  /** not_submitted: safe to try a new swap. submitted_unknown: do not send another. rejected: the chain failed it. */
+  submitState?: "not_submitted" | "submitted_unknown" | "rejected";
 }
 
 /** Operator preferences saved with the volume floor. The hard stop is not one of these. */

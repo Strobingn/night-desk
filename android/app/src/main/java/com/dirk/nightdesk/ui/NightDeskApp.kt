@@ -329,8 +329,9 @@ fun NightDeskApp(desk: DeskRepository) {
     val tapping by desk.tapping.collectAsState()
     val tapSaved by desk.tapUsd.collectAsState()
     val oneTap = snap?.let { s ->
-        // v13.5: a LIVE desk taps the live per-trade size ($5 default), never this phone's paper amount.
-        val tapNow = com.dirk.nightdesk.OneTap.effectiveTapUsd(s.mode, com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd), s.liveTradeUsd)
+        // Armed desk: the lightning button stays the paper size. Live size is only the LIVE strip.
+        val paperTap = com.dirk.nightdesk.OneTap.defaultTapUsd(tapSaved, s.defaultBuyUsd, s.positionCapUsd)
+        val tapNow = if (s.liveBook != null) paperTap else com.dirk.nightdesk.OneTap.effectiveTapUsd(s.mode, paperTap, s.liveTradeUsd)
         OneTapUi(
             tapUsd = tapNow,
             capUsd = s.positionCapUsd,
@@ -342,7 +343,10 @@ fun NightDeskApp(desk: DeskRepository) {
             openCount = s.positions.size,
             onBuy = { mint, symbol ->
                 haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
-                scope.launch { desk.oneTapBuy(mint, symbol, tapNow) }
+                scope.launch {
+                    if (s.mode == "live" && s.liveBook == null) desk.liveTapBuy(mint, symbol, s.liveTradeUsd, null)
+                    else desk.oneTapBuy(mint, symbol, tapNow)
+                }
             },
             onSell = { mint, symbol ->
                 haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
@@ -1634,7 +1638,7 @@ private fun TapeScreen(
             title = { Text(if (ban != null) "Buy $symbol anyway?" else "Buy $symbol?") },
             text = {
                 Column {
-                    Text("Size starts at the current cap. A larger number is filled at the cap, never above it. No add while this mint is open. Paper fills on the desk. A real swap happens only when the desk is already live.")
+                    Text("Size starts at the current cap. A larger number is filled at the cap, never above it. No add while this mint is open. This Buy fills the paper book. A real swap is only LIVE BUY, and only after the checklist is marked.")
                     if (ban != null) {
                         Spacer(Modifier.height(8.dp))
                         Text(
@@ -1691,7 +1695,7 @@ private fun LinkScreen(desk: DeskRepository) {
         useManual = link.useManual
         loaded = true
     }
-    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Desk link", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
         Text(
             "The phone reads the live tunnel from the desk beacon on its own. A new trycloudflare host shows up here without pasting. Hold a URL only when you want to override that.",
@@ -1892,7 +1896,7 @@ internal fun shortConnectionError(error: String?, status: String): String {
     if (raw.isEmpty()) return if (status.isBlank()) "Reconnecting to the desk…" else "$status…"
     val host = Regex("""host "?([a-z0-9.-]+)""", RegexOption.IGNORE_CASE).find(raw)?.groupValues?.get(1)
     if (host != null) return "Can't reach ${host.substringBefore(".trycloudflare.com")}"
-    if (raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true)) return "Desk is slow to answer · retrying"
+    if (raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true)) return "Desk is slow to answer. Do not tap a live buy again until you see a signature or a refusal."
     return raw.take(90)
 }
 
@@ -1987,7 +1991,7 @@ private fun OneTapChip(ui: OneTapUi, modifier: Modifier = Modifier, onOpen: () -
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text((if (ui.live) "LIVE " else "") + com.dirk.nightdesk.TapeToolbar.oneTapChip(ui.tapUsd, ui.slipPct), color = P.ink, fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Text((if (ui.live && !ui.split) "LIVE " else "") + com.dirk.nightdesk.TapeToolbar.oneTapChip(ui.tapUsd, ui.slipPct), color = P.ink, fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         Text("  ▴", color = P.accent, fontSize = 12.sp)
     }
 }

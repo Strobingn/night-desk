@@ -57,7 +57,9 @@ function liveDesk(balances: () => Promise<WalletBalances> = rich, dbDir?: string
     cfg.logPath = path.join(dbDir, "desk.log");
     cfg.resetPaper = false;
   }
-  return new Desk(cfg, { walletBalances: balances, lookupFetch });
+  const desk = new Desk(cfg, { walletBalances: balances, lookupFetch });
+  desk.setOperatorReady(true);
+  return desk;
 }
 
 function liveFill(sizeUsd: number, price = 1.01) {
@@ -197,7 +199,7 @@ describe("v13.5 live orders", () => {
       const m = "TapLive111111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m, symbol: "TAP", priceUsd: 1, liquidityUsd: 180_000 }));
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
-      const [first, second] = await Promise.all([desk.manualBuy(m, 1223), desk.manualBuy(m, 1223)]);
+      const [first, second] = await Promise.all([desk.manualBuy(m, 1223, { book: "live" }), desk.manualBuy(m, 1223, { book: "live" })]);
       expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
       expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", sizeUsd: 5 });
       expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1);
@@ -229,7 +231,7 @@ describe("v13.5 live orders", () => {
       const mints = ["SellAllA1111111111111111111111111111111111", "SellAllB1111111111111111111111111111111111"];
       for (const m of mints) {
         await desk.submitCandidate(makeToken({ mint: m, symbol: m.slice(0, 5), priceUsd: 1, liquidityUsd: 180_000 }));
-        expect((await desk.manualBuy(m)).ok).toBe(true);
+        expect((await desk.manualBuy(m, undefined, { book: "live" })).ok).toBe(true);
       }
       const paperOnly = await desk.closeAllPositions();
       expect(paperOnly.sold).toHaveLength(0);
@@ -250,12 +252,12 @@ describe("v13.5 live orders", () => {
       const mk = (i: number) => `Cap${i}`.padEnd(43, "1");
       for (let i = 0; i < 3; i += 1) {
         await desk.submitCandidate(makeToken({ mint: mk(i), symbol: `C${i}`, priceUsd: 1, liquidityUsd: 180_000 }));
-        expect((await desk.manualBuy(mk(i))).ok).toBe(true);
+        expect((await desk.manualBuy(mk(i), undefined, { book: "live" })).ok).toBe(true);
       }
       expect(desk.liveSpentTodayUsd()).toBe(15);
       desk.updateSettings({ liveDailyCapUsd: 18 });
       await desk.submitCandidate(makeToken({ mint: mk(3), symbol: "C3", priceUsd: 1, liquidityUsd: 180_000 }));
-      const refused = await desk.manualBuy(mk(3));
+      const refused = await desk.manualBuy(mk(3), undefined, { book: "live" });
       expect(refused).toMatchObject({ ok: false, code: "LIVE_DAILY_CAP" });
     } finally {
       desk.stop();
@@ -274,7 +276,7 @@ describe("v13.5 live orders", () => {
         desk.updateSettings({ autoBuy: false });
         const m = "Fail1111111111111111111111111111111111111111".slice(0, 43);
         await desk.submitCandidate(makeToken({ mint: m, symbol: "FAIL", priceUsd: 1, liquidityUsd: 180_000 }));
-        const out = await desk.manualBuy(m);
+        const out = await desk.manualBuy(m, undefined, { book: "live" });
         expect(out).toMatchObject({ ok: false, code: "LIVE_WALLET" });
         if (!out.ok) expect(out.error).toMatch(msg);
       } finally {
@@ -349,7 +351,7 @@ describe("v13.5 live trail (1%) and the −6% hard stop", () => {
       desk.updateSettings({ autoBuy: false });
       const m = "Trail1111111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m, symbol: "TRL", priceUsd: 1, liquidityUsd: 180_000 }));
-      expect((await desk.manualBuy(m)).ok).toBe(true);
+      expect((await desk.manualBuy(m, undefined, { book: "live" })).ok).toBe(true);
       await desk.markPrice(m, 1.05);
       expect(desk.liveBook!.positions.has(m)).toBe(true);
       expect(desk.liveBook!.positions.get(m)!.markPeak).toBe(1.05);
@@ -455,7 +457,7 @@ describe("v13.5 .env wallet keys and the $100 live cap", () => {
       expect(desk.updateSettings({ liveTradeUsd: 101 }).ok).toBe(false);
       const m = "Hundred11111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m, symbol: "HUN", priceUsd: 1, liquidityUsd: 900_000 }));
-      expect(await desk.manualBuy(m, 1223)).toMatchObject({ ok: true, sizeUsd: 100 });
+      expect(await desk.manualBuy(m, 1223, { book: "live" })).toMatchObject({ ok: true, sizeUsd: 100 });
       expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ sizeUsd: 100 });
     } finally {
       desk.stop();
@@ -478,7 +480,7 @@ describe("v13.5 .env wallet keys and the $100 live cap", () => {
       desk.updateSettings({ autoBuy: false, liveDailyCapUsd: 20 });
       const m = "PumpCurve111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m, symbol: "PCURVE", priceUsd: 1, liquidityUsd: 180_000, dex: "pump.fun curve", priceFeed: "chain" }));
-      const bought = await desk.manualBuy(m, 80);
+      const bought = await desk.manualBuy(m, 80, { book: "live" });
       expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 5 });
       expect(pumpLive.executePumpLiveSwap).toHaveBeenCalledTimes(1);
       expect(pumpLive.executePumpLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint: m, sizeUsd: 5, solPriceUsd: 150 });

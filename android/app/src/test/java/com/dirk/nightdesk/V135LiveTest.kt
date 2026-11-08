@@ -48,7 +48,7 @@ class V135LiveTest {
 
     @Test fun walletLinesSayWhatToFillWhenNoKey() {
         val none = parseWallet(JSONObject("""{"keyLoaded":false,"keyInvalid":false,"publicKey":null,"live":false,"liveRequested":false,"rpcPublic":false}"""))!!
-        assertTrue(OneTap.walletLines(none, "paper")[0].contains("Fill WALLET_PRIVATE_KEY="))
+        assertTrue(OneTap.walletLines(none, "paper")[0].contains("Set WALLET_PRIVATE_KEY on the desk host"))
         val bad = parseWallet(JSONObject("""{"keyLoaded":false,"keyInvalid":true,"live":false,"liveRequested":true}"""))!!
         val lines = OneTap.walletLines(bad, "paper")
         assertTrue(lines[0].contains("not a Solana private key"))

@@ -1,5 +1,6 @@
 import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
+import { LiveSubmitError } from "../market/live-submit.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
@@ -71,6 +72,36 @@ import { ORDER_MARK_MAX_AGE_MS, ORDER_MAX_TRIES, ORDER_RETRY_MS, OrderList, PERM
 const LIVE_KEY = "live:";
 function bookKey(kind: BookKind, mint: string): string {
   return kind === "live" ? `${LIVE_KEY}${mint}` : mint;
+}
+
+interface UnconfirmedLive {
+  mint: string;
+  symbol: string;
+  side: "buy" | "sell";
+  signature: string | null;
+  at: number;
+  message: string;
+  landed?: boolean;
+}
+
+function loadUnconfirmed(raw: unknown): Map<string, UnconfirmedLive> {
+  const map = new Map<string, UnconfirmedLive>();
+  if (!Array.isArray(raw)) return map;
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const item = row as Partial<UnconfirmedLive>;
+    if ((item.side !== "buy" && item.side !== "sell") || typeof item.mint !== "string" || !item.mint) continue;
+    map.set(`${item.side}:${item.mint}`, {
+      mint: item.mint,
+      symbol: typeof item.symbol === "string" ? item.symbol : item.mint.slice(0, 4),
+      side: item.side,
+      signature: typeof item.signature === "string" && item.signature ? item.signature : null,
+      at: typeof item.at === "number" ? item.at : Date.now(),
+      message: typeof item.message === "string" ? item.message : "Confirmation unknown.",
+      landed: item.landed === true
+    });
+  }
+  return map;
 }
 
 type SettingsPatch = {
@@ -299,6 +330,9 @@ export class Desk {
   private walletBalances: WalletBalances | null = null;
   private walletTimer: NodeJS.Timeout | null = null;
   private readonly walletReader: () => Promise<WalletBalances>;
+  private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
+  /** A live swap that was submitted (or may have been) and is not a booked fill. Blocks another send. */
+  private unconfirmedLive = new Map<string, UnconfirmedLive>();
   private readonly inflight = new Set<Promise<unknown>>();
   private cooldowns = new Map<string, number>();
   /** First >30% print inside 10s of entry, keyed by mint. The feed has to repeat it. */
@@ -345,7 +379,15 @@ export class Desk {
 
   constructor(
     config: DeskConfig,
-    deps: { priceFetch?: typeof fetch; lookupFetch?: typeof fetch; chainFetch?: typeof fetch; walletBalances?: () => Promise<WalletBalances>; depthFetch?: typeof fetch } = {}
+    deps: {
+      priceFetch?: typeof fetch;
+      lookupFetch?: typeof fetch;
+      chainFetch?: typeof fetch;
+      walletBalances?: () => Promise<WalletBalances>;
+      depthFetch?: typeof fetch;
+      /** Tests inject this. Production reads signature status and does not send. */
+      signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
+    } = {}
   ) {
     this.config = config;
     // v13.8: re-read pool depth before a buy when the sighting has none. Live feeds only (tests inject).
@@ -413,6 +455,7 @@ export class Desk {
     if (typeof saved.allowUnlockedLp === "boolean") this.allowUnlockedLp = saved.allowUnlockedLp;
     this.absorbGates(saved);
     this.operatorReady = saved.operatorReady === true;
+    this.signatureStatus = deps.signatureStatus;
     this.walletStatus = inspectDeskWallet({ readEnvSecret: config.readWalletSecret, keypairPath: config.walletKeypairPath });
     const owner = this.walletStatus.walletPublicKey;
     this.walletReader =
@@ -458,6 +501,7 @@ export class Desk {
     }
     this.resetAt = this.ensureResetAt();
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
+    this.unconfirmedLive = loadUnconfirmed(this.store.readJson("liveUnconfirmed"));
     this.orders = new OrderList(this.store.readJson("orders"));
     this.bootAt = Date.now();
     for (const [mint, at] of this.book.lastMarkAt) this.bootMarks.set(`paper:${mint}`, at);
@@ -1708,8 +1752,17 @@ export class Desk {
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const cleaned = mint.trim();
     if (!cleaned) return { ok: false, error: "Mint is required.", code: "PRICE_UNAVAILABLE" };
-    // v13.7: on an armed desk Dirk's manual buys go live by default; the AI stays on paper.
-    const kind: BookKind = opts?.book === "paper" ? "paper" : opts?.book === "live" || this.liveBook ? "live" : "paper";
+    // An armed desk used to treat a missing book as live. Paper buttons omitted the
+    // field, so a tap the operator meant as paper was sent as a real swap.
+    // Missing book on an armed desk fills nothing and sends nothing.
+    if (opts?.book !== "paper" && opts?.book !== "live") {
+      if (this.liveBook) {
+        const error = "Buy refused. The request did not name paper or live, and this desk is armed. Nothing was filled and nothing was sent.";
+        this.log({ stage: "executor", kind: "reject", code: "BOOK_REQUIRED", message: error, mint: cleaned });
+        return { ok: false, error, code: "BOOK_REQUIRED" };
+      }
+    }
+    const kind: BookKind = opts?.book === "live" ? "live" : "paper";
     if (kind === "live" && !this.liveBook) {
       const error = this.liveNotArmedMessage();
       this.log({ stage: "executor", kind: "reject", mint: cleaned, code: "LIVE_NOT_ARMED", message: `Manual buy refused. ${error}` });
@@ -1762,7 +1815,7 @@ export class Desk {
       mint: token.mint,
       symbol: token.symbol,
       code: "MANUAL_BUY",
-      message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)}.`
+      message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)} on the ${kind} book.`
     });
     // Hard kills (mint authority not revoked, dev rug link) need the operator's "Buy anyway".
     if (!this.bk(kind).positions.has(token.mint)) {
@@ -2171,6 +2224,14 @@ export class Desk {
         ? SIZING_BAND.manualMaxPct
         : Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     if (isLive) {
+      const pending = await this.blockIfUnconfirmed(token.mint, "buy", token.symbol);
+      if (pending) return pending;
+      if (!this.operatorReady) {
+        const error = "Live buy refused. operatorReady is false. Mark the checklist on purpose before a live buy is sent. Nothing was sent, and no paper trade was placed instead.";
+        this.pipeline.executorSkips += 1;
+        this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "OPERATOR_NOT_READY", message: error });
+        return { ok: false, error, code: "OPERATOR_NOT_READY" };
+      }
       // v13.5: every live buy uses the live size. A larger request (e.g. the phone's
       // paper one-tap amount) is cut to it. Never the paper position size.
       requestedUsd = requestedUsd != null && requestedUsd > 0 ? Math.min(requestedUsd, this.liveTradeUsd) : this.liveTradeUsd;
@@ -2384,6 +2445,13 @@ export class Desk {
           );
           return this.bought(token, sized, "live");
         } catch (err) {
+          if (err instanceof LiveSubmitError) {
+            if (err.submitState === "submitted_unknown") {
+              this.rememberUnconfirmed({ mint: token.mint, symbol: token.symbol, side: "buy", signature: err.signature, at: Date.now(), message: err.message });
+            }
+            this.skipLive(token, score, err.message);
+            return { ok: false, error: err.message, code: err.code, signature: err.signature ?? undefined, submitState: err.submitState };
+          }
           const message = err instanceof Error ? err.message : String(err);
           const code = /entry slippage/i.test(message) ? ("ENTRY_SLIPPAGE" as const) : ("LIVE_SWAP_FAILED" as const);
           this.skipLive(token, score, message);
@@ -2532,6 +2600,11 @@ export class Desk {
     if (!pos) return;
     try {
       if (kind === "live") {
+        const pending = await this.blockIfUnconfirmed(order.mint, "sell", pos.symbol);
+        if (pending) {
+          pos.closing = false;
+          return;
+        }
         const read = await this.refreshWallet();
         if (!read || read.error != null || read.sol == null) {
           throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
@@ -2593,13 +2666,18 @@ export class Desk {
       );
     } catch (err) {
       pos.closing = false;
+      if (err instanceof LiveSubmitError && err.submitState === "submitted_unknown") {
+        this.rememberUnconfirmed({ mint: pos.mint, symbol: pos.symbol, side: "sell", signature: err.signature, at: Date.now(), message: err.message });
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof LiveSubmitError ? err.code : "LIVE_SWAP_FAILED";
       this.log({
         stage: "executor",
         kind: "reject",
         mint: pos.mint,
         symbol: pos.symbol,
-        code: "LIVE_SWAP_FAILED",
+        code,
         message: `Executor could not close ${pos.symbol}. ${message}`
       });
     }
@@ -3703,6 +3781,83 @@ export class Desk {
       return { ok: false, error: `Wallet has ${money(read.usdc ?? 0)} USDC. A live buy spends ${money(sizeUsd)} USDC.`, code: "LIVE_WALLET" };
     }
     return { ok: true };
+  }
+
+  private persistUnconfirmed(): void {
+    this.store.writeJson("liveUnconfirmed", [...this.unconfirmedLive.values()]);
+  }
+
+  private rememberUnconfirmed(row: UnconfirmedLive): void {
+    this.unconfirmedLive.set(`${row.side}:${row.mint}`, row);
+    this.persistUnconfirmed();
+    this.log({
+      stage: "executor",
+      kind: "reject",
+      mint: row.mint,
+      symbol: row.symbol,
+      code: "LIVE_UNCONFIRMED",
+      message: row.message,
+      detail: row.signature ?? "no signature"
+    });
+  }
+
+  /**
+   * A previous live swap for this mint may already be on the network.
+   * Failed on chain: drop the hold and let this request continue.
+   * Confirmed or still unknown: do not send another swap and do not invent a fill.
+   */
+  private async blockIfUnconfirmed(mint: string, side: "buy" | "sell", symbol: string): Promise<ManualBuyRefusal | null> {
+    const key = `${side}:${mint}`;
+    const held = this.unconfirmedLive.get(key);
+    if (!held) return null;
+    if (held.signature && !held.landed) {
+      const status = await this.lookupSignature(held.signature);
+      if (status === "failed") {
+        this.unconfirmedLive.delete(key);
+        this.persistUnconfirmed();
+        this.log({
+          stage: "executor",
+          kind: "reject",
+          mint,
+          symbol,
+          code: "LIVE_SWAP_FAILED",
+          message: `Signature ${held.signature} failed on chain. Nothing was filled.`,
+          detail: held.signature
+        });
+        return null;
+      }
+      if (status === "confirmed") {
+        held.landed = true;
+        this.persistUnconfirmed();
+      }
+    }
+    const sig = held.signature ? ` Signature ${held.signature}.` : "";
+    const landed = held.landed
+      ? " It has since confirmed on chain. The desk did not book a fill from that and did not send another swap."
+      : " Confirmation is still unknown.";
+    return {
+      ok: false,
+      error: `A live ${side} for ${symbol} was already submitted.${landed}${sig} Nothing new was sent.`,
+      code: "LIVE_UNCONFIRMED",
+      signature: held.signature ?? undefined,
+      submitState: "submitted_unknown"
+    };
+  }
+
+  private async lookupSignature(signature: string): Promise<"confirmed" | "failed" | "unknown"> {
+    if (this.signatureStatus) return this.signatureStatus(signature);
+    try {
+      const web3 = await import("@solana/web3.js");
+      const connection = new web3.Connection(this.config.walletRpcUrl, { commitment: "confirmed", fetch: this.net.fetchAt(1) });
+      const rows = await connection.getSignatureStatuses([signature]);
+      const row = rows.value[0];
+      if (!row) return "unknown";
+      if (row.err) return "failed";
+      if (row.confirmationStatus === "confirmed" || row.confirmationStatus === "finalized") return "confirmed";
+      return "unknown";
+    } catch {
+      return "unknown";
+    }
   }
 
   /** Jupiter for listed coins. The official pump SDK for a pump.fun curve or PumpSwap coin. */

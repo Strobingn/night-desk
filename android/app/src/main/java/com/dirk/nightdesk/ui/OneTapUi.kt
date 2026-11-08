@@ -73,7 +73,7 @@ class OneTapUi(
     /** v13.7 one-tap sell label for a paper-book position on an armed desk (paper, not live). */
     val paperSellLabel: String get() = "⚡ Sell now"
     val sellingAll get() = tapping.contains("sell-all")
-    val buyLabel: String get() = "⚡ Buy " + (if (tapUsd >= 100) "$" + "%.0f".format(Locale.US, tapUsd) else "$" + "%.2f".format(Locale.US, tapUsd)) + (if (live) " LIVE" else "")
+    val buyLabel: String get() = "⚡ Buy " + (if (tapUsd >= 100) "$" + "%.0f".format(Locale.US, tapUsd) else "$" + "%.2f".format(Locale.US, tapUsd)) + (if (live && !split) " LIVE" else "")
     val sellLabel: String get() = if (live) "⚡ Sell now LIVE" else "⚡ Sell now"
 }
 
@@ -98,16 +98,17 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
         if (kotlin.math.abs(c - ui.slipPct) > 1e-9) ui.onSlip(c)
     }
     val maxSize = kotlin.math.max(10.0, kotlin.math.max(ui.maxUsd, kotlin.math.max(ui.capUsd, ui.tapUsd))).toFloat()
+    val realTap = ui.live && !ui.split
     Column(
         modifier
             .fillMaxWidth()
             .background(P.card, RoundedCornerShape(18.dp))
-            .border(if (ui.live) 2.dp else 1.dp, if (ui.live) P.down else P.accent.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
+            .border(if (realTap) 2.dp else 1.dp, if (realTap) P.down else P.accent.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (ui.live) {
+            if (realTap) {
                 Text(
                     "LIVE",
                     color = P.onDown,
@@ -118,7 +119,7 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
                 )
                 Text(" ", fontSize = 11.sp)
             }
-            Text(if (ui.live) "ONE TAP · REAL $" else "ONE TAP", color = if (ui.live) P.down else P.accent, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp, modifier = Modifier.weight(1f))
+            Text(if (realTap) "ONE TAP · REAL $" else "ONE TAP", color = if (realTap) P.down else P.accent, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp, modifier = Modifier.weight(1f))
             if (showSellAll && ui.openCount > 0) {
                 BigButton(
                     if (ui.sellingAll) "Selling all…" else if (armed) "Tap again · sell ${ui.openCount}" + (if (ui.split) " paper" else "") else "Sell all" + (if (ui.split) " paper" else "") + " (${ui.openCount})",
@@ -188,7 +189,7 @@ fun OneTapBar(ui: OneTapUi, modifier: Modifier = Modifier, showSellAll: Boolean 
             )
         }
         Text(
-            (if (ui.live) "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC." else "One tap buys ${fmtUsd(ui.tapUsd)} now (" + com.dirk.nightdesk.OneTap.capHint(ui.capLine, ui.capUsd, ui.tapUsd) + ").") + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
+            (if (ui.live && !ui.split) "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC." else "One tap buys ${fmtUsd(ui.tapUsd)} now (" + com.dirk.nightdesk.OneTap.capHint(ui.capLine, ui.capUsd, ui.tapUsd) + ").") + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
             color = P.dim,
             fontSize = 11.5.sp,
             lineHeight = 15.sp

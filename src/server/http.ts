@@ -148,7 +148,7 @@ export function startServer(
             ignoreCooldown,
             confirmHardKill: record.confirmHardKill === true,
             confirmSize: record.confirmSize === true,
-            // v13.7: armed desk → manual buys are live unless the client asks for the paper book.
+            // Armed desk: the client must name the book. Omitted is refused, not live.
             ...(parseBook(record, url) ? { book: parseBook(record, url) } : {})
           })
           .then((result) => ({ ...result, ms: Date.now() - started }));
@@ -338,7 +338,6 @@ export function startServer(
     }
   }, WS_HEARTBEAT_MS);
   heartbeat.unref();
-  server.on("close", () => clearInterval(heartbeat));
 
   let pending: NodeJS.Timeout | null = null;
   let lastSnapshotAt = 0;
@@ -348,7 +347,12 @@ export function startServer(
     pending = setTimeout(() => {
       pending = null;
       lastSnapshotAt = Date.now();
-      const payload = JSON.stringify({ type: "snapshot", data: desk.snapshot() });
+      let payload: string;
+      try {
+        payload = JSON.stringify({ type: "snapshot", data: desk.snapshot() });
+      } catch {
+        return;
+      }
       // A socket still draining an older snapshot skips this one and gets the latest once it drains.
       if (sendSnapshot(sockets, payload) > 0) push();
     }, wait);
@@ -358,10 +362,22 @@ export function startServer(
     if (marksPending) return;
     marksPending = setTimeout(() => {
       marksPending = null;
-      const payload = JSON.stringify({ type: "marks", data: desk.marksDelta() });
+      let payload: string;
+      try {
+        payload = JSON.stringify({ type: "marks", data: desk.marksDelta() });
+      } catch {
+        return;
+      }
       sendSnapshot(sockets, payload);
     }, WS_MARKS_MS);
   };
+  server.on("close", () => {
+    clearInterval(heartbeat);
+    if (pending) clearTimeout(pending);
+    if (marksPending) clearTimeout(marksPending);
+    pending = null;
+    marksPending = null;
+  });
   desk.bus.on("log.event", () => push());
   // v13.2: a tick only refreshes the tape, so it rides the 1/s snapshot. Held marks go as deltas.
   desk.bus.on("market.tick", () => push());

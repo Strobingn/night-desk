@@ -65,6 +65,7 @@ describe("v13.9 LIVE BUY / LIVE SELL beside a paper position", () => {
       expect(desk.book.positions.has(m)).toBe(true); // AI paper position
       const paper = { ...desk.book.positions.get(m)! };
       expect(desk.snapshot().liveNotArmed).toBeNull();
+      desk.setOperatorReady(true);
       const bought = await desk.manualBuy(m, 5, { book: "live" });
       expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 5 });
       expect(desk.liveBook!.positions.get(m)).toMatchObject({ costUsd: 5, entry: "manual" });

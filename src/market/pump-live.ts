@@ -12,6 +12,7 @@ import { HARD_RULES } from "../rules.js";
 import { IntentError, buildIntent, serializeUnsigned } from "../pump/intents.js";
 import { solanaConnection, type PumpConnection } from "../pump/rpc.js";
 import type { LiveSwapResult } from "./live-broker.js";
+import { CONFIRM_TIMEOUT_MS, isAmbiguousSendError, rejectedSend, unconfirmedSend, withTimeout } from "./live-submit.js";
 import { loadDeskKeypair } from "./wallet-key.js";
 
 export function usesPumpRoute(input: { dex?: string | null; priceFeed?: string | null }): boolean {
@@ -36,19 +37,34 @@ export interface PumpLiveRequest {
   /** Tests pass a fixture connection. Production uses SOLANA_RPC_URL. */
   connection?: PumpConnection;
   /** Tests capture the signed bytes. Production sends them on rpcUrl. */
-  broadcast?: (raw: Uint8Array) => Promise<{ signature: string; err: unknown }>;
+  broadcast?: (raw: Uint8Array) => Promise<{ signature: string; err: unknown; state?: "confirmed" | "rejected" | "unknown" }>;
   /** Exec-lane fetch. Preparation and broadcast do not wait on the 9/min poll budget. */
   rpcFetch?: typeof fetch;
 }
 
-async function defaultBroadcast(rpcUrl: string, raw: Uint8Array, fetchImpl?: typeof fetch): Promise<{ signature: string; err: unknown }> {
+async function defaultBroadcast(
+  rpcUrl: string,
+  raw: Uint8Array,
+  fetchImpl?: typeof fetch
+): Promise<{ signature: string; err: unknown; state: "confirmed" | "rejected" | "unknown" }> {
   const web3 = await import("@solana/web3.js");
   const connection = fetchImpl
     ? new web3.Connection(rpcUrl, { commitment: "confirmed", fetch: fetchImpl })
     : new web3.Connection(rpcUrl, "confirmed");
-  const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 });
-  const confirmed = await connection.confirmTransaction(signature, "confirmed");
-  return { signature, err: confirmed.value.err ?? null };
+  let signature: string;
+  try {
+    signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 });
+  } catch (err) {
+    if (isAmbiguousSendError(err)) return { signature: "", err, state: "unknown" };
+    throw err;
+  }
+  try {
+    const confirmed = await withTimeout(connection.confirmTransaction(signature, "confirmed"), CONFIRM_TIMEOUT_MS, "confirmation");
+    if (confirmed.value.err) return { signature, err: confirmed.value.err, state: "rejected" };
+    return { signature, err: null, state: "confirmed" };
+  } catch (err) {
+    return { signature, err, state: "unknown" };
+  }
 }
 
 export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwapResult> {
@@ -105,7 +121,8 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   if (!tx.signature) throw new Error("LIVE_SWAP_FAILED: transaction was not signed. Nothing was sent.");
   const raw = tx.serialize();
   const sent = await (req.broadcast ?? ((bytes) => defaultBroadcast(req.rpcUrl, bytes, req.rpcFetch)))(raw);
-  if (sent.err) throw new Error(`LIVE_SWAP_FAILED: transaction ${sent.signature} failed on chain`);
+  if (sent.state === "unknown") throw unconfirmedSend(sent.signature || null, req.side);
+  if (sent.err || sent.state === "rejected") throw rejectedSend(sent.signature || "unknown", req.side);
   const feeLamports = Number(built.quote.feeLamports);
   const feeUsd = Number.isFinite(feeLamports) && feeLamports > 0 ? (feeLamports / 1_000_000_000) * req.solPriceUsd : 0;
   const mark = req.markPriceUsd ?? fillPriceUsd;

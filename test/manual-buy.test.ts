@@ -147,10 +147,11 @@ describe("manual buy and live-ready checklist", () => {
       walletBalances: async () => ({ sol: 0.5, usdc: 100, at: Date.now(), error: null })
     });
     try {
-      // v13.5: live buys use the live per-trade size ($5 default). A $25 request is cut to it.
+      // Live buys use the live per-trade size. The client has to name the live book, and the checklist has to be on.
       desk.updateSettings({ liveTradeUsd: 25 });
+      desk.setOperatorReady(true);
       await desk.submitCandidate(quietToken());
-      const bought = await desk.manualBuy(mint, 25);
+      const bought = await desk.manualBuy(mint, 25, { book: "live" });
       expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 25 });
       expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
       expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint, sizeUsd: 25 });

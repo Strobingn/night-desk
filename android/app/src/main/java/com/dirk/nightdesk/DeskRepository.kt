@@ -97,8 +97,15 @@ class DeskRepository private constructor(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + crashHandler)
     private val http = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
-        .callTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(BuyRoute.PAPER_BUY_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)
         .build()
+    /** Live buys wait long enough to hear "nothing was sent" or "signature, confirmation unknown". */
+    private val liveHttp = OkHttpClient.Builder()
+        .callTimeout(BuyRoute.LIVE_BUY_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)
+        .readTimeout(BuyRoute.LIVE_BUY_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)
+        .build()
+    /** Same key until the desk gives a terminal answer, so a timed-out tap is not a second swap. */
+    private val liveIdem = java.util.concurrent.ConcurrentHashMap<String, String>()
     /** Health checks through the tunnel need more than the 2s LAN probe. */
     private val healthHttp = OkHttpClient.Builder()
         .callTimeout(6, TimeUnit.SECONDS)
@@ -511,11 +518,7 @@ class DeskRepository private constructor(private val context: Context) {
             _notice.value = notice
             return@withContext notice
         }
-        val body = JSONObject().put("mint", mint)
-        if (sizeUsd != null && sizeUsd.isFinite()) body.put("sizeUsd", sizeUsd)
-        if (ignoreCooldown) body.put("ignoreCooldown", true)
-        if (confirmHardKill) body.put("confirmHardKill", true)
-        if (confirmSize) body.put("confirmSize", true)
+        val body = BuyRoute.paperDialog(mint, sizeUsd, ignoreCooldown, confirmHardKill, confirmSize)
         val notice = sendRaw("$base/api/positions/buy", body.toString()).fold(
             onSuccess = { (_, raw) ->
                 val json = runCatching { JSONObject(raw) }.getOrNull()
@@ -591,7 +594,7 @@ class DeskRepository private constructor(private val context: Context) {
         try {
             val base = link.baseUrl
             if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
-            val body = JSONObject().put("mint", mint).put("sizeUsd", sizeUsd).put("idemKey", OneTap.newIdemKey()).put("oneTap", true)
+            val body = BuyRoute.paperOneTap(mint, sizeUsd, OneTap.newIdemKey())
             val started = System.nanoTime()
             val notice = sendRaw("$base/api/positions/buy", body.toString()).fold(
                 onSuccess = { (code, raw) ->
@@ -620,15 +623,21 @@ class DeskRepository private constructor(private val context: Context) {
         try {
             val base = link.baseUrl
             if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
-            val body = JSONObject().put("mint", mint).put("sizeUsd", sizeUsd).put("book", "live").put("idemKey", OneTap.newIdemKey()).put("oneTap", true)
+            val idem = liveIdem.getOrPut(mint) { OneTap.newIdemKey() }
+            val body = BuyRoute.liveOneTap(mint, sizeUsd, idem)
             val started = System.nanoTime()
-            val notice = sendRaw("$base/api/positions/buy", body.toString()).fold(
+            val notice = sendRaw("$base/api/positions/buy", body.toString(), liveHttp).fold(
                 onSuccess = { (code, raw) ->
                     val json = runCatching { JSONObject(raw) }.getOrNull()
                     val ok = code in 200..299 && json?.optBoolean("ok", false) == true
+                    val refusal = json?.optString("code").orEmpty()
+                    if (ok || (refusal.isNotEmpty() && refusal != "LIVE_UNCONFIRMED")) liveIdem.remove(mint)
                     DeskNotice(ok, OneTap.buyText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
                 },
-                onFailure = { err -> DeskNotice(false, "$symbol: ${err.message ?: "live buy failed"}") }
+                onFailure = { err ->
+                    val timedOut = err is java.io.InterruptedIOException || (err.message ?: "").contains("timeout", ignoreCase = true)
+                    DeskNotice(false, if (timedOut) BuyRoute.liveTimeoutNotice(symbol) else "$symbol: ${err.message ?: "live buy failed"}")
+                }
             )
             _notice.value = notice
             refresh()
@@ -887,11 +896,11 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** Returns the HTTP code and body even on a 4xx, so the caller can read a refusal code like HARD_KILL. */
-    private suspend fun sendRaw(url: String, json: String?): Result<Pair<Int, String>> = withContext(Dispatchers.IO) {
+    private suspend fun sendRaw(url: String, json: String?, client: OkHttpClient = http): Result<Pair<Int, String>> = withContext(Dispatchers.IO) {
         runCatching {
             val builder = Request.Builder().url(withToken(url)).authed()
             if (json != null) builder.post(json.toRequestBody(JSON))
-            http.newCall(builder.build()).execute().use { response ->
+            client.newCall(builder.build()).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (response.code == 401) error("Desk token missing or wrong.")
                 if (response.code >= 500 && body.isBlank()) error("HTTP ${response.code}")
