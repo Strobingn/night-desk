@@ -183,7 +183,16 @@ class NativePaperGateTest {
 
     private fun waitFor(text: String, timeoutMs: Long = 20_000) {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
-        if (device.wait(Until.hasObject(By.textContains(text)), timeoutMs)) return
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            // Real-time wait so the desk can answer, then a Compose check. Some notices are in
+            // the semantics tree and not in the accessibility text UiAutomator searches.
+            if (device.wait(Until.hasObject(By.textContains(text)), 1_000)) return
+            val seen = runCatching {
+                rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
+            if (seen) return
+        }
         val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 12) }.getOrElse { it.message ?: "" }
         throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(2500)}")
     }
