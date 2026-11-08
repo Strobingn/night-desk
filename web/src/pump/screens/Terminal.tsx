@@ -144,16 +144,20 @@ export function Terminal() {
         </button>
       </form>
       <div className="term-grid">
-        <Stat label="Market cap" value={curve ? `${formatSol(curve.marketCapLamports)} SOL` : "—"} />
-        <Stat label="Progress" value={curve ? `${curve.progressPct.toFixed(2)}%` : "—"} />
-        <Stat label="SOL in curve" value={curve ? formatSol(curve.solInCurveLamports) : "—"} />
-        <Stat label="SOL to graduate" value={curve ? formatSol(curve.solRemainingLamports) : "—"} />
-        <Stat label="Graduation mcap" value={curve ? `${formatSol(curve.graduationMarketCapLamports)} SOL` : "—"} />
+        <Stat label="Market cap" value={solText(curve?.quoteIsSol, curve?.marketCapLamports, " SOL")} />
+        <Stat label="Progress" value={curve?.progressPct != null ? `${curve.progressPct.toFixed(2)}%` : "—"} />
+        <Stat label="SOL in curve" value={curve?.quoteIsSol === false || curve?.solInCurveLamports == null ? "—" : formatSol(curve.solInCurveLamports)} />
+        <Stat label="SOL to graduate" value={solText(curve?.quoteIsSol, curve?.solRemainingLamports)} />
+        <Stat label="Graduation mcap" value={solText(curve?.quoteIsSol, curve?.graduationMarketCapLamports, " SOL")} />
         <Stat label="Wallet" value={wallet ? short(wallet.address) : "Not connected"} />
       </div>
       <CurveChart points={feed.ticks} />
+      {curve && curve.quoteIsSol === false ? <p className="fine">Quote mint is not SOL. SOL figures stay blank.</p> : null}
+      {curve && curve.quoteIsSol !== false && curve.solInCurveLamports == null && curve.realQuoteReserves !== "0" ? (
+        <p className="fine">Real quote is {curve.realQuoteReserves} raw and is not SOL deposited. The price uses virtual reserves.</p>
+      ) : null}
       <ul className="tape" aria-label="Buy and sell tape">
-        {feed.tape.length === 0 ? <li className="dim">No prints yet.</li> : null}
+        {feed.tape.length === 0 ? <li className="dim">No prints on the free stream.</li> : null}
         {feed.tape.map((row) => (
           <li key={row.id}>
             <span className={row.isBuy ? "up" : "down"}>{row.isBuy ? "Buy" : "Sell"}</span>
@@ -162,6 +166,7 @@ export function Terminal() {
           </li>
         ))}
       </ul>
+      {feed.tapeNote ? <p className="fine">{feed.tapeNote}</p> : null}
       <div className="term-buy">
         <label>
           Target mcap (SOL)
@@ -197,6 +202,11 @@ export function Terminal() {
       {note ? <p className="fine">{note}</p> : null}
     </section>
   );
+}
+
+function solText(quoteIsSol: boolean | undefined, lamports: string | null | undefined, suffix = ""): string {
+  if (quoteIsSol === false || lamports == null) return "—";
+  return `${formatSol(lamports)}${suffix}`;
 }
 
 function Stat({ label, value }: { label: string; value: string }) {

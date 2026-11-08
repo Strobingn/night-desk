@@ -6,6 +6,7 @@ import type { CurveState, TradeEvent } from "../../../src/pump/types";
 export interface CurveFeed extends FeedState {
   stale: boolean;
   error: string | null;
+  tapeNote: string | null;
 }
 
 /**
@@ -15,6 +16,7 @@ export interface CurveFeed extends FeedState {
 export function useCurveFeed(mint: string): CurveFeed {
   const [state, setState] = useState<FeedState>(EMPTY_FEED);
   const [error, setError] = useState<string | null>(null);
+  const [tapeNote, setTapeNote] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -26,8 +28,16 @@ export function useCurveFeed(mint: string): CurveFeed {
     const trimmed = mint.trim();
     setState(EMPTY_FEED);
     setError(null);
-    if (!trimmed) return;
+    setTapeNote(null);
     let stopped = false;
+    if (!trimmed) {
+      void api<{ tape?: { reason?: string } }>("/api/pump/trades?limit=1").then((trades) => {
+        if (!stopped && trades.ok) setTapeNote(trades.body.tape?.reason ?? null);
+      });
+      return () => {
+        stopped = true;
+      };
+    }
     const apply = (data: unknown) => {
       if (stopped) return;
       setState((prev) => reducePumpFrame(prev, data, Date.now()));
@@ -35,12 +45,13 @@ export function useCurveFeed(mint: string): CurveFeed {
     const pull = async () => {
       const [curve, trades] = await Promise.all([
         api<{ curve?: CurveState }>(`/api/pump/curve?mint=${encodeURIComponent(trimmed)}`),
-        api<{ trades?: TradeEvent[] }>(`/api/pump/trades?mint=${encodeURIComponent(trimmed)}&limit=40`)
+        api<{ trades?: TradeEvent[]; tape?: { reason?: string } }>(`/api/pump/trades?mint=${encodeURIComponent(trimmed)}&limit=40`)
       ]);
       if (stopped) return;
       if (curve.ok && curve.body.curve) apply(curve.body.curve);
       if (trades.ok && trades.body.trades) {
         for (const trade of [...trades.body.trades].reverse()) apply(trade);
+        setTapeNote(trades.body.tape?.reason ?? null);
       }
       if (!curve.ok && curve.status !== 404) setError(curve.body.error ?? "Curve request failed.");
     };
@@ -77,5 +88,5 @@ export function useCurveFeed(mint: string): CurveFeed {
     };
   }, [mint]);
 
-  return { ...state, stale: isFeedStale(state.lastTickAt, now), error };
+  return { ...state, stale: isFeedStale(state.lastTickAt, now), error, tapeNote };
 }

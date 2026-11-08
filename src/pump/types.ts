@@ -21,19 +21,27 @@ export interface CurveState {
   isMayhemMode: boolean;
   /** Null on a legacy SOL curve (the account stores the zero pubkey). */
   quoteMint: string | null;
-  /** `virtualQuote * supply / virtualToken`, lamports. */
+  /** False when `quoteMint` is a non-SOL mint. Missing on an older saved curve means SOL. */
+  quoteIsSol: boolean;
+  /** `virtualQuote * supply / virtualToken`, in quote atoms. SOL lamports only when `quoteIsSol`. */
   marketCapLamports: RawAmount;
-  /** 0–100. Token progress toward `realTokenReserves = 0` on the canonical SOL curve. */
-  progressPct: number;
-  /** Real quote sitting in the curve, lamports. */
-  solInCurveLamports: RawAmount;
+  /**
+   * 0–100 on the canonical SOL token offset, or from a real quote that is at least 0.01 SOL.
+   * Null when the only progress signal would be a dust real-quote sentinel.
+   */
+  progressPct: number | null;
+  /**
+   * SOL deposited on the curve, lamports. Null when the quote is not SOL, or when
+   * `realQuoteReserves` is below 0.01 SOL (Mayhem keeps this field at 1 lamport).
+   */
+  solInCurveLamports: RawAmount | null;
   /**
    * Additional quote the curve must receive to buy out `realTokenReserves`
-   * (SDK floor-div + 1, fees not included). Lamports.
+   * (SDK floor-div + 1, fees not included). Null when the quote is not SOL.
    */
-  solRemainingLamports: RawAmount;
-  /** Market cap once `realTokenReserves` hits 0, lamports. */
-  graduationMarketCapLamports: RawAmount;
+  solRemainingLamports: RawAmount | null;
+  /** Market cap once `realTokenReserves` hits 0. Null when the quote is not SOL. */
+  graduationMarketCapLamports: RawAmount | null;
 }
 
 export interface TradeEvent {

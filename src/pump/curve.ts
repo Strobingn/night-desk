@@ -13,6 +13,18 @@
 import { PublicKey } from "@solana/web3.js";
 import type { CurveState, RawAmount, ReverseQuote, TradeQuote } from "./types.js";
 
+/** BondingCurve account discriminator from the pump public IDL. */
+export const BONDING_CURVE_DISC = Uint8Array.of(23, 183, 248, 55, 96, 216, 172, 96);
+
+export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+/** Below this, `realQuoteReserves` is not treated as SOL sitting in the curve. */
+export const MIN_DEPOSITED_SOL = 10_000_000n;
+
+export function quoteIsSolMint(mint: string | null | undefined): boolean {
+  return mint == null || mint === "" || mint === PublicKey.default.toBase58() || mint === WSOL_MINT;
+}
+
 export interface CurveReserves {
   virtualTokenReserves: bigint;
   virtualQuoteReserves: bigint;
@@ -144,21 +156,35 @@ export function graduationMarketCapLamports(reserves: CurveReserves): bigint {
   return ((reserves.virtualQuoteReserves + added) * reserves.tokenTotalSupply) / endToken;
 }
 
-export function progressPct(reserves: CurveReserves): number {
+/**
+ * SOL actually deposited, in lamports. A 1-lamport Mayhem `realQuoteReserves`
+ * is the on-chain field, not the SOL that traded. Non-SOL quotes are not SOL.
+ */
+export function depositedSolLamports(reserves: CurveReserves): bigint | null {
+  if (!quoteIsSolMint(reserves.quoteMint)) return null;
+  return reserves.realQuoteReserves >= MIN_DEPOSITED_SOL ? reserves.realQuoteReserves : null;
+}
+
+export function progressPct(reserves: CurveReserves): number | null {
+  if (reserves.virtualTokenReserves <= 0n) return null;
+  if (reserves.realTokenReserves > reserves.virtualTokenReserves) return null;
   if (reserves.complete || reserves.realTokenReserves <= 0n) return 100;
   const offset = reserves.virtualTokenReserves - reserves.realTokenReserves;
   if (offset === CANONICAL_OFFSET && reserves.realTokenReserves <= CANONICAL_REAL) {
     const sold = CANONICAL_REAL - reserves.realTokenReserves;
     return Number((sold * 10_000n) / CANONICAL_REAL) / 100;
   }
+  const deposited = depositedSolLamports(reserves);
+  if (deposited == null) return null;
   const left = solRemaining(reserves);
-  const inn = reserves.realQuoteReserves;
-  const denom = inn + left;
-  if (denom <= 0n) return 0;
-  return Number((inn * 10_000n) / denom) / 100;
+  const denom = deposited + left;
+  if (denom <= 0n) return null;
+  return Number((deposited * 10_000n) / denom) / 100;
 }
 
 export function curveState(mint: string, reserves: CurveReserves): CurveState {
+  const sol = quoteIsSolMint(reserves.quoteMint);
+  const deposited = depositedSolLamports(reserves);
   return {
     mint,
     virtualTokenReserves: raw(reserves.virtualTokenReserves),
@@ -170,11 +196,12 @@ export function curveState(mint: string, reserves: CurveReserves): CurveState {
     creator: reserves.creator ?? PublicKey.default.toBase58(),
     isMayhemMode: Boolean(reserves.isMayhemMode),
     quoteMint: reserves.quoteMint ?? null,
+    quoteIsSol: sol,
     marketCapLamports: raw(marketCapLamports(reserves)),
     progressPct: progressPct(reserves),
-    solInCurveLamports: raw(reserves.realQuoteReserves),
-    solRemainingLamports: raw(solRemaining(reserves)),
-    graduationMarketCapLamports: raw(graduationMarketCapLamports(reserves))
+    solInCurveLamports: deposited == null ? null : raw(deposited),
+    solRemainingLamports: sol ? raw(solRemaining(reserves)) : null,
+    graduationMarketCapLamports: sol ? raw(graduationMarketCapLamports(reserves)) : null
   };
 }
 

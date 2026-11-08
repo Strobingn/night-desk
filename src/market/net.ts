@@ -39,7 +39,7 @@ export interface BucketSpec {
  * - DexPaprika: response headers ratelimit-limit 10 per window; budget 8/min.
  * - Bitquery free: 10/min; budget 8/min.
  * v13.3 (checked 2026-10-31, keyless):
- * - Pump.fun frontend-api-v3 /coins: x-ratelimit-limit 60 per window; budget 45/min (desk polls 6/min).
+ * - Pump.fun frontend-api-v3 /coins is not called (Cloudflare challenge). The bucket remains so a stray URL is still named.
  * - Raydium LaunchLab (Bonk.fun and other LaunchLab platforms) /get/list: no published limit
  *   and no rate headers, so stay polite at 8/min (desk polls 4/min).
  */

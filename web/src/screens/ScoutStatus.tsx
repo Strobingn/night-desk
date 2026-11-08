@@ -41,7 +41,7 @@ export function ScoutStatus({ feed, compact = false }: { feed: DeskSnapshot["fee
   if (!sources.length) return null;
   const live = sources.filter((s) => s.state === "live").length;
   // v12.3: collapsible. Collapsed still lists any source that is backing off or down.
-  const shown = open ? sources : sources.filter((s) => s.state === "backoff" || s.state === "down" || s.state === "stale");
+  const shown = open ? sources : sources.filter((s) => s.state === "backoff" || s.state === "down" || s.state === "stale" || s.state === "blocked");
   if (compact) {
     const sum = scoutSummary(sources);
     return (

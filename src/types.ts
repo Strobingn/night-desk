@@ -344,7 +344,7 @@ export interface FeedStatus {
 }
 
 /** v13.3 "stale": connected but silent past the watchdog window (Pump stream). */
-export type FeedSourceState = "live" | "stale" | "backoff" | "down" | "off";
+export type FeedSourceState = "live" | "stale" | "backoff" | "down" | "blocked" | "off";
 
 export interface FeedSourceStatus {
   id: "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab";

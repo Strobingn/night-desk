@@ -5,7 +5,7 @@
  */
 import { PublicKey } from "@solana/web3.js";
 import { PUMP_SDK, bondingCurvePda, canonicalPumpPoolPda } from "./sdk.js";
-import { curveState, type CurveReserves } from "./curve.js";
+import { BONDING_CURVE_DISC, curveState, type CurveReserves } from "./curve.js";
 import { decodePumpPortalFrame } from "./events.js";
 import { decodePoolAccount } from "./pumpswap.js";
 import type { CurveState, TradeEvent } from "./types.js";
@@ -38,6 +38,7 @@ export class PumpFeed {
     if (parsed.kind === "coin") {
       this.watchMint(parsed.mint);
       this.opts.onCoin(parsed);
+      if (parsed.trade) this.opts.onTrade(parsed.trade);
       return;
     }
     this.watchMint(parsed.event.mint);
@@ -62,7 +63,8 @@ export class PumpFeed {
     const mint = this.accounts.get(account);
     if (!mint) return;
     const buf = Buffer.from(data);
-    try {
+    const disc = buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from(BONDING_CURVE_DISC));
+    if (disc) try {
       const curve = PUMP_SDK.decodeBondingCurve({
         data: buf,
         executable: false,
@@ -83,7 +85,8 @@ export class PumpFeed {
       this.opts.onCurve(curveState(mint, reserves));
       return;
     } catch {
-      /* not a bonding curve */
+      /* discriminator matched but the body is not a BondingCurve we can read */
+      return;
     }
     try {
       decodePoolAccount(buf);

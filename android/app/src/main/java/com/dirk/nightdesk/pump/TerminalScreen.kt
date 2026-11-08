@@ -55,11 +55,13 @@ private fun applyFrame(
     val json = runCatching { JSONObject(text) }.getOrNull() ?: return
     if (json.optString("type") != "pump") return
     val data = json.optJSONObject("data") ?: return
-    if (data.has("marketCapLamports") && !data.has("isBuy")) {
+        if (data.has("marketCapLamports") && !data.has("isBuy")) {
         val next = runCatching { PumpApi.parseCurve(data) }.getOrNull() ?: return
         setCurve(next)
-        points.add(next.marketCapLamports)
-        while (points.size > 240) points.removeAt(0)
+        if (next.quoteIsSol) {
+            points.add(next.marketCapLamports)
+            while (points.size > 240) points.removeAt(0)
+        }
         setTick(System.currentTimeMillis())
     } else if (data.has("isBuy")) {
         tape.add(0, TapePrint(
@@ -96,6 +98,7 @@ fun TerminalScreen() {
     var cap by remember { mutableStateOf("5000000") }
     var wallet by remember { mutableStateOf(SecureStore.open(context).walletPubkey().orEmpty()) }
     var tick by remember { mutableIntStateOf(0) }
+    var tapeNote by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -121,11 +124,15 @@ fun TerminalScreen() {
         api.watch(base, link.token, active)
         api.fetchCurve(base, link.token, active)?.let {
             curve = it
-            points.add(it.marketCapLamports)
-            while (points.size > 240) points.removeAt(0)
+            if (it.quoteIsSol) {
+                points.add(it.marketCapLamports)
+                while (points.size > 240) points.removeAt(0)
+            }
             lastTick = System.currentTimeMillis()
         }
-        val prints = api.trades(base, link.token, active)
+        val page = api.trades(base, link.token, active)
+        tapeNote = page.note
+        val prints = page.prints
         if (prints.isNotEmpty()) {
             tape.clear()
             tape.addAll(prints.take(40))
@@ -163,11 +170,15 @@ fun TerminalScreen() {
         OutlinedTextField(mint, { mint = it }, label = { Text("Mint") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Button(onClick = { active = mint.trim(); tick += 1 }) { Text("Watch") }
         val shown = curve
-        Text("Mcap ${shown?.let { CurveMath.formatSol(it.marketCapLamports) } ?: "—"} SOL", color = P.ink)
-        Text("Progress ${shown?.progressPct?.let { "%.2f".format(it) } ?: "—"}%", color = P.ink)
-        Text("SOL in curve ${shown?.let { CurveMath.formatSol(it.solInCurveLamports) } ?: "—"}", color = P.ink)
-        Text("SOL to graduate ${shown?.let { CurveMath.formatSol(it.solRemainingLamports) } ?: "—"}", color = P.ink)
-        Text("Graduation mcap ${shown?.let { CurveMath.formatSol(it.graduationMarketCapLamports) } ?: "—"} SOL", color = P.ink)
+        Text("Mcap ${solLine(shown?.quoteIsSol, shown?.marketCapLamports, " SOL")}", color = P.ink)
+        Text("Progress ${shown?.progressPct?.let { "%.2f".format(java.util.Locale.US, it) } ?: "—"}%", color = P.ink)
+        Text("SOL in curve ${shown?.solInCurveLamports?.let { CurveMath.formatSol(it) } ?: "—"}", color = P.ink)
+        Text("SOL to graduate ${solLine(shown?.quoteIsSol, shown?.solRemainingLamports)}", color = P.ink)
+        Text("Graduation mcap ${solLine(shown?.quoteIsSol, shown?.graduationMarketCapLamports, " SOL")}", color = P.ink)
+        if (shown != null && !shown.quoteIsSol) Text("Quote mint is not SOL. SOL figures stay blank.", color = P.dim, fontSize = 12.sp)
+        if (shown != null && shown.quoteIsSol && shown.solInCurveLamports == null && shown.realQuoteReserves != BigInteger.ZERO) {
+            Text("Real quote is ${shown.realQuoteReserves} raw and is not SOL deposited.", color = P.dim, fontSize = 12.sp)
+        }
         Text(if (wallet.isBlank()) "Wallet not connected" else "Wallet ${wallet.take(4)}…${wallet.takeLast(4)}", color = P.dim, fontSize = 12.sp)
         Canvas(Modifier.fillMaxWidth().height(120.dp)) {
             if (points.size < 2) return@Canvas
@@ -182,9 +193,11 @@ fun TerminalScreen() {
                 drawLine(P.accent, Offset(step * (i - 1), y1), Offset(step * i, y2), strokeWidth = 4f)
             }
         }
+        if (tape.isEmpty()) Text("No prints on the free stream.", color = P.dim, fontSize = 12.sp)
         tape.take(8).forEach { row ->
             Text("${if (row.isBuy) "Buy" else "Sell"} ${formatTape(row.solLamports)} SOL", color = if (row.isBuy) P.up else P.down, fontSize = 13.sp)
         }
+        if (!tapeNote.isNullOrBlank()) Text(tapeNote!!, color = P.dim, fontSize = 12.sp)
         OutlinedTextField(targetSol, { targetSol = it }, label = { Text("Target mcap (SOL)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         OutlinedTextField(solField, { solField = it }, label = { Text("SOL into curve") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -242,6 +255,7 @@ private suspend fun buy(
     onPrefill: (String) -> Unit
 ): String {
     if (curve == null) return "No curve yet."
+    if (!curve.quoteIsSol) return "This curve is not quoted in SOL."
     val target = solToLamports(targetSol) ?: return "Target market cap is a SOL amount with at most 9 decimals."
     val reverse = CurveMath.solToReachMarketCap(curve.reserves(), target)
     onPrefill(CurveMath.formatSol(reverse.solNeededLamports))
@@ -274,6 +288,11 @@ internal fun solToLamports(text: String): BigInteger? {
     val parts = trimmed.split('.')
     val frac = parts.getOrElse(1) { "" }.padEnd(9, '0')
     return parts[0].toBigInteger().multiply(CurveMath.LAMPORTS).add(frac.toBigInteger())
+}
+
+private fun solLine(quoteIsSol: Boolean?, lamports: BigInteger?, suffix: String = ""): String {
+    if (quoteIsSol == false || lamports == null) return "—"
+    return CurveMath.formatSol(lamports) + suffix
 }
 
 private fun formatTape(lamports: String): String = lamports.toBigIntegerOrNull()?.let { CurveMath.formatSol(it) } ?: lamports

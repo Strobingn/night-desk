@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import type { EventBus } from "../bus.js";
 import { enrichSighting } from "../market/enrich.js";
 import { DexTokenBatcher } from "../market/dex-batch.js";
+import { classifyHttpFailure, isPumpDiscoveryUrl, PUMP_API_CHALLENGE } from "../market/http-class.js";
 import { bucketFor, type NetLimiter, type SourceId } from "../market/net.js";
 import { FeedHealth, SOURCE_ORDER } from "./feed-health.js";
 import {
@@ -68,7 +69,7 @@ export interface ScoutSources {
   jupiter: boolean;
   dexpaprika: boolean;
   bitquery: boolean;
-  /** v13.3 Pump.fun frontend-api-v3 newest coins (keyless backstop for the stream). */
+  /** Pump.fun HTTP coin list. The host is challenged, so the poll does not run. */
   pumpapi: boolean;
   /** v13.3 Raydium LaunchLab newest launches (Bonk.fun and friends), keyless. */
   launchlab: boolean;
@@ -484,18 +485,29 @@ export class Scout {
    */
   private async poll(id: SourceId, url: string, parse: (body: unknown) => RawSighting[], onOk: () => void, init?: RequestInit): Promise<void> {
     if (this.stopped) return;
+    if (isPumpDiscoveryUrl(url)) {
+      this.health.blocked(id, PUMP_API_CHALLENGE);
+      return;
+    }
     const now = Date.now();
     if ((this.goneUntil.get(id) ?? 0) > now) return;
     const spec = bucketFor(url);
     if (spec && this.opts.net?.pausedUntil(spec)) return;
     try {
       const res = await this.http(url, init);
-      if (this.markUnavailable(id, res.status)) return;
+      const text = await res.text();
+      const failure = classifyHttpFailure(res.status, res.headers, text);
+      if (failure) {
+        if (failure.kind === "challenge") this.health.blocked(id, failure.detail);
+        else this.health.unavailable(id, failure.detail);
+        this.goneUntil.set(id, Date.now() + GONE_RECHECK_MS);
+        return;
+      }
       if (!res.ok) {
         this.health.fail(id, `HTTP ${res.status}`);
         return;
       }
-      const rows = parse(await res.json());
+      const rows = parse(JSON.parse(text) as unknown);
       this.goneUntil.delete(id);
       this.health.ok(id);
       onOk();
@@ -505,19 +517,6 @@ export class Scout {
       const message = err instanceof Error ? err.message : String(err);
       this.health.fail(id, /abort|timeout/i.test(message) ? "timed out" : message.slice(0, 80));
     }
-  }
-
-  /**
-   * HTTP 410 (endpoint removed) and 401/402/403 (key or plan rejected) will not fix
-   * themselves in two minutes: show the source as down, re-check every 30 minutes, no banner.
-   */
-  private markUnavailable(id: SourceId, status: number): boolean {
-    const reason =
-      status === 410 ? "endpoint removed (HTTP 410)" : status === 401 || status === 402 || status === 403 ? `key or plan rejected (HTTP ${status})` : null;
-    if (!reason) return false;
-    this.goneUntil.set(id, Date.now() + GONE_RECHECK_MS);
-    this.health.unavailable(id, reason);
-    return true;
   }
 
   private http(url: string, init?: RequestInit): Promise<Response> {
@@ -573,12 +572,19 @@ export class Scout {
         },
         body: JSON.stringify({ query })
       });
-      if (this.markUnavailable("bitquery", res.status)) return;
+      const text = await res.text();
+      const failure = classifyHttpFailure(res.status, res.headers, text);
+      if (failure) {
+        if (failure.kind === "challenge") this.health.blocked("bitquery", failure.detail);
+        else this.health.unavailable("bitquery", failure.detail);
+        this.goneUntil.set("bitquery", Date.now() + GONE_RECHECK_MS);
+        return;
+      }
       if (!res.ok) {
         this.health.fail("bitquery", `HTTP ${res.status}`);
         return;
       }
-      const body = (await res.json()) as {
+      const body = JSON.parse(text) as {
         data?: { Solana?: { DEXTrades?: Array<{ Trade?: { Buy?: { Currency?: { MintAddress?: string; Symbol?: string; Name?: string } } } }> } };
       };
       this.health.ok("bitquery");
