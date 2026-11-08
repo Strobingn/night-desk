@@ -65,7 +65,7 @@ class NativePaperGateTest {
         tap("Buy…")
         waitFor("This Buy fills the paper book")
         tapRightmost("Buy")
-        waitFor("· paper")
+        waitFor("(paper)")
         dismissNotice()
         tapContains("⚡ Sell")
         waitFor("Sold GATE")
