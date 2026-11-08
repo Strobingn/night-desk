@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -39,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -65,6 +68,8 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
     val tapping by desk.tapping.collectAsState()
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     var input by remember { mutableStateOf(preview?.first ?: prefill?.first.orEmpty()) }
     var looking by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf(preview?.second) }
@@ -73,6 +78,9 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
     var askBuy by remember { mutableStateOf(false) }
 
     fun lookup(q: String) {
+        // The result and the paper button sit below this field. Leave the keyboard up and they stay covered.
+        focus.clearFocus(force = true)
+        keyboard?.hide()
         if (q.isBlank()) {
             result = CoinLookup(ok = false, error = "Type a ticker (e.g. QTFALCN) or name, or paste a Solana mint or a DexScreener, pump.fun, Birdeye, GMGN, Jupiter, Raydium, Photon, BullX or Solscan link.")
             return
@@ -110,7 +118,13 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                 onValueChange = { input = it.trimStart() },
                 singleLine = true,
                 label = { Text(ADD_COIN_LABEL) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrect = false, capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Ascii,
+                    autoCorrectEnabled = false,
+                    capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { lookup(input) }),
                 modifier = Modifier.fillMaxWidth(),
                 colors = addFieldColors()
             )

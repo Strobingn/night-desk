@@ -82,20 +82,16 @@ class NativePaperGateTest {
         rule.onAllNodes(hasSetText())[0].performTextReplacement("SEEK")
         tap("Look up")
         waitFor("2HNb")
-        scrollUntil("LIVE BUY")
+        closeIme()
+        val hardKill = rule.onAllNodesWithText("anyway", substring = true).fetchSemanticsNodes().isNotEmpty()
+        scrollIntoView(if (hardKill) "anyway" else "Paper buy")
         shot("search")
-        val paperBuy = rule.onAllNodesWithText("Paper buy", substring = true).fetchSemanticsNodes().isNotEmpty()
-        if (paperBuy) {
-            scrollUntil("Paper buy")
-            val nodes = rule.onAllNodesWithText("Paper buy", substring = true)
-            val found = nodes.fetchSemanticsNodes()
-            nodes[found.indices.maxBy { found[it].boundsInRoot.top }].performTouchInput { click() }
-            rule.waitForIdle()
-            tapRightmost("Buy")
+        clickOnScreen(if (hardKill) "anyway" else "Paper buy")
+        if (hardKill) {
+            // Exact label. The card button is "Buy SEEK anyway…" and must not take this click.
+            tapExact("Buy anyway")
         } else {
-            scrollUntil("anyway")
-            tapContains("anyway")
-            tap("Buy anyway")
+            tapRightmost("Buy")
         }
         waitFor("(paper)")
         dismissNotice()
@@ -241,6 +237,65 @@ class NativePaperGateTest {
         }
         val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString(maxDepth = 12) }.getOrElse { it.message ?: "" }
         throw AssertionError("Timed out waiting for \"$text\"\n${tree.take(2500)}")
+    }
+
+    /** Back closes the IME only while it is showing. A second back would leave the activity. */
+    private fun closeIme() {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val shown = device.executeShellCommand("dumpsys input_method").contains("mInputShown=true")
+        if (!shown) return
+        device.pressBack()
+        Thread.sleep(400)
+    }
+
+    private fun scrollIntoView(snippet: String) {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < 20_000) {
+            val nodes = rule.onAllNodesWithText(snippet, substring = true)
+            val found = nodes.fetchSemanticsNodes()
+            if (found.isNotEmpty()) {
+                val index = found.indices.maxBy { found[it].boundsInRoot.top }
+                runCatching { nodes[index].performScrollTo() }
+                val bounds = nodes.fetchSemanticsNodes().getOrNull(index)?.boundsInRoot ?: found[index].boundsInRoot
+                val root = rule.onRoot().fetchSemanticsNode().boundsInRoot
+                val onScreen = bounds.top >= root.top && bounds.bottom <= root.bottom - 120f && bounds.height > 1f
+                if (onScreen) return
+                val downward = bounds.top > root.bottom - 120f
+                rule.onRoot().performTouchInput {
+                    if (downward) swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 180)
+                    else swipe(Offset(centerX, bottom * 0.32f), Offset(centerX, bottom * 0.72f), durationMillis = 180)
+                }
+            } else {
+                rule.onRoot().performTouchInput {
+                    swipe(Offset(centerX, bottom * 0.72f), Offset(centerX, bottom * 0.32f), durationMillis = 180)
+                }
+            }
+            Thread.sleep(250)
+        }
+        error("Could not bring \"$snippet\" on screen")
+    }
+
+    private fun clickOnScreen(snippet: String) {
+        scrollIntoView(snippet)
+        val nodes = rule.onAllNodesWithText(snippet, substring = true)
+        val found = nodes.fetchSemanticsNodes()
+        nodes[found.indices.maxBy { found[it].boundsInRoot.top }].performTouchInput { click() }
+        rule.waitForIdle()
+    }
+
+    private fun tapExact(text: String) {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val deadline = System.currentTimeMillis() + 15_000
+        while (System.currentTimeMillis() < deadline) {
+            val node = device.findObject(By.text(text))
+            if (node != null) {
+                node.click()
+                rule.waitForIdle()
+                return
+            }
+            Thread.sleep(300)
+        }
+        error("No exact \"$text\" on screen")
     }
 
     private fun shot(name: String) {
