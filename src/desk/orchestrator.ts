@@ -36,6 +36,7 @@ import { usesPumpRoute } from "../market/pump-live.js";
 import type { LiveSwapResult } from "../market/live-broker.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { PumpCore } from "../pump/index.js";
+import { solanaConnection } from "../pump/rpc.js";
 import { DeskStore } from "../store/db.js";
 import type {
   AnalystReport,
@@ -506,7 +507,8 @@ export class Desk {
     this.pump = new PumpCore({
       db: this.store.db,
       rpcUrl: config.walletRpcUrl || config.rpcUrl,
-      stream: this.stream
+      stream: this.stream,
+      connection: solanaConnection(config.walletRpcUrl || config.rpcUrl, this.net.fetchAt(1))
     });
     this.scout.setPumpFrameHook((text) => this.pump.onPumpFrame(text));
     this.pricer = new PositionPricer({
@@ -1113,6 +1115,18 @@ export class Desk {
       return;
     }
     const now = Date.now();
+    if (o.book === "live") {
+      const read = await this.refreshWallet();
+      if (!read || read.error != null || read.sol == null) {
+        o.status = "open";
+        o.note = `Refused: wallet balance not current${read?.error ? ` (${read.error})` : ""}. Nothing was sent.`;
+        o.nextTryAt = now + ORDER_RETRY_MS;
+        o.updatedAt = now;
+        this.firingOrders.delete(o.id);
+        this.saveOrders();
+        return;
+      }
+    }
     o.status = "working";
     o.firedAt = now;
     o.firedMark = mark;
@@ -2518,6 +2532,10 @@ export class Desk {
     if (!pos) return;
     try {
       if (kind === "live") {
+        const read = await this.refreshWallet();
+        if (!read || read.error != null || read.sol == null) {
+          throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
+        }
         const live = await this.runLiveSwap({
           side: "sell",
           mint: order.mint,
@@ -3716,7 +3734,8 @@ export class Desk {
         slippageFraction: slip,
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
-        rpcUrl: this.config.walletRpcUrl
+        rpcUrl: this.config.walletRpcUrl,
+        rpcFetch: this.net.fetchAt(1)
       });
     }
     const { executeLiveSwap } = await import("../market/live-broker.js");
@@ -3733,7 +3752,8 @@ export class Desk {
       swapUrl: this.config.jupiterSwapUrl,
       markPriceUsd: input.markPriceUsd,
       maxEntrySlippage: this.config.rules.maxEntrySlippage,
-      maxExitSlippage: input.exit ? slip : undefined
+      maxExitSlippage: input.exit ? slip : undefined,
+      rpcFetch: this.net.fetchAt(1)
     });
   }
 

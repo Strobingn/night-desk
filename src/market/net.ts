@@ -65,8 +65,17 @@ export const BUCKETS: BucketSpec[] = [
     limitPerMin: 12,
     budgetPerMin: 9,
     burst: 2,
-    cacheMs: 20_000,
-    note: "api.mainnet-beta.solana.com. Published ceilings are 100 requests/10s per IP, 40/10s per method, and 40 concurrent, and they vary. The endpoint is not a production RPC. This 9/min figure is the desk's own shared budget for JSON-RPC reads (wallet plus held-account polls), not a claim the public endpoint will serve it."
+    cacheMs: 8_000,
+    note: "api.mainnet-beta.solana.com background reads only (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Published ceilings are 100 requests/10s per IP, 40/10s per method, and 40 concurrent, and they vary. The endpoint is not a production RPC. 9/min is the desk's own poll budget, not a claim the public endpoint will serve it. Held-account polls run every 10s, past this 8s cache, so a mark is not stuck on a 20s copy."
+  },
+  {
+    id: "solana:public:exec",
+    source: "solana",
+    limitPerMin: 80,
+    budgetPerMin: 64,
+    burst: 16,
+    cacheMs: 0,
+    note: "Same public host, separate lane for swap preparation, simulation, and broadcast (priority 1). A full read-lane queue cannot delay these. Burst 16 covers one pump or Jupiter transaction. 64/min is still under the published 40 requests/10s per method. Nothing here is cached."
   }
 ];
 
@@ -99,13 +108,24 @@ export function bucketFor(url: string): BucketSpec | null {
   return null;
 }
 
-const RPC_READ = /"method"\s*:\s*"(get[A-Za-z]+)"/;
+const RPC_METHOD = /"method"\s*:\s*"([A-Za-z]+)"/;
+
+/** Background polls. Everything else on the public host, including getAccountInfo and getLatestBlockhash, uses the exec lane. */
+const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "getMultipleAccounts"]);
+
+export function rpcMethod(body: string): string | null {
+  return RPC_METHOD.exec(body)?.[1] ?? null;
+}
 
 /** JSON-RPC reads may be cached. Sends and simulations may not. */
 export function rpcReadMethod(body: string): string | null {
-  const method = RPC_READ.exec(body)?.[1];
-  if (!method || method === "getProgramAccounts") return null;
+  const method = rpcMethod(body);
+  if (!method || !method.startsWith("get") || method === "getProgramAccounts") return null;
   return method;
+}
+
+export function solanaExecSpec(): BucketSpec {
+  return BY_ID.get("solana:public:exec")!;
 }
 
 /** 0 = held-position marks and Add coin (never starve), 1 = enrichment, 2 = Scout list polls. */
@@ -335,29 +355,35 @@ export class NetLimiter {
     const spec = bucketFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
     const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
-    if (!spec) return this.baseFetch(input, rest);
+    const lane =
+      spec?.id === "solana:public" && (priority ?? 1) !== 0
+        ? solanaExecSpec()
+        : spec?.id === "solana:public" && typeof rest.body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(rest.body) ?? "")
+          ? solanaExecSpec()
+          : spec;
+    if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
-    const rpcRead = method === "POST" && typeof rest.body === "string" && spec.id === "solana:public" && rpcReadMethod(rest.body) != null;
+    const rpcRead = method === "POST" && typeof rest.body === "string" && lane.id === "solana:public" && rpcReadMethod(rest.body) != null;
     const key = rpcRead ? `POST ${url} ${rest.body}` : `${method} ${url}`;
     const now = this.clock.now();
-    if ((isGet || rpcRead) && spec.cacheMs > 0) {
+    if ((isGet || rpcRead) && lane.cacheMs > 0) {
       const hit = this.cache.get(key);
-      if (hit && now - hit.at <= spec.cacheMs) {
-        this.bucket(spec).hitTimes.push(now);
+      if (hit && now - hit.at <= lane.cacheMs) {
+        this.bucket(lane).hitTimes.push(now);
         return toResponse(hit.res);
       }
       const shared = this.inflight.get(key);
       if (shared) {
-        this.bucket(spec).hitTimes.push(now);
+        this.bucket(lane).hitTimes.push(now);
         return toResponse(await shared);
       }
     }
-    const run = this.send(spec, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
+    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
     if (isGet || rpcRead) {
       this.inflight.set(key, run);
       try {
         const res = await run;
-        if (res.status >= 200 && res.status < 300 && spec.cacheMs > 0) {
+        if (res.status >= 200 && res.status < 300 && lane.cacheMs > 0) {
           this.cache.set(key, { at: this.clock.now(), res });
           if (this.cache.size > 500) {
             const first = this.cache.keys().next().value;

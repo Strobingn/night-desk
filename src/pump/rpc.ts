@@ -11,9 +11,11 @@ export interface PumpConnection {
   simulateTransaction(tx: Transaction): Promise<{ err: string | null; units: number | null; logs: string[] }>;
 }
 
-/** Read and simulate only. This wrapper has no send method. */
-export function solanaConnection(rpcUrl: string): PumpConnection {
-  const connection = new Connection(rpcUrl, "confirmed");
+/** Read and simulate only. This wrapper has no send method. `fetchImpl` is the exec lane, not the 9/min poll. */
+export function solanaConnection(rpcUrl: string, fetchImpl?: typeof fetch): PumpConnection {
+  const connection = fetchImpl
+    ? new Connection(rpcUrl, { commitment: "confirmed", fetch: fetchImpl })
+    : new Connection(rpcUrl, "confirmed");
   return {
     async getAccountInfo(address: string) {
       const info = await connection.getAccountInfo(new PublicKey(address), "confirmed");

@@ -37,11 +37,15 @@ export interface PumpLiveRequest {
   connection?: PumpConnection;
   /** Tests capture the signed bytes. Production sends them on rpcUrl. */
   broadcast?: (raw: Uint8Array) => Promise<{ signature: string; err: unknown }>;
+  /** Exec-lane fetch. Preparation and broadcast do not wait on the 9/min poll budget. */
+  rpcFetch?: typeof fetch;
 }
 
-async function defaultBroadcast(rpcUrl: string, raw: Uint8Array): Promise<{ signature: string; err: unknown }> {
+async function defaultBroadcast(rpcUrl: string, raw: Uint8Array, fetchImpl?: typeof fetch): Promise<{ signature: string; err: unknown }> {
   const web3 = await import("@solana/web3.js");
-  const connection = new web3.Connection(rpcUrl, "confirmed");
+  const connection = fetchImpl
+    ? new web3.Connection(rpcUrl, { commitment: "confirmed", fetch: fetchImpl })
+    : new web3.Connection(rpcUrl, "confirmed");
   const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 });
   const confirmed = await connection.confirmTransaction(signature, "confirmed");
   return { signature, err: confirmed.value.err ?? null };
@@ -68,7 +72,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
     tokenAmount = BigInt(Math.floor(req.qty * 10 ** decimals));
     if (tokenAmount <= 0n) throw new Error("LIVE_SWAP_FAILED: token amount rounded to zero");
   }
-  const connection = req.connection ?? solanaConnection(req.rpcUrl);
+  const connection = req.connection ?? solanaConnection(req.rpcUrl, req.rpcFetch);
   let built;
   try {
     built = await buildIntent(connection, {
@@ -100,7 +104,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   tx.partialSign(loaded.keypair);
   if (!tx.signature) throw new Error("LIVE_SWAP_FAILED: transaction was not signed. Nothing was sent.");
   const raw = tx.serialize();
-  const sent = await (req.broadcast ?? ((bytes) => defaultBroadcast(req.rpcUrl, bytes)))(raw);
+  const sent = await (req.broadcast ?? ((bytes) => defaultBroadcast(req.rpcUrl, bytes, req.rpcFetch)))(raw);
   if (sent.err) throw new Error(`LIVE_SWAP_FAILED: transaction ${sent.signature} failed on chain`);
   const feeLamports = Number(built.quote.feeLamports);
   const feeUsd = Number.isFinite(feeLamports) && feeLamports > 0 ? (feeLamports / 1_000_000_000) * req.solPriceUsd : 0;
