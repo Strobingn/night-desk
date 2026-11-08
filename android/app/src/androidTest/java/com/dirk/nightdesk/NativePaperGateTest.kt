@@ -125,6 +125,7 @@ class NativePaperGateTest {
         dismissNotice()
         openTab("Home")
         scrollUntil("SEEK")
+        tapBelow("SEEK", "Details")
         tapContains("⚡ Sell")
         waitFor("Sold SEEK")
         dismissNotice()
