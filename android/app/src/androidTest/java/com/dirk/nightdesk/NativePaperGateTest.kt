@@ -64,7 +64,7 @@ class NativePaperGateTest {
 
         tap("Buy…")
         waitFor("This Buy fills the paper book")
-        tap("Buy")
+        tapRightmost("Buy")
         waitFor("· paper")
         dismissNotice()
         tapContains("⚡ Sell")
@@ -142,6 +142,16 @@ class NativePaperGateTest {
             rule.waitForIdle()
         }
         error("Tab $label is not on screen")
+    }
+
+    /** The tape also has a Buy button once a coin is selected. The dialog confirm is the rightmost. */
+    private fun tapRightmost(text: String) {
+        waitFor(text)
+        val nodes = rule.onAllNodes(hasText(text))
+        val found = nodes.fetchSemanticsNodes()
+        val index = found.indices.maxBy { found[it].boundsInRoot.left }
+        nodes[index].performTouchInput { click() }
+        rule.waitForIdle()
     }
 
     private fun tap(text: String) {
