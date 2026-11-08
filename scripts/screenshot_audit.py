@@ -195,29 +195,52 @@ def ensure_app() -> None:
     fail(f"Night Desk was not in front. Shown package was {dump_pkg(xml) or 'unknown'}")
 
 
+LANDMARKS = {
+    "Home": ["Marked equity", "Open positions"],
+    "Tape": ["Buy $100", "LIVE BUY", "HOT"],
+    "Search": ["Look up"],
+    "Add coin": ["Look up", "ADD COIN"],
+    "Recap": ["Since reset"],
+    "Settings": ["Appearance", "Matches the desk"],
+    "Link": ["Override URL", "Desk link"],
+    "Pump": ["Bonding curve"],
+}
+
+
+def tab_open(names: list[str], xml: str) -> bool:
+    for name in names:
+        for landmark in LANDMARKS.get(name, [name]):
+            bounds = find(xml, landmark)
+            if bounds and on_screen(bounds):
+                # A Home sentence mentions Tape. Require the tape card, not that sentence.
+                if name == "Tape" and find(xml, "Marked equity"):
+                    continue
+                return True
+    return False
+
+
 def open_tab(names: list[str]) -> None:
     _, height = SCREEN
-    for _ in range(4):
-        xml = dismiss_anr(dump())
-        for name in names:
-            for bounds in matches(xml, name):
-                if bounds[1] > height * 0.75:
-                    tap(bounds)
-                    time.sleep(0.4)
-                    return
-        # Link is the 6th of 7 labels on both releases. Swipe the bar, then try a fixed tap.
-        swipe(int(SCREEN[0] * 0.9), height - 80, int(SCREEN[0] * 0.1), height - 80)
-    # Last resort: both releases use the same seven-tab order.
     index = {"Home": 0, "Tape": 1, "Search": 2, "Add coin": 2, "Add": 2, "Recap": 3, "Settings": 4, "Link": 5, "Pump": 6}
     slot = next((index[name] for name in names if name in index), None)
-    if slot is None:
-        fail(f"tab not found: {names}")
-    x = int(SCREEN[0] * (slot + 0.5) / 7)
-    adb("shell", "input", "tap", str(x), str(height - 90))
-    time.sleep(0.6)
-    xml = dump()
-    if not any(find(xml, name) for name in names):
-        fail(f"tab not found: {names}")
+    for _ in range(5):
+        xml = dismiss_anr(dump())
+        if tab_open(names, xml):
+            return
+        tapped = False
+        for name in names:
+            for bounds in matches(xml, name):
+                center_y = (bounds[1] + bounds[3]) / 2
+                if center_y > height - 230:
+                    tap(bounds)
+                    tapped = True
+                    break
+            if tapped:
+                break
+        if not tapped and slot is not None:
+            adb("shell", "input", "tap", str(int(SCREEN[0] * (slot + 0.5) / 7)), str(height - 90))
+        time.sleep(0.7)
+    fail(f"tab did not open: {names}")
 
 
 def wait_for(options: list[str], timeout: float = 25) -> tuple[str, tuple[int, int, int, int]] | None:
@@ -347,12 +370,20 @@ def paper_fill_gate() -> None:
             break
         swipe_up()
     if not buy:
+        shot("tape-no-buy")
         fail("paper buy button missing")
     tap(buy)
-    if wait_for(["Dismiss"], 20):
+    time.sleep(1.2)
+    shot("after-paper-tap")
+    if wait_for(["Dismiss", "paper", "refused", "BOOK"], 15):
+        shot("after-paper-notice")
         button = find(dump(), "Dismiss")
         if button:
             tap(button)
+    open_tab(["Home"])
+    if not scroll_to(["Sell 25%", "Sell now"], swipes=6):
+        shot("home-no-position")
+        fail("paper buy did not leave a held position")
 
 
 def capture() -> None:
