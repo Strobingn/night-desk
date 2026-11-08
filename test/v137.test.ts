@@ -5,6 +5,7 @@ import path from "node:path";
 import { Keypair } from "@solana/web3.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
+import { DeskStore } from "../src/store/db.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { testConfig } from "./helpers.js";
 
@@ -127,7 +128,7 @@ describe("v13.7 live: manual only · AI: paper", () => {
     }
   });
 
-  it("liveAutoBuy is a saved toggle (default off) and leaves every other setting alone", () => {
+  it("liveAutoBuy true is refused and leaves every other setting alone", () => {
     const desk = armedDesk();
     try {
       desk.updateSettings({ liveTradeUsd: 5, liveTrailPct: 5, liveDailyCapUsd: "", autoBuy: true });
@@ -135,12 +136,37 @@ describe("v13.7 live: manual only · AI: paper", () => {
       expect(before.liveAutoBuy).toBe(false);
       expect(desk.updateSettings({ liveAutoBuy: "yes" }).ok).toBe(false);
       const on = desk.updateSettings({ liveAutoBuy: true });
-      expect(on.ok && on.settings.liveAutoBuy).toBe(true);
+      expect(on.ok).toBe(false);
       const after = desk.snapshot().prefs;
-      expect({ ...after, liveAutoBuy: false }).toEqual(before);
+      expect(after).toEqual(before);
+      expect(after.liveAutoBuy).toBe(false);
       expect(after.liveTrailPct).toBe(0.05);
       expect(after.liveTradeUsd).toBe(5);
       expect(after.liveDailyCapUsd).toBeNull();
+      expect(desk.snapshot().liveScope).toBe("manual");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("a saved liveAutoBuy true is ignored on restart and does not move the AI onto the live book", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "desk-ai-paper-"));
+    const first = armedDesk(dir);
+    first.stop();
+    const store = new DeskStore(path.join(dir, "desk.sqlite"), path.join(dir, "desk.jsonl"), path.join(dir, "desk.log"));
+    const saved = store.readJson("settings");
+    const prior = saved && typeof saved === "object" ? saved : {};
+    store.writeJson("settings", { ...prior, liveAutoBuy: true, autoBuy: true });
+    store.close();
+    const desk = armedDesk(dir);
+    try {
+      expect(desk.snapshot().prefs.liveAutoBuy).toBe(false);
+      expect(desk.snapshot().liveScope).toBe("manual");
+      const m = "SavedFlag111111111111111111111111111111111";
+      await desk.submitCandidate(makeToken({ mint: m, symbol: "FLAG", priceUsd: 1, liquidityUsd: 180_000 }));
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+      expect(desk.book.positions.has(m)).toBe(true);
+      expect(desk.liveBook!.positions.size).toBe(0);
     } finally {
       desk.stop();
     }

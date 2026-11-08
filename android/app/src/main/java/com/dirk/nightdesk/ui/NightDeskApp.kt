@@ -142,6 +142,7 @@ private fun stageColor(stage: String): Color = when (stage) {
 private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null, orders: OrderActions? = null) {
     // v13.11 limit buy ticket on this card.
     var limitOpen by remember(coin.mint) { mutableStateOf(orders?.openFor?.let { it.first == coin.mint && it.second == "limit_buy" } == true) }
+    var liveOrderOpen by remember(coin.mint) { mutableStateOf(false) }
     // v13.4 compact card: same facts and buttons as v13.1, packed into three rows so 4-5 cards fit
     // on one phone screen. Symbol, 1h change and volume stay large; nothing was dropped.
     val vc = verdictColor(coin.verdict)
@@ -259,9 +260,26 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                 }
             }
         }
-        // v13.9: a coin the paper book holds gets LIVE BUY / LIVE SELL right on its Tape card.
-        if (oneTap != null && coin.verdict == Verdict.OPEN && oneTap.paperHeld.containsKey(coin.mint)) {
+        // LIVE BUY / LIVE SELL on every tape card. Paper buttons above stay paper.
+        if (oneTap != null) {
             LivePair(oneTap, coin.mint, coin.symbol, Modifier.padding(top = 6.dp), compact = true)
+            if (orders != null) {
+                val heldLive = oneTap.liveHeld.containsKey(coin.mint)
+                BigButton(
+                    if (heldLive) "LIVE stop" else "LIVE limit",
+                    if (liveOrderOpen) LivePink else P.card3,
+                    if (liveOrderOpen) Color.White else LivePink,
+                    Modifier.fillMaxWidth().padding(top = 6.dp),
+                    border = LivePink.copy(alpha = 0.7f),
+                    height = 36.dp
+                ) { liveOrderOpen = !liveOrderOpen }
+                if (liveOrderOpen) {
+                    val held = oneTap.liveHeld[coin.mint]
+                    Box(Modifier.padding(top = 8.dp)) {
+                        LiveOrderTicket(orders, coin.mint, coin.symbol, heldLive, coin.mark, held?.entryPrice, held?.stopPrice) { liveOrderOpen = false }
+                    }
+                }
+            }
         }
         if (orders != null) {
             val mine = orders.openOn(coin.mint)

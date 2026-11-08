@@ -88,6 +88,10 @@ export function startServer(
           return json(res, 400, { ok: false, error: "Settings body must be an object." });
         }
         const record = body as Record<string, unknown>;
+        if (record.liveAutoBuy === true) {
+          return json(res, 400, { ok: false, error: "AI auto-buys stay on the paper book. The server refuses to let them spend real money." });
+        }
+        delete record.liveAutoBuy;
         const keys = Object.keys(record);
         const blocked = keys.filter((key) => BLOCKED_SETTINGS.has(key));
         if (blocked.length) {
@@ -406,7 +410,6 @@ export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "liveTradeUsd",
   "liveDailyCapUsd",
   "liveTrailPct",
-  "liveAutoBuy",
   "positionRefreshMs",
   "minVolume1hUsd",
   "analystMinScore",

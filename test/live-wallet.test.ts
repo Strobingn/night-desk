@@ -153,7 +153,7 @@ describe("v13.5 live settings", () => {
 });
 
 describe("v13.5 live orders", () => {
-  it("v13.7: an armed desk keeps AI auto-buys on paper by default; liveAutoBuy sends them live at the $5 size", async () => {
+  it("an armed desk keeps AI auto-buys on paper, and a request to turn them live is refused", async () => {
     const desk = liveDesk();
     try {
       desk.updateSettings({ positionSizeUsd: 1040, autoBuy: true });
@@ -169,16 +169,16 @@ describe("v13.5 live orders", () => {
       expect(snap.wallet?.liveScopeLine).toMatch(/manual only · AI: paper/);
       expect(desk.readiness().lines.join(" ")).toMatch(/manual only · AI: paper/);
 
-      expect(desk.updateSettings({ liveAutoBuy: true }).ok).toBe(true);
+      const refused = desk.updateSettings({ liveAutoBuy: true });
+      expect(refused.ok).toBe(false);
       const m2 = "AutoLive21111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m2, symbol: "AUTO2", priceUsd: 1, liquidityUsd: 180_000 }));
-      expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
-      expect(liveBroker.executeLiveSwap.mock.calls[0]?.[0]).toMatchObject({ side: "buy", mint: m2, sizeUsd: 5 });
-      const pos = desk.liveBook!.positions.get(m2)!;
-      expect(pos.live).toBe(true);
-      expect(pos.costUsd).toBe(5);
-      expect(desk.book.positions.has(m2)).toBe(false);
-      expect(desk.snapshot().liveScope).toBe("all");
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+      expect(desk.liveBook!.positions.size).toBe(0);
+      expect(desk.book.positions.has(m2)).toBe(true);
+      expect(desk.book.positions.get(m2)?.live).toBeUndefined();
+      expect(desk.snapshot().liveScope).toBe("manual");
+      expect(desk.snapshot().prefs.liveAutoBuy).toBe(false);
     } finally {
       desk.stop();
     }

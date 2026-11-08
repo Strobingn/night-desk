@@ -1017,7 +1017,9 @@ export class Desk {
     const added = this.orders.add(made.order);
     if (!added.ok) return added;
     this.saveOrders();
-    const text = `${describeOrder(made.order)} placed${made.order.book === "live" && !this.liveBook ? " · waiting: live not armed (never fills on paper)" : ""}.`;
+    const wait = made.order.book === "live" && !this.liveBook ? " · waiting: live not armed (never fills on paper)" : "";
+    const stopNote = made.order.side === "stop_sell" ? " A stop is your trigger, not a guaranteed fill: fees, slippage, or a failed swap leave it retrying or failed." : "";
+    const text = `${describeOrder(made.order)} placed${wait}.${stopNote}`;
     this.log({ stage: "system", kind: "info", mint, symbol, code: "ORDER", message: `Order: ${text}` });
     return { ok: true, order: made.order, text };
   }
@@ -1086,6 +1088,14 @@ export class Desk {
   private async fireOrder(o: DeskOrder, mark: number, source: string): Promise<void> {
     if (this.firingOrders.has(o.id)) return;
     this.firingOrders.add(o.id);
+    if (o.book === "live" && !this.liveBook) {
+      o.status = "open";
+      o.note = "waiting: live not armed";
+      o.updatedAt = Date.now();
+      this.firingOrders.delete(o.id);
+      this.saveOrders();
+      return;
+    }
     const now = Date.now();
     o.status = "working";
     o.firedAt = now;
@@ -1101,8 +1111,9 @@ export class Desk {
       let fill: number | undefined;
       if (o.side === "limit_buy") {
         // The quote that fired it is the newest price: the buy checks run against it, not an older mark.
-        if (source !== "mark" && !this.book.positions.has(o.mint)) {
-          this.book.mark(o.mint, mark);
+        const priced = this.bk(o.book);
+        if (source !== "mark" && !priced.positions.has(o.mint)) {
+          priced.mark(o.mint, mark);
           const seen = this.sightings.get(o.mint);
           if (seen) this.sightings.set(o.mint, { ...seen, priceUsd: mark });
         }
@@ -1687,7 +1698,8 @@ export class Desk {
       });
       return { ok: false, error: "No scouted mark for that mint. Buy refused.", code: "PRICE_UNAVAILABLE" };
     }
-    const priceUsd = this.book.price(cleaned, seen.priceUsd);
+    // The live book does not inherit the paper book's last price.
+    const priceUsd = this.bk(kind).price(cleaned, seen.priceUsd);
     const liquidityUsd = this.markLiquidity.get(cleaned) ?? seen.liquidityUsd;
     let token: CandidateToken = { ...seen, priceUsd, liquidityUsd };
     if (!(token.priceUsd > 0) || !Number.isFinite(token.priceUsd)) {
@@ -1817,7 +1829,7 @@ export class Desk {
         ? "Operator marked this checklist ready. That mark does not arm live trading and does not store a wallet."
         : "Operator has not marked this checklist ready."
     ];
-    return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null, lines };
+    return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, liveScope: this.liveBook ? "manual" : null, lines };
   }
 
   /** One advisory pass. Logs notes. Does not buy, sell, or change a rule. */
@@ -1854,7 +1866,7 @@ export class Desk {
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
     return {
-      liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null,
+      liveScope: this.liveBook ? "manual" : null,
       liveBook: this.liveBookView(),
       liveNotArmed: this.liveNotArmedReason(),
       tapeQuotes: this.tape?.view() ?? {},
@@ -2090,8 +2102,13 @@ export class Desk {
     extra: { confirmSize?: boolean; tag?: string; book?: BookKind } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
-    // v13.7: AI entries go live only when Dirk turned on "AI buys live" (liveAutoBuy). Default: paper.
-    const kind: BookKind = extra.book ?? (source === "analyst" && this.liveBook && this.liveAutoBuy ? "live" : "paper");
+    // AI auto-buys are paper. A request that names the live book is refused and sends nothing.
+    if (source === "analyst" && extra.book === "live") {
+      const error = "AI auto-buys stay on the paper book. A live buy was refused and nothing was sent.";
+      this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "LIVE_AI_BLOCKED", message: error });
+      return { ok: false, error, code: "LIVE_AI_BLOCKED" };
+    }
+    const kind: BookKind = source === "analyst" ? "paper" : (extra.book ?? "paper");
     if (kind === "live" && !this.liveBook) {
       const error = this.liveNotArmedMessage();
       return { ok: false, error, code: "LIVE_NOT_ARMED" };
@@ -2987,7 +3004,7 @@ export class Desk {
     const equityUsd = this.displayEquity("live");
     const startingUsd = this.liveStartingUsd;
     return {
-      scope: this.liveAutoBuy ? "all" : "manual",
+      scope: "manual",
       line: this.liveScopeLine(),
       cashUsd: roundUsd(this.liveBook.cashUsd),
       equityUsd: roundUsd(equityUsd),
@@ -3384,9 +3401,14 @@ export class Desk {
       "scoutLaunchLab",
       "notifyNearMiss",
       "notifyFills",
-      "notifyStops",
-      "liveAutoBuy"
+      "notifyStops"
     ];
+    if ("liveAutoBuy" in patch) {
+      if (patch.liveAutoBuy !== false) {
+        return { ok: false, error: "AI auto-buys stay on the paper book. The server refuses to let them spend real money." };
+      }
+      next.liveAutoBuy = false;
+    }
     for (const key of flags) {
       if (!(key in patch)) continue;
       if (typeof patch[key] !== "boolean") return { ok: false, error: `${key} must be true or false.` };
@@ -3413,7 +3435,8 @@ export class Desk {
     if (typeof saved.trailGapPct === "number") this.config.rules.trailGapPct = clampTrailGapPct(saved.trailGapPct);
     if (typeof saved.trailTakeProfit === "boolean") this.trailTakeProfit = saved.trailTakeProfit;
     if (typeof saved.autoBuy === "boolean") this.autoBuy = saved.autoBuy;
-    if (typeof saved.liveAutoBuy === "boolean") this.liveAutoBuy = saved.liveAutoBuy;
+    // A saved true from an older build cannot put the AI on the live book.
+    this.liveAutoBuy = false;
     this.scoutSources = {
       dexscreener: saved.scoutDexscreener !== false,
       gecko: saved.scoutGecko !== false,
@@ -3539,9 +3562,7 @@ export class Desk {
   /** v13.7 plain words for the live scope, shown on the wallet card, readiness and the log. */
   private liveScopeLine(): string {
     if (!this.liveBook) return "Live trading is off. Everything is paper.";
-    return this.liveAutoBuy
-      ? "Live: manual + AI. Your buys and the AI's auto-buys send real swaps."
-      : "Live: manual only · AI: paper. Your one-tap and Add coin buys send real swaps; the AI keeps buying on the paper book.";
+    return "Live: manual only · AI: paper. Your buys, limits and stops can send real swaps. AI auto-buys stay on the paper book.";
   }
 
   /** v13.5 the live trail applies to live positions only. */
@@ -3624,7 +3645,7 @@ export class Desk {
       balanceAt: bal?.at ?? null,
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",
-      liveScope: this.liveBook ? (this.liveAutoBuy ? "all" : "manual") : null,
+      liveScope: this.liveBook ? "manual" : null,
       liveScopeLine: this.liveScopeLine(),
       liveAutoBuy: this.liveAutoBuy,
       liveRequested: this.config.liveRequested,

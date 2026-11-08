@@ -117,7 +117,14 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
               <p>{GROUP_META[group]?.text}</p>
             </div>
           </header>
-          {group === "Live wallet" ? <WalletCard snap={snap} /> : null}
+          {group === "Live wallet" ? (
+            <>
+              <WalletCard snap={snap} />
+              <p className="fine">
+                AI auto-buys stay on the paper book. The server refuses a request to send them live, including a saved “AI buys live” flag. Your live buys, sells, limits and stops are separate and default to $5. These limits are not a tested profit system. The paper sizing below does not spend the wallet, and the paper ledger is left as it is.
+              </p>
+            </>
+          ) : null}
           {group === "Sizing / risk" ? (
             <p className="fine">
               Cap now {usd(snap.positionCapUsd)} per auto buy · manual max {usd(snap.manualMaxUsd ?? 0)} with confirm · exposure {usd(snap.exposureUsd ?? 0)}. Slippage, pool depth, cash and the hard stop still apply to every size.

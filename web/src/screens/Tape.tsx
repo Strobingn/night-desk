@@ -6,6 +6,7 @@ import { clock, signedUsd } from "../format";
 import type { DeskSnapshot, FeedEvent } from "../types";
 import { mergeEvents, type DeskActions } from "../App";
 import { LiveTapPair, OneTapBar, TapBuyButton, TapSellButton } from "./OneTap";
+import { liveHolding } from "../onetap";
 import { slipText, tapUsdText } from "../tapeToolbar";
 import { ScoutStatus } from "./ScoutStatus";
 import { coinCards, HOT_RANK, parseTapeSort, sortCoins, TAPE_SORT_KEY, TAPE_SORTS, TOP_VOLUME, VERDICT_LABEL, type CoinRow, type TapeSort, type Verdict } from "../coins";
@@ -393,6 +394,7 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
   // v13.9: a coin the paper book holds gets LIVE BUY / LIVE SELL right on its Tape card.
   const paperPos = snap?.positions.find((pos) => pos.mint === coin.mint) ?? null;
   const [limitOpen, setLimitOpen] = useState(false);
+  const [liveOrderOpen, setLiveOrderOpen] = useState(false);
   const tone: Record<Verdict, "up" | "down" | "flat"> = { open: "up", bought: "up", trade: "up", near: "flat", killed: "down", seen: "flat" };
   const rank = coin.volRank;
   const top = rank != null && rank <= TOP_VOLUME;
@@ -486,7 +488,33 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
           </span>
         )}
       </div>
-      {paperPos && snap ? <LiveTapPair snap={snap} mint={coin.mint} symbol={coin.symbol} actions={actions} compact /> : null}
+      {snap ? <LiveTapPair snap={snap} mint={coin.mint} symbol={coin.symbol} actions={actions} compact /> : null}
+      {snap ? (
+        <button
+          className={`tonal sm live-order-btn${liveOrderOpen ? " on" : ""}`}
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setLiveOrderOpen((open) => !open);
+          }}
+        >
+          {liveHolding(snap, coin.mint) ? "LIVE stop" : "LIVE limit"}
+        </button>
+      ) : null}
+      {snap && liveOrderOpen ? (
+        <OrderTicket
+          snap={snap}
+          actions={actions}
+          mint={coin.mint}
+          symbol={coin.symbol}
+          sides={liveHolding(snap, coin.mint) ? ["stop_sell", "take_profit"] : ["limit_buy"]}
+          book="live"
+          mark={coin.mark ?? liveHolding(snap, coin.mint)?.markPrice ?? null}
+          entry={liveHolding(snap, coin.mint)?.entryPrice ?? null}
+          stopPrice={liveHolding(snap, coin.mint)?.stopPrice ?? null}
+          onClose={() => setLiveOrderOpen(false)}
+        />
+      ) : null}
       {snap ? <OrderChips snap={snap} actions={actions} mint={coin.mint} /> : null}
       {snap && limitOpen ? (
         <OrderTicket snap={snap} actions={actions} mint={coin.mint} symbol={coin.symbol} sides={["limit_buy"]} mark={coin.mark ?? null} entry={null} onClose={() => setLimitOpen(false)} />
