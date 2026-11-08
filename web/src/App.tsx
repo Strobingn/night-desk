@@ -205,7 +205,7 @@ export function App() {
   const buy = useCallback(
     async (ask: BuyAsk): Promise<boolean> => {
       setBusy(ask.mint);
-      const payload: Record<string, unknown> = { mint: ask.mint };
+      const payload: Record<string, unknown> = { mint: ask.mint, book: "paper" };
       if (ask.sizeUsd != null) payload.sizeUsd = ask.sizeUsd;
       if (ask.minutesLeft != null) payload.ignoreCooldown = true;
       if (ask.confirmHardKill) payload.confirmHardKill = true;
@@ -257,8 +257,8 @@ export function App() {
   }, []);
 
   const paperTapUsd = defaultTapUsd(tapSaved, snap?.prefs.defaultBuyUsd, snap?.positionCapUsd ?? 0);
-  // v13.5: a LIVE desk taps the live per-trade size ($5 default), never the paper amount.
-  const tapUsd = effectiveTapUsd(snap?.mode, paperTapUsd, snap?.prefs.liveTradeUsd);
+  // Armed desk: the lightning button keeps the paper size. A non-split live desk still taps the live size.
+  const tapUsd = snap?.liveBook != null ? paperTapUsd : effectiveTapUsd(snap?.mode, paperTapUsd, snap?.prefs.liveTradeUsd);
 
   const track = useCallback((key: string, on: boolean) => {
     if (on) inflight.current.add(key);
@@ -272,7 +272,7 @@ export function App() {
       if (inflight.current.has(key)) return;
       track(key, true);
       const started = performance.now();
-      const res = await api<BuyReply>("/api/positions/buy", { body: { mint, sizeUsd: sizeUsd ?? tapUsd, idemKey: newIdemKey(), oneTap: true } });
+      const res = await api<BuyReply>("/api/positions/buy", { body: { mint, sizeUsd: sizeUsd ?? tapUsd, book: "paper", idemKey: newIdemKey(), oneTap: true } });
       track(key, false);
       const body = { ...res.body, ok: res.ok };
       const hint = !res.ok && (body.code === "HARD_KILL" || body.code === "REVENGE_COOLDOWN") ? " Use Buy… on the card to override." : "";
@@ -494,7 +494,7 @@ function BuyModal({ ask, snap, onCancel, onConfirm }: { ask: BuyAsk; snap: DeskS
               ? `Size uses the position cap (${usd(snap.positionCapUsd)}).`
               : "Size uses the position cap."
             : `Size ${usd(ask.sizeUsd)}.${ask.confirmSize ? " Confirmed above the per-position cap (up to 100% of the book, still cut to cash)." : " A larger number is filled at the cap."}`}{" "}
-          {snap.mode === "live" ? "The desk is already live, so this sends a real swap." : "Paper fill only. This does not turn on live trading."}
+          Paper fill only. A real swap is the LIVE button, and only after the checklist is marked.
         </p>
         {ask.minutesLeft != null ? (
           <p className="ban">Mint is banned after a hard stop. Cooldown has about {ask.minutesLeft} minute(s) left. Auto buys stay blocked.</p>

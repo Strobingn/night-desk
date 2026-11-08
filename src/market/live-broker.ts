@@ -1,5 +1,6 @@
 import { entryPriceAllowed } from "../agents/execution-math.js";
 import { HARD_RULES, clampEntrySlippage } from "../rules.js";
+import { CONFIRM_TIMEOUT_MS, QUOTE_TIMEOUT_MS, SWAP_TIMEOUT_MS, isAmbiguousSendError, preSendFailure, rejectedSend, unconfirmedSend, withTimeout } from "./live-submit.js";
 import { loadDeskKeypair, type WalletKeyInput } from "./wallet-key.js";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -97,8 +98,13 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   const exitCap = Math.min(0.5, Math.max(0.005, req.maxExitSlippage ?? entryCap + HARD_RULES.exitImpactSlack));
   const slipCap = req.side === "buy" ? entryCap : exitCap;
   quoteEndpoint.searchParams.set("slippageBps", String(Math.round(slipCap * 10_000)));
-  const quoteRes = await fetch(quoteEndpoint, { signal: AbortSignal.timeout(8000) });
-  if (!quoteRes.ok) throw new Error(`LIVE_SWAP_FAILED: quote HTTP ${quoteRes.status}`);
+  let quoteRes: Response;
+  try {
+    quoteRes = await fetch(quoteEndpoint, { signal: AbortSignal.timeout(QUOTE_TIMEOUT_MS) });
+  } catch {
+    throw preSendFailure("quote", "timeout");
+  }
+  if (!quoteRes.ok) throw preSendFailure("quote", quoteRes.status);
   const quote = (await quoteRes.json()) as { outAmount?: string; inAmount?: string; error?: string };
   if (!quote.outAmount || quote.error) throw new Error(`LIVE_SWAP_FAILED: ${quote.error ?? "empty quote"}`);
 
@@ -110,27 +116,44 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     if (!gate.ok) throw new Error(gate.message);
   }
 
-  const swapRes = await fetch(req.swapUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      quoteResponse: quote,
-      userPublicKey: owner,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true
-    }),
-    signal: AbortSignal.timeout(8000)
-  });
-  if (!swapRes.ok) throw new Error(`LIVE_SWAP_FAILED: swap HTTP ${swapRes.status}`);
+  let swapRes: Response;
+  try {
+    swapRes = await fetch(req.swapUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: owner,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true
+      }),
+      signal: AbortSignal.timeout(SWAP_TIMEOUT_MS)
+    });
+  } catch {
+    throw preSendFailure("swap", "timeout");
+  }
+  if (!swapRes.ok) throw preSendFailure("swap", swapRes.status);
   const swap = (await swapRes.json()) as { swapTransaction?: string; error?: string };
   if (!swap.swapTransaction) throw new Error(`LIVE_SWAP_FAILED: ${swap.error ?? "no swap transaction"}`);
 
   const tx = web3.VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, "base64"));
   tx.sign([keypair]);
-  const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 2 });
-  const confirmed = await connection.confirmTransaction(signature, "confirmed");
-  // v13.5: a landed-but-failed swap is not a fill.
-  if (confirmed?.value?.err) throw new Error(`LIVE_SWAP_FAILED: transaction ${signature} failed on chain`);
+  // maxRetries resubmits this same signed transaction. It is not a second order.
+  let signature: string;
+  try {
+    signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 2 });
+  } catch (err) {
+    if (isAmbiguousSendError(err)) throw unconfirmedSend(null, req.side);
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`LIVE_SWAP_FAILED: ${message}. Nothing was sent.`);
+  }
+  let confirmed: { value?: { err?: unknown } };
+  try {
+    confirmed = await withTimeout(connection.confirmTransaction(signature, "confirmed"), CONFIRM_TIMEOUT_MS, "confirmation");
+  } catch {
+    throw unconfirmedSend(signature, req.side);
+  }
+  if (confirmed?.value?.err) throw rejectedSend(signature, req.side);
 
   const inAmount = Number(quote.inAmount ?? amount);
   const outAmount = Number(quote.outAmount);

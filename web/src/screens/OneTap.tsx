@@ -34,9 +34,9 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
     if (c !== slipNow) void actions.saveSlippage(c);
   };
   const selling = actions.tapping.has("sell-all");
-  const live = snap.mode === "live";
-  // v13.7: armed desk with the AI on paper — one-tap is live, Sell all here covers the paper book.
   const split = snap.liveBook != null;
+  // Armed desk: the lightning button is paper. Live money is the LIVE strip.
+  const live = snap.mode === "live" && !split;
   return (
     <section className={`onetap card${live ? " live" : ""}`} aria-label="One-tap trading">
       {live ? (
@@ -123,7 +123,7 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
         ) : null}
       </div>
       <p className="fine">
-        {live ? "LIVE: " : ""}One tap = {live ? "LIVE" : "paper"} buy {usd(actions.tapUsd)} now ({live ? `live size, cut to the ${usd(snap.positionCapUsd)} cap and wallet USDC` : capHint(snap.capWhy, snap.positionCapUsd, actions.tapUsd)}). No dialog, but the slippage cap ({slip}%), pool-depth, crash
+        {live && !split ? "LIVE: " : ""}One tap = {live && !split ? "LIVE" : "paper"} buy {usd(actions.tapUsd)} now ({live && !split ? `live size, cut to the ${usd(snap.positionCapUsd)} cap and wallet USDC` : capHint(snap.capWhy, snap.positionCapUsd, actions.tapUsd)}). No dialog, but the slippage cap ({slip}%), pool-depth, crash
         guard, hard kills, cooldown and the −{(snap.rules.stopLossPct * 100).toFixed(0)}% stop all still apply. A stop cannot prevent a gap.
       </p>
     </section>
@@ -132,22 +132,24 @@ export function OneTapBar({ snap, actions, showSellAll = true }: { snap: DeskSna
 
 /** The one-tap Buy button for a coin card, watchlist row or looked-up coin. */
 export function TapBuyButton({ mint, symbol, actions, sizeUsd, className = "primary sm tap-buy" }: { mint: string; symbol: string; actions: DeskActions; sizeUsd?: number; className?: string }) {
-  const inFlight = actions.tapping.has(`buy:${mint}`);
-  const live = actions.live === true;
-  // v13.5: a LIVE desk always taps the live size.
-  const size = live ? actions.tapUsd : sizeUsd ?? actions.tapUsd;
+  const inFlight = actions.tapping.has(`buy:${mint}`) || actions.tapping.has(`livebuy:${mint}`);
+  // Armed (split) desk: this button is paper even when the desk mode is live.
+  // Live money is the LIVE strip, which calls liveTapBuy.
+  const liveAction = actions.live === true && actions.split !== true;
+  const size = liveAction ? actions.tapUsd : sizeUsd ?? actions.tapUsd;
   return (
     <button
-      className={`${className}${live ? " live" : ""}`}
+      className={`${className}${liveAction ? " live" : ""}`}
       type="button"
       disabled={inFlight}
-      aria-label={`One-tap ${live ? "LIVE " : ""}buy ${symbol} for ${usd(size)}`}
+      aria-label={`One-tap ${liveAction ? "LIVE " : ""}buy ${symbol} for ${usd(size)}`}
       onClick={(event) => {
         event.stopPropagation();
-        void actions.oneTapBuy(mint, symbol, live ? undefined : sizeUsd);
+        if (liveAction) void actions.liveTapBuy(mint, symbol);
+        else void actions.oneTapBuy(mint, symbol, sizeUsd);
       }}
     >
-      {inFlight ? "Buying…" : `⚡ Buy ${usd(size, size >= 100 ? 0 : 2)}${live ? " LIVE" : ""}`}
+      {inFlight ? "Buying…" : `⚡ Buy ${usd(size, size >= 100 ? 0 : 2)}${liveAction ? " LIVE" : ""}`}
     </button>
   );
 }

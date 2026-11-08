@@ -4,7 +4,7 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
-Android `13.15` (versionCode 1315) is the v13.11 desk (position cards, Orders, Settings, one-tap live) plus after-slippage net P&L, a sparkline on each held coin, and live buy / sell / limit / stop that stay manual. AI auto-buys stay on the paper book. An unknown wallet read shows as unknown, and a later failure keeps the last figure as stale. `operatorReady` stays a person-set checklist.
+Android `13.16` (versionCode 1316) is the v13.11 desk (position cards, Orders, Settings, one-tap live) plus after-slippage net P&L, a sparkline on each held coin, and live buy / sell / limit / stop that stay manual. AI auto-buys stay on the paper book. A paper button always names the paper book. A live buy is only the LIVE button, and only after `operatorReady` is marked. An unknown wallet read shows as unknown, and a later failure keeps the last figure as stale. A live send whose confirmation times out keeps its signature and is not sent again.
 
 This is a trading tool, not a promise of profit. Defaults are deliberately tight.
 

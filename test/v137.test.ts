@@ -46,7 +46,8 @@ describe("v13.7 live: manual only · AI: paper", () => {
       await desk.submitCandidate(makeToken({ mint: m, symbol: "BOTH", priceUsd: 1, liquidityUsd: 180_000 }));
       expect(desk.book.positions.has(m)).toBe(true); // AI bought on paper
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
-      const bought = await desk.manualBuy(m, 25);
+      desk.setOperatorReady(true);
+      const bought = await desk.manualBuy(m, 25, { book: "live" });
       expect(bought).toMatchObject({ ok: true, mode: "live", sizeUsd: 5 });
       expect(liveBroker.executeLiveSwap).toHaveBeenCalledTimes(1);
       expect(desk.liveBook!.positions.get(m)).toMatchObject({ live: true, costUsd: 5, entry: "manual" });
@@ -111,7 +112,8 @@ describe("v13.7 live: manual only · AI: paper", () => {
     try {
       first.updateSettings({ autoBuy: false });
       await first.submitCandidate(makeToken({ mint: m, symbol: "RST", priceUsd: 1, liquidityUsd: 180_000 }));
-      expect((await first.manualBuy(m)).ok).toBe(true);
+      first.setOperatorReady(true);
+      expect((await first.manualBuy(m, undefined, { book: "live" })).ok).toBe(true);
     } finally {
       first.stop();
     }

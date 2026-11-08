@@ -16,7 +16,7 @@ class V123UiTest {
             "Can't reach able-muslim-examines-disposition",
             shortConnectionError("Unable to resolve host \"able-muslim-examines-disposition.trycloudflare.com\": No address associated with hostname", "Reconnecting")
         )
-        assertEquals("Desk is slow to answer · retrying", shortConnectionError("timeout", "Reconnecting"))
+        assertEquals("Desk is slow to answer. Do not tap a live buy again until you see a signature or a refusal.", shortConnectionError("timeout", "Reconnecting"))
         assertEquals("Reconnecting…", shortConnectionError(null, "Reconnecting"))
         assertEquals("HTTP 502", shortConnectionError("HTTP 502", "Live"))
     }

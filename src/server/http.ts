@@ -148,7 +148,7 @@ export function startServer(
             ignoreCooldown,
             confirmHardKill: record.confirmHardKill === true,
             confirmSize: record.confirmSize === true,
-            // v13.7: armed desk → manual buys are live unless the client asks for the paper book.
+            // Armed desk: the client must name the book. Omitted is refused, not live.
             ...(parseBook(record, url) ? { book: parseBook(record, url) } : {})
           })
           .then((result) => ({ ...result, ms: Date.now() - started }));

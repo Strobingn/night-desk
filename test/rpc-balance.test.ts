@@ -258,7 +258,9 @@ describe("wallet balance fail-closed", () => {
       await desk.submitCandidate(makeToken({ mint: held, symbol: "SH", priceUsd: 1, liquidityUsd: 500_000 }));
       await desk.submitCandidate(makeToken({ mint: watched, symbol: "SL", priceUsd: 1, liquidityUsd: 500_000 }));
       await desk.markPrice(held, 1);
+      desk.setOperatorReady(true);
       expect((await desk.manualBuy(held, 5, { book: "live" })).ok).toBe(true);
+      desk.setOperatorReady(false);
       const sent = swaps.executeLiveSwap.mock.calls.length;
       next = { sol: null, usdc: null, at: 2, error: "RPC HTTP 429" };
       expect(desk.placeOrder({ side: "take_profit", mint: held, value: 1.3, book: "live" }).ok).toBe(true);

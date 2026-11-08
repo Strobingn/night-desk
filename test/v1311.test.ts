@@ -223,6 +223,7 @@ describe("v13.11 live orders", () => {
       const m = "OrderLa111111111111111111111111111111111111";
       await desk.submitCandidate(makeToken({ mint: m, symbol: "LA", priceUsd: 1, liquidityUsd: 500_000 }));
       const paperQty = desk.book.positions.get(m)?.qty;
+      desk.setOperatorReady(true);
       expect((await desk.manualBuy(m, 5, { book: "live" })).ok).toBe(true);
       await desk.markPrice(m, 1);
       expect(desk.placeOrder({ side: "take_profit", mint: m, value: 1.3, percent: 50, book: "live" }).ok).toBe(false);
