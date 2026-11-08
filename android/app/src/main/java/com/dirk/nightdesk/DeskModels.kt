@@ -104,6 +104,9 @@ data class LiveBookInfo(
     val scope: String,
     val line: String,
     val cashUsd: Double,
+    /** False when the latest read failed or has not happened. An older desk omits this and is treated as known. */
+    val cashKnown: Boolean = true,
+    val balanceError: String? = null,
     val equityUsd: Double,
     val openPnlUsd: Double,
     val positions: List<PositionRow>,
@@ -881,6 +884,8 @@ internal fun parseLiveBook(row: JSONObject?, receivedAt: Long): LiveBookInfo? {
         scope = row.optText("scope", "manual"),
         line = row.optText("line"),
         cashUsd = row.optFinite("cashUsd"),
+        cashKnown = if (row.has("cashKnown")) row.optBoolean("cashKnown") else true,
+        balanceError = row.optText("balanceError").ifBlank { null }?.takeIf { it != "null" },
         equityUsd = row.optFinite("equityUsd"),
         openPnlUsd = row.optFinite("openPnlUsd"),
         positions = parsePositionRows(row.optJSONArray("positions"), receivedAt, live = true),

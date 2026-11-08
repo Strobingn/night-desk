@@ -72,7 +72,8 @@ fun WalletCard(snap: DeskSnapshot?, modifier: Modifier = Modifier) {
             TextButton(onClick = { clipboard.setText(AnnotatedString(w?.publicKey ?: "")) }) { Text("Copy address", color = P.accent) }
         }
         Text(
-            "Read-only. Buys spend USDC; keep about ${w?.minFeeSol ?: 0.005} SOL for fees. The private key stays on the Austin desk host and is never sent to this phone.",
+            "Read-only. A Jupiter buy spends USDC and keeps about ${w?.minFeeSol ?: 0.005} SOL for fees. A pump curve buy spends SOL. The private key stays on the desk host and is never sent to this phone." +
+                (w?.balanceError?.let { " Balance is not current: $it" } ?: ""),
             color = P.dim,
             fontSize = 11.5.sp,
             lineHeight = 15.sp

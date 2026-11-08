@@ -9,7 +9,7 @@ import { THEME_OPTIONS } from "../theme";
 import { WalletCard } from "./Wallet";
 
 const GROUP_META: Record<string, { icon: string; text: string }> = {
-  "Live wallet": { icon: "shield", text: "Real-money settings. Used only when Austin's desk runs with LIVE_TRADING=true." },
+  "Live wallet": { icon: "shield", text: "Real-money settings. Used only when the desk host runs with LIVE_TRADING=true." },
   "Sizing / risk": { icon: "shield", text: "How much each buy uses, and the brakes on the whole book." },
   "Filter / Analyst gates": { icon: "filter", text: "What a new pair must clear before the Analyst scores it." },
   "Exits / stops": { icon: "exit", text: "The hard stop, the cooldown after it, and the optional trailing take profit." },

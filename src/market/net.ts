@@ -11,7 +11,10 @@
  * - Hosts without a known limit pass straight through (still counted).
  */
 
-export type SourceId = "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab";
+export type SourceId = "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab" | "solana";
+
+/** Public cluster endpoint. Solana documents it as rate-limited and not for production apps. */
+export const PUBLIC_SOLANA_RPC_HOST = "api.mainnet-beta.solana.com";
 
 export interface BucketSpec {
   id: string;
@@ -55,7 +58,16 @@ export const BUCKETS: BucketSpec[] = [
   { id: "dexpaprika", source: "dexpaprika", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "ratelimit-limit 10" },
   { id: "bitquery", source: "bitquery", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 0, note: "free plan" },
   { id: "pumpapi", source: "pumpapi", limitPerMin: 60, budgetPerMin: 45, burst: 3, cacheMs: 3_000, note: "pump.fun frontend-api-v3, x-ratelimit-limit 60" },
-  { id: "launchlab", source: "launchlab", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "Raydium LaunchLab list (Bonk.fun), no published limit" }
+  { id: "launchlab", source: "launchlab", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "Raydium LaunchLab list (Bonk.fun), no published limit" },
+  {
+    id: "solana:public",
+    source: "solana",
+    limitPerMin: 12,
+    budgetPerMin: 9,
+    burst: 2,
+    cacheMs: 20_000,
+    note: "api.mainnet-beta.solana.com. Published ceilings are 100 requests/10s per IP, 40/10s per method, and 40 concurrent, and they vary. The endpoint is not a production RPC. This 9/min figure is the desk's own shared budget for JSON-RPC reads (wallet plus held-account polls), not a claim the public endpoint will serve it."
+  }
 ];
 
 const BY_ID = new Map(BUCKETS.map((b) => [b.id, b]));
@@ -83,7 +95,17 @@ export function bucketFor(url: string): BucketSpec | null {
   if (host === "streaming.bitquery.io" || host === "graphql.bitquery.io") return BY_ID.get("bitquery")!;
   if (host === "frontend-api-v3.pump.fun") return BY_ID.get("pumpapi")!;
   if (host === "launch-mint-v1.raydium.io") return BY_ID.get("launchlab")!;
+  if (host === PUBLIC_SOLANA_RPC_HOST) return BY_ID.get("solana:public")!;
   return null;
+}
+
+const RPC_READ = /"method"\s*:\s*"(get[A-Za-z]+)"/;
+
+/** JSON-RPC reads may be cached. Sends and simulations may not. */
+export function rpcReadMethod(body: string): string | null {
+  const method = RPC_READ.exec(body)?.[1];
+  if (!method || method === "getProgramAccounts") return null;
+  return method;
 }
 
 /** 0 = held-position marks and Add coin (never starve), 1 = enrichment, 2 = Scout list polls. */
@@ -315,9 +337,10 @@ export class NetLimiter {
     const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
     if (!spec) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
-    const key = `${method} ${url}`;
+    const rpcRead = method === "POST" && typeof rest.body === "string" && spec.id === "solana:public" && rpcReadMethod(rest.body) != null;
+    const key = rpcRead ? `POST ${url} ${rest.body}` : `${method} ${url}`;
     const now = this.clock.now();
-    if (isGet && spec.cacheMs > 0) {
+    if ((isGet || rpcRead) && spec.cacheMs > 0) {
       const hit = this.cache.get(key);
       if (hit && now - hit.at <= spec.cacheMs) {
         this.bucket(spec).hitTimes.push(now);
@@ -330,7 +353,7 @@ export class NetLimiter {
       }
     }
     const run = this.send(spec, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
-    if (isGet) {
+    if (isGet || rpcRead) {
       this.inflight.set(key, run);
       try {
         const res = await run;

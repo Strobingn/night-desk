@@ -415,7 +415,7 @@ describe("v13.5 HTTP and web helpers", () => {
     } as const;
     const off = walletLines({ ...w }, "paper");
     expect(off.badge).toBe("LIVE OFF");
-    expect(off.lines[0]).toMatch(/Fill WALLET_PRIVATE_KEY=/);
+    expect(off.lines[0]).toMatch(/Set WALLET_PRIVATE_KEY on the desk host/);
     const on = walletLines({ ...w, keyLoaded: true, keySource: "env", live: true, liveRequested: true }, "live");
     expect(on).toMatchObject({ badge: "LIVE ON", tone: "live" });
   });

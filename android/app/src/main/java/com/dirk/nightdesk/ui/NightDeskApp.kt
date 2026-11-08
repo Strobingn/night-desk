@@ -589,6 +589,12 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
     }
 }
 
+private fun liveCashLabel(book: LiveBookInfo): String {
+    if (book.cashKnown && book.balanceError.isNullOrBlank()) return "USDC ${money(book.cashUsd)}"
+    if (!book.balanceError.isNullOrBlank() && book.cashUsd > 0) return "USDC ${money(book.cashUsd)} stale"
+    return "USDC unknown"
+}
+
 @Composable
 private fun BookScreen(
     snap: DeskSnapshot?,
@@ -622,7 +628,7 @@ private fun BookScreen(
             item {
                 SectionTitle(
                     "LIVE",
-                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · USDC ${money(liveBook.cashUsd)}",
+                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · ${liveCashLabel(liveBook)}",
                     P.down
                 )
             }
@@ -811,7 +817,7 @@ private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit)
             )
         }
         Text(
-            "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY in Austin's .env on the desk host. Night Desk has no wallet vault.",
+            "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY on the desk host. Night Desk has no wallet vault.",
             color = Dim,
             fontSize = 12.sp
         )

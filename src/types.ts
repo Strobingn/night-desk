@@ -1,3 +1,4 @@
+import type { SourceId } from "./market/net.js";
 import type { ResolvedRules } from "./rules.js";
 
 export type { ResolvedRules };
@@ -170,8 +171,12 @@ export interface LiveBookView {
   /** "manual" = only Dirk's buys go live (AI on paper). "all" = the AI buys live too. */
   scope: "manual" | "all";
   line: string;
-  /** Wallet USDC (refreshed every 20 s and before each live buy). */
+  /** Last known wallet USDC. Zero until a read succeeds. Not a balance when cashKnown is false. */
   cashUsd: number;
+  /** False when the latest read failed or has not happened. A stale last figure stays in cashUsd. */
+  cashKnown?: boolean;
+  /** Set when the latest read failed or has not happened. */
+  balanceError?: string | null;
   equityUsd: number;
   startingUsd: number;
   pnlUsd: number;
@@ -347,7 +352,7 @@ export interface FeedStatus {
 export type FeedSourceState = "live" | "stale" | "backoff" | "down" | "blocked" | "off";
 
 export interface FeedSourceStatus {
-  id: "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab";
+  id: SourceId;
   label: string;
   enabled: boolean;
   state: FeedSourceState;
@@ -683,7 +688,7 @@ export interface MarksDelta {
   cashUsd: number;
   equityUsd: number;
   /** v13.7 live book marks (armed desk only). */
-  live?: { cashUsd: number; equityUsd: number; positions: MarksDelta["positions"] };
+  live?: { cashUsd: number; equityUsd: number; cashKnown?: boolean; balanceError?: string | null; positions: MarksDelta["positions"] };
   positions: Array<{
     book?: "live";
     mint: string;

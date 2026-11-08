@@ -18,7 +18,7 @@ export function walletLines(w: WalletView | undefined, mode: DeskSnapshot["mode"
       ? `Key loaded: yes (${w.keySource === "env" ? "WALLET_PRIVATE_KEY" : "keypair file"}).`
       : w.keyInvalid
         ? "Key loaded: no. WALLET_PRIVATE_KEY is set but is not a Solana private key."
-        : "Key loaded: no. Fill WALLET_PRIVATE_KEY= in Austin's .env."
+        : "Key loaded: no. Set WALLET_PRIVATE_KEY on the desk host."
   );
   if (w.balanceError) lines.push(`Balance: unavailable (${w.balanceError}).`);
   lines.push(w.live ? (w.liveScopeLine ? `LIVE is ON. ${w.liveScopeLine}` : "LIVE is ON. One-tap and auto-buys send real swaps.") : `LIVE is OFF. ${w.liveRequested ? "LIVE_TRADING=true but the desk could not arm." : "LIVE_TRADING is not true."}`);

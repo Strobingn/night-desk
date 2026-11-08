@@ -536,8 +536,9 @@ export class Scout {
     const replay = this.opts.feedMode === "replay";
     const sources = SOURCE_ORDER.map((id) => {
       const enabled =
-        !replay &&
-        (id === "pump" ? true : id === "bitquery" ? this.sources.bitquery && Boolean(this.opts.bitqueryKey) : this.sources[id as keyof ScoutSources]);
+        id === "solana" ||
+        (!replay &&
+          (id === "pump" ? true : id === "bitquery" ? this.sources.bitquery && Boolean(this.opts.bitqueryKey) : this.sources[id as keyof ScoutSources]));
       const idleReason = replay ? "replay mode" : id === "bitquery" && !this.opts.bitqueryKey ? "no API key" : "turned off";
       return this.health.status(id, { enabled, idleReason, buckets: budgets, connected: id === "pump" ? this.status.pumpConnected : undefined, stale: id === "pump" ? this.pumpStale ?? undefined : undefined, now });
     });
