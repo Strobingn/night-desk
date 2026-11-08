@@ -23,6 +23,8 @@ export interface LiveSwapRequest {
   maxEntrySlippage?: number;
   /** v13.5 sell slippage (exit tolerance). Defaults to the entry cap + 3%. */
   maxExitSlippage?: number;
+  /** Exec-lane fetch. Blockhash, simulate, and send do not wait on the 9/min poll budget. */
+  rpcFetch?: typeof fetch;
 }
 
 export interface LiveSwapResult {
@@ -46,7 +48,9 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   }
   const web3 = await import("@solana/web3.js");
   const keypair = loaded.keypair;
-  const connection = new web3.Connection(req.rpcUrl, "confirmed");
+  const connection = req.rpcFetch
+    ? new web3.Connection(req.rpcUrl, { commitment: "confirmed", fetch: req.rpcFetch })
+    : new web3.Connection(req.rpcUrl, "confirmed");
   const owner = keypair.publicKey.toBase58();
   // v13.5: decimals come from the chain, not the scout feed (a wrong guess sells 1000x off).
   let decimals: number | null = null;

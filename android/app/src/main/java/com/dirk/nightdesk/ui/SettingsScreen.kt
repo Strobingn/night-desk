@@ -320,7 +320,7 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
 
 /** v13 group icons and one-line descriptions, same as the web. */
 private val GROUP_META = mapOf(
-    Pair("Live wallet", Pair("shield", "Real-money settings. Used only when Austin's desk runs with LIVE_TRADING=true.")),
+    Pair("Live wallet", Pair("shield", "Real-money settings. Used only when the desk host runs with LIVE_TRADING=true.")),
     Pair("Entry / Filter", Pair("filter", "What a new coin must pass, and how the Analyst scores it.")),
     Pair("Risk / Exits", Pair("shield", "Hard stop, cooldown, daily loss and the trailing take-profit.")),
     Pair("Sizing", Pair("coins", "How much each buy spends and how much can be open at once.")),

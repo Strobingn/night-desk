@@ -58,7 +58,7 @@ export function WalletCard({ snap }: { snap: DeskSnapshot }) {
           {busy ? "Reading…" : "Refresh balance"}
         </button>
       </div>
-      <p className="fine">Read-only. Buys spend USDC; keep about {w?.minFeeSol ?? 0.005} SOL for fees. The private key never leaves the Austin desk host and is never shown here.</p>
+      <p className="fine">Read-only. A Jupiter buy spends USDC and keeps about {w?.minFeeSol ?? 0.005} SOL for fees. A pump curve buy spends SOL. The private key never leaves the desk host and is never shown here.{w?.balanceError ? ` Balance is not current: ${w.balanceError}` : ""}</p>
     </section>
   );
 }

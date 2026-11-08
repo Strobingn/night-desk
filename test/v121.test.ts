@@ -266,7 +266,8 @@ describe("v12.1 banner debounce and Scout status", () => {
   it("Scout reports every source; Bitquery without a key is off, not an error", () => {
     const scout = new Scout({ bus: new EventBus<DeskEvents>(), feedMode: "live", demo: false, pumpWsUrl: "ws://x", net: new NetLimiter(), onStatus: () => undefined });
     const report = scout.report();
-    expect(report.sources!.map((s) => s.id)).toEqual(["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery"]);
+    expect(report.sources!.map((s) => s.id)).toEqual(["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery", "solana"]);
+    expect(report.sources!.find((s) => s.id === "solana")?.enabled).toBe(true);
     expect(report.sources!.find((s) => s.id === "bitquery")).toMatchObject({ state: "off", detail: "no API key" });
     expect(report.budgets!.length).toBeGreaterThanOrEqual(9);
     scout.stop();
@@ -292,7 +293,7 @@ describe("v12.1 desk snapshot", () => {
     const desk = testDesk();
     try {
       const feed = desk.snapshot().feed;
-      expect(feed.sources?.map((s) => s.id)).toEqual(["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery"]);
+      expect(feed.sources?.map((s) => s.id)).toEqual(["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery", "solana"]);
       expect(feed.budgets?.find((b) => b.id === "gecko")?.budgetPerMin).toBe(4);
       expect(feed.lastError).toBeUndefined();
     } finally {

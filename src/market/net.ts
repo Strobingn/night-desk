@@ -11,7 +11,10 @@
  * - Hosts without a known limit pass straight through (still counted).
  */
 
-export type SourceId = "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab";
+export type SourceId = "pump" | "dexscreener" | "gecko" | "jupiter" | "dexpaprika" | "bitquery" | "pumpapi" | "launchlab" | "solana";
+
+/** Public cluster endpoint. Solana documents it as rate-limited and not for production apps. */
+export const PUBLIC_SOLANA_RPC_HOST = "api.mainnet-beta.solana.com";
 
 export interface BucketSpec {
   id: string;
@@ -55,7 +58,25 @@ export const BUCKETS: BucketSpec[] = [
   { id: "dexpaprika", source: "dexpaprika", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "ratelimit-limit 10" },
   { id: "bitquery", source: "bitquery", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 0, note: "free plan" },
   { id: "pumpapi", source: "pumpapi", limitPerMin: 60, budgetPerMin: 45, burst: 3, cacheMs: 3_000, note: "pump.fun frontend-api-v3, x-ratelimit-limit 60" },
-  { id: "launchlab", source: "launchlab", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "Raydium LaunchLab list (Bonk.fun), no published limit" }
+  { id: "launchlab", source: "launchlab", limitPerMin: 10, budgetPerMin: 8, burst: 1, cacheMs: 5_000, note: "Raydium LaunchLab list (Bonk.fun), no published limit" },
+  {
+    id: "solana:public",
+    source: "solana",
+    limitPerMin: 12,
+    budgetPerMin: 9,
+    burst: 2,
+    cacheMs: 8_000,
+    note: "api.mainnet-beta.solana.com background reads only (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Published ceilings are 100 requests/10s per IP, 40/10s per method, and 40 concurrent, and they vary. The endpoint is not a production RPC. 9/min is the desk's own poll budget, not a claim the public endpoint will serve it. Held-account polls run every 10s, past this 8s cache, so a mark is not stuck on a 20s copy."
+  },
+  {
+    id: "solana:public:exec",
+    source: "solana",
+    limitPerMin: 80,
+    budgetPerMin: 64,
+    burst: 16,
+    cacheMs: 0,
+    note: "Same public host, separate lane for swap preparation, simulation, and broadcast (priority 1). A full read-lane queue cannot delay these. Burst 16 covers one pump or Jupiter transaction. 64/min is still under the published 40 requests/10s per method. Nothing here is cached."
+  }
 ];
 
 const BY_ID = new Map(BUCKETS.map((b) => [b.id, b]));
@@ -83,7 +104,28 @@ export function bucketFor(url: string): BucketSpec | null {
   if (host === "streaming.bitquery.io" || host === "graphql.bitquery.io") return BY_ID.get("bitquery")!;
   if (host === "frontend-api-v3.pump.fun") return BY_ID.get("pumpapi")!;
   if (host === "launch-mint-v1.raydium.io") return BY_ID.get("launchlab")!;
+  if (host === PUBLIC_SOLANA_RPC_HOST) return BY_ID.get("solana:public")!;
   return null;
+}
+
+const RPC_METHOD = /"method"\s*:\s*"([A-Za-z]+)"/;
+
+/** Background polls. Everything else on the public host, including getAccountInfo and getLatestBlockhash, uses the exec lane. */
+const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "getMultipleAccounts"]);
+
+export function rpcMethod(body: string): string | null {
+  return RPC_METHOD.exec(body)?.[1] ?? null;
+}
+
+/** JSON-RPC reads may be cached. Sends and simulations may not. */
+export function rpcReadMethod(body: string): string | null {
+  const method = rpcMethod(body);
+  if (!method || !method.startsWith("get") || method === "getProgramAccounts") return null;
+  return method;
+}
+
+export function solanaExecSpec(): BucketSpec {
+  return BY_ID.get("solana:public:exec")!;
 }
 
 /** 0 = held-position marks and Add coin (never starve), 1 = enrichment, 2 = Scout list polls. */
@@ -313,28 +355,35 @@ export class NetLimiter {
     const spec = bucketFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
     const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
-    if (!spec) return this.baseFetch(input, rest);
+    const lane =
+      spec?.id === "solana:public" && (priority ?? 1) !== 0
+        ? solanaExecSpec()
+        : spec?.id === "solana:public" && typeof rest.body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(rest.body) ?? "")
+          ? solanaExecSpec()
+          : spec;
+    if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
-    const key = `${method} ${url}`;
+    const rpcRead = method === "POST" && typeof rest.body === "string" && lane.id === "solana:public" && rpcReadMethod(rest.body) != null;
+    const key = rpcRead ? `POST ${url} ${rest.body}` : `${method} ${url}`;
     const now = this.clock.now();
-    if (isGet && spec.cacheMs > 0) {
+    if ((isGet || rpcRead) && lane.cacheMs > 0) {
       const hit = this.cache.get(key);
-      if (hit && now - hit.at <= spec.cacheMs) {
-        this.bucket(spec).hitTimes.push(now);
+      if (hit && now - hit.at <= lane.cacheMs) {
+        this.bucket(lane).hitTimes.push(now);
         return toResponse(hit.res);
       }
       const shared = this.inflight.get(key);
       if (shared) {
-        this.bucket(spec).hitTimes.push(now);
+        this.bucket(lane).hitTimes.push(now);
         return toResponse(await shared);
       }
     }
-    const run = this.send(spec, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
-    if (isGet) {
+    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
+    if (isGet || rpcRead) {
       this.inflight.set(key, run);
       try {
         const res = await run;
-        if (res.status >= 200 && res.status < 300 && spec.cacheMs > 0) {
+        if (res.status >= 200 && res.status < 300 && lane.cacheMs > 0) {
           this.cache.set(key, { at: this.clock.now(), res });
           if (this.cache.size > 500) {
             const first = this.cache.keys().next().value;

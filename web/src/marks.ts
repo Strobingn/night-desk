@@ -88,6 +88,8 @@ export function mergeMarks(snap: DeskSnapshot | null, delta: MarksDelta, receive
             ...snap.liveBook,
             positions: live.positions,
             cashUsd: usable(delta.live?.cashUsd) ? delta.live!.cashUsd : snap.liveBook.cashUsd,
+            cashKnown: typeof delta.live?.cashKnown === "boolean" ? delta.live.cashKnown : snap.liveBook.cashKnown,
+            balanceError: delta.live && "balanceError" in delta.live ? delta.live.balanceError ?? null : snap.liveBook.balanceError,
             equityUsd: usable(delta.live?.equityUsd) ? delta.live!.equityUsd : snap.liveBook.equityUsd,
             openPnlUsd: live.positions.reduce((sum, p) => sum + p.pnlUsd, 0)
           }

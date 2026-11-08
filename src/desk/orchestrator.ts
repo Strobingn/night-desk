@@ -36,6 +36,7 @@ import { usesPumpRoute } from "../market/pump-live.js";
 import type { LiveSwapResult } from "../market/live-broker.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { PumpCore } from "../pump/index.js";
+import { solanaConnection } from "../pump/rpc.js";
 import { DeskStore } from "../store/db.js";
 import type {
   AnalystReport,
@@ -489,12 +490,14 @@ export class Desk {
     this.replay = new ReplayFeed(this.scout);
     // v13.6: held-coin pool reads use the desk's own RPC (.env SOLANA_RPC_URL). The public
     // mainnet-beta RPC 429'd these every few seconds on Austin, so marks fell back to Jupiter.
+    const chainRpc = config.walletRpcUrl || config.rpcUrl;
+    const publicRpc = isPublicRpc(chainRpc);
     this.chain =
       deps.chainFetch || (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch)
-        ? new ChainMarkReader(config.walletRpcUrl || config.rpcUrl, deps.chainFetch ?? this.net.fetchAt(0), POSITION_REFRESH_BAND.min)
+        ? new ChainMarkReader(chainRpc, deps.chainFetch ?? this.net.fetchAt(0), publicRpc ? 10_000 : POSITION_REFRESH_BAND.min)
         : undefined;
-    // v13.8: the same RPC's websocket endpoint pushes every held pool change. Poll stays as fallback.
-    const wsUrl = this.chain && !deps.chainFetch ? config.rpcWsUrl || wsUrlFor(config.walletRpcUrl || config.rpcUrl) : null;
+    // A websocket to the public endpoint spends the same IP budget as the wallet read. Poll only there.
+    const wsUrl = this.chain && !deps.chainFetch && !publicRpc ? config.rpcWsUrl || wsUrlFor(chainRpc) : null;
     this.stream = wsUrl
       ? new ChainStream(wsUrl, (key, data, at) => {
           this.pricer.onStreamAccount(key, data, at);
@@ -504,7 +507,8 @@ export class Desk {
     this.pump = new PumpCore({
       db: this.store.db,
       rpcUrl: config.walletRpcUrl || config.rpcUrl,
-      stream: this.stream
+      stream: this.stream,
+      connection: solanaConnection(config.walletRpcUrl || config.rpcUrl, this.net.fetchAt(1))
     });
     this.scout.setPumpFrameHook((text) => this.pump.onPumpFrame(text));
     this.pricer = new PositionPricer({
@@ -608,7 +612,8 @@ export class Desk {
     this.pinOrderMints();
     // v13.5 read-only wallet balance for the card (and the live cash line). Never signs.
     if (this.walletStatus.walletPublicKey && this.config.feedMode !== "replay") {
-      this.walletTimer = setInterval(() => void this.refreshWallet(), this.config.mode === "live" ? 20_000 : 60_000);
+      const walletEvery = isPublicRpc(this.config.walletRpcUrl) ? 60_000 : this.config.mode === "live" ? 20_000 : 60_000;
+      this.walletTimer = setInterval(() => void this.refreshWallet(), walletEvery);
       setTimeout(() => void this.refreshWallet(), 2_000);
     }
     this.commentTimer = setInterval(() => void this.commentOnce(), 60_000);
@@ -1110,6 +1115,18 @@ export class Desk {
       return;
     }
     const now = Date.now();
+    if (o.book === "live") {
+      const read = await this.refreshWallet();
+      if (!read || read.error != null || read.sol == null) {
+        o.status = "open";
+        o.note = `Refused: wallet balance not current${read?.error ? ` (${read.error})` : ""}. Nothing was sent.`;
+        o.nextTryAt = now + ORDER_RETRY_MS;
+        o.updatedAt = now;
+        this.firingOrders.delete(o.id);
+        this.saveOrders();
+        return;
+      }
+    }
     o.status = "working";
     o.firedAt = now;
     o.firedMark = mark;
@@ -1794,7 +1811,7 @@ export class Desk {
       kind: "info",
       code: "LIVE_NOT_ARMED",
       message: operatorReady
-        ? "Operator marked the live checklist ready. Mode is unchanged. LIVE_TRADING is not set from the phone. The keypair stays on the Austin desk host."
+        ? "Operator marked the live checklist ready. Mode is unchanged. LIVE_TRADING is not set from the phone. The keypair stays on the desk host."
         : "Operator cleared the live-checklist mark. Mode is unchanged."
     });
     return { ok: true, readiness: this.readiness() };
@@ -1809,10 +1826,10 @@ export class Desk {
     const { keypairPresent, keyInvalid } = this.walletStatus;
     if (!keypairPresent) {
       return keyInvalid
-        ? "Live not armed: wallet key missing (WALLET_PRIVATE_KEY on Austin is not a private key)."
+        ? "Live not armed: wallet key missing (WALLET_PRIVATE_KEY on the desk host is not a private key)."
         : "Live not armed: wallet key missing.";
     }
-    if (!this.config.liveRequested) return "Live not armed: LIVE_TRADING is off on Austin.";
+    if (!this.config.liveRequested) return "Live not armed: LIVE_TRADING is off on the desk host.";
     return `Live not armed${this.config.armError ? `: ${this.config.armError}` : "."}`;
   }
 
@@ -1826,25 +1843,39 @@ export class Desk {
     const { keypairPresent, walletPublicKey } = this.walletStatus;
     const rpcPresent = this.config.rpcUrl.trim().length > 0;
     const operatorReady = this.operatorReady;
+    const bal = this.walletBalances;
+    const balanceLine =
+      bal == null
+        ? "Wallet balance has not been read."
+        : bal.error
+          ? bal.usdc != null
+            ? `Wallet balance is stale (${bal.error}). The last USDC figure is kept and labeled stale.`
+            : `Wallet balance is unknown (${bal.error}). The live book does not show that as $0.`
+          : `Wallet balance is current: ${bal.sol} SOL, ${bal.usdc} USDC.`;
     const lines = [
       `Mode ${mode}.`,
       `LIVE_TRADING is ${liveTradingFlag ? "true" : "off"}. The phone cannot turn this flag on.`,
       keypairPresent
-        ? `Wallet key on the Austin desk host is loaded (${this.walletStatus.keySource === "env" ? "WALLET_PRIVATE_KEY" : "WALLET_KEYPAIR_PATH"})${walletPublicKey ? `. Public address ${walletPublicKey}` : ""}. The secret stays on that host.`
+        ? `Wallet key on the desk host is loaded (${this.walletStatus.keySource === "env" ? "WALLET_PRIVATE_KEY" : "WALLET_KEYPAIR_PATH"})${walletPublicKey ? `. Public address ${walletPublicKey}` : ""}. The secret stays on that host.`
         : this.walletStatus.keyInvalid
-          ? "WALLET_PRIVATE_KEY in Austin's .env is not a valid Solana private key (base58 from Phantom, or a JSON byte array)."
-          : "No wallet key on the Austin desk host. Paste the wallet's private key into WALLET_PRIVATE_KEY= in C:\\Users\\Austin\\ndesk2\\.env on that machine. Never into the phone or a chat.",
-      rpcPresent ? "RPC is set on the desk host (SOLANA_RPC_URL or DESK_WALLET_RPC_URL). The URL is not shown here." : "SOLANA_RPC_URL is missing on the desk host.",
+          ? "WALLET_PRIVATE_KEY on the desk host is not a valid Solana private key (base58 from Phantom, or a JSON byte array)."
+          : "No wallet key on the desk host. Set WALLET_PRIVATE_KEY or WALLET_KEYPAIR_PATH in the desk host .env. Never put the key on the phone or in a chat.",
+      isPublicRpc(this.config.walletRpcUrl)
+        ? "SOLANA_RPC_URL is the public Solana endpoint, and DESK_WALLET_RPC_URL is not set, so the wallet uses that same URL. Published limits are 100 requests/10s per IP, 40/10s per method, and 40 concurrent, and they vary. The endpoint is not a production RPC. The desk budgets, caches, and backs off. Choosing another provider is outside this process."
+        : rpcPresent
+          ? "RPC is set on the desk host (SOLANA_RPC_URL or DESK_WALLET_RPC_URL). The URL is not shown here."
+          : "SOLANA_RPC_URL is missing on the desk host.",
+      balanceLine,
       `Live trade size $${this.liveTradeUsd}. Live daily cap ${this.liveDailyCapUsd == null ? "off (liveDailyCapUsd)" : `$${this.liveDailyCapUsd} (liveDailyCapUsd)`}.`,
       "AI auto-buys stay on the paper book. liveAutoBuy cannot be turned on. Enabling live does not place a trade.",
-      "A pump.fun curve or PumpSwap coin uses @pump-fun/pump-sdk on that RPC. It does not call frontend-api-v3.pump.fun or PumpPortal trade-local. Other coins use JUPITER_QUOTE_URL and JUPITER_SWAP_URL.",
+      "A pump.fun curve or PumpSwap coin spends SOL through @pump-fun/pump-sdk. A Jupiter buy spends USDC through JUPITER_QUOTE_URL and JUPITER_SWAP_URL and keeps SOL for fees. Neither path runs while the balance read is unknown. No order has been signed by this check.",
       "Open live orders are rechecked when the process arms and do not fire on a price from before that.",
       mode === "live"
-        ? `Live swaps are on. Austin restarted with LIVE_TRADING=true and a wallet key. ${this.liveScopeLine()}`
-        : "Still paper. Real money starts only after Austin sets LIVE_TRADING=true (with WALLET_PRIVATE_KEY filled) in .env, then restarts the desk.",
+        ? `Live swaps are enabled in config. ${this.liveScopeLine()}`
+        : "Still paper. Real money starts only after the desk host sets LIVE_TRADING=true (with WALLET_PRIVATE_KEY filled) in .env, then restarts the desk.",
       operatorReady
-        ? "Operator marked this checklist ready. That mark does not arm live trading and does not store a wallet."
-        : "Operator has not marked this checklist ready."
+        ? "operatorReady is true because a person sent it. The mark does not set LIVE_TRADING, does not send an order, and does not store a wallet."
+        : "operatorReady is false. It stays false until a person sends {\"operatorReady\": true}. A balance read, including one that recovers, does not flip it."
     ];
     return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, liveScope: this.liveBook ? "manual" : null, lines };
   }
@@ -2501,6 +2532,10 @@ export class Desk {
     if (!pos) return;
     try {
       if (kind === "live") {
+        const read = await this.refreshWallet();
+        if (!read || read.error != null || read.sol == null) {
+          throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
+        }
         const live = await this.runLiveSwap({
           side: "sell",
           mint: order.mint,
@@ -3015,6 +3050,8 @@ export class Desk {
       scope: "manual",
       line: this.liveScopeLine(),
       cashUsd: roundUsd(this.liveBook.cashUsd),
+      cashKnown: this.walletBalances != null && this.walletBalances.error == null && this.walletBalances.usdc != null,
+      balanceError: this.walletBalances?.error ?? (this.walletBalances ? null : "Wallet balance has not been read."),
       equityUsd: roundUsd(equityUsd),
       startingUsd: roundUsd(startingUsd),
       pnlUsd: startingUsd > 0 ? roundUsd(equityUsd - startingUsd) : 0,
@@ -3054,7 +3091,15 @@ export class Desk {
       cashUsd: roundUsd(this.book.cashUsd),
       equityUsd: roundUsd(this.displayEquity()),
       ...(this.liveBook
-        ? { live: { cashUsd: roundUsd(this.liveBook.cashUsd), equityUsd: roundUsd(this.displayEquity("live")), positions: livePositions.map(slim) } }
+        ? {
+            live: {
+              cashUsd: roundUsd(this.liveBook.cashUsd),
+              equityUsd: roundUsd(this.displayEquity("live")),
+              cashKnown: this.walletBalances != null && this.walletBalances.error == null && this.walletBalances.usdc != null,
+              balanceError: this.walletBalances?.error ?? (this.walletBalances ? null : "Wallet balance has not been read."),
+              positions: livePositions.map(slim)
+            }
+          }
         : {}),
       positions: positions.map((p) => ({
         mint: p.mint,
@@ -3581,8 +3626,18 @@ export class Desk {
   /** v13.5 read-only SOL / USDC balance. In live mode the wallet's USDC is the book's cash. */
   async refreshWallet(): Promise<WalletBalances | null> {
     const read = await this.walletReader();
+    if (read.error != null || read.usdc == null || read.sol == null) {
+      const prev = this.walletBalances;
+      this.walletBalances = {
+        sol: prev?.sol ?? null,
+        usdc: prev?.usdc ?? null,
+        at: prev?.at ?? read.at,
+        error: read.error ?? "Wallet balance unknown"
+      };
+      return this.walletBalances;
+    }
     this.walletBalances = read;
-    if (this.liveBook && read.error == null && read.usdc != null) {
+    if (this.liveBook && read.usdc != null) {
       this.liveBook.cashUsd = roundUsd(read.usdc);
       if (!(this.liveStartingUsd > 0)) {
         let held = 0;
@@ -3679,7 +3734,8 @@ export class Desk {
         slippageFraction: slip,
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
-        rpcUrl: this.config.walletRpcUrl
+        rpcUrl: this.config.walletRpcUrl,
+        rpcFetch: this.net.fetchAt(1)
       });
     }
     const { executeLiveSwap } = await import("../market/live-broker.js");
@@ -3696,7 +3752,8 @@ export class Desk {
       swapUrl: this.config.jupiterSwapUrl,
       markPriceUsd: input.markPriceUsd,
       maxEntrySlippage: this.config.rules.maxEntrySlippage,
-      maxExitSlippage: input.exit ? slip : undefined
+      maxExitSlippage: input.exit ? slip : undefined,
+      rpcFetch: this.net.fetchAt(1)
     });
   }
 

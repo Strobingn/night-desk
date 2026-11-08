@@ -308,6 +308,12 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
   );
 }
 
+function liveCashLabel(lb: NonNullable<DeskSnapshot["liveBook"]>): string {
+  if (lb.cashKnown !== false && !lb.balanceError) return `USDC ${usd(lb.cashUsd)}`;
+  if (lb.balanceError && lb.cashUsd > 0) return `USDC ${usd(lb.cashUsd)} stale`;
+  return "USDC unknown";
+}
+
 /** v13.7 armed desk: the live book (real money), apart from the AI's paper book. */
 function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions: DeskActions; busy: string | null }) {
   const lb = snap.liveBook!;
@@ -318,7 +324,7 @@ function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions:
           <span className="live-badge live">LIVE</span> Live positions · real $
         </h2>
         <span className={tone(lb.openPnlUsd)}>
-          {signedUsd(lb.openPnlUsd)} · {lb.positions.length} open · USDC {usd(lb.cashUsd)} · equity {usd(lb.equityUsd)}
+          {signedUsd(lb.openPnlUsd)} · {lb.positions.length} open · {liveCashLabel(lb)} · {lb.cashKnown === false ? (lb.cashUsd > 0 ? "equity stale" : "equity unknown") : `equity ${usd(lb.equityUsd)}`}
         </span>
       </div>
       <p className="fine live-scope">
@@ -426,7 +432,7 @@ function LiveReadyCard({ readiness, busy, onReady }: { readiness: LiveReadiness;
         Mark checklist ready
       </label>
       <p className="fine">
-        This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY in Austin's .env (or WALLET_KEYPAIR_PATH) on the desk host. Night Desk has no wallet vault.
+        This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY (or WALLET_KEYPAIR_PATH) on the desk host. Night Desk has no wallet vault.
       </p>
     </section>
   );

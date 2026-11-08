@@ -13,10 +13,11 @@ export const SOURCE_LABELS: Record<SourceId, string> = {
   dexpaprika: "DexPaprika",
   bitquery: "Bitquery",
   pumpapi: "Pump.fun API",
-  launchlab: "Bonk.fun / LaunchLab"
+  launchlab: "Bonk.fun / LaunchLab",
+  solana: "Solana RPC"
 };
 
-export const SOURCE_ORDER: SourceId[] = ["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery"];
+export const SOURCE_ORDER: SourceId[] = ["pump", "pumpapi", "launchlab", "dexscreener", "jupiter", "gecko", "dexpaprika", "bitquery", "solana"];
 
 interface Health {
   lastOkAt: number | null;

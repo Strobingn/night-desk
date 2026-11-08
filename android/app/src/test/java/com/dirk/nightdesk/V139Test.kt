@@ -12,7 +12,7 @@ import org.robolectric.RobolectricTestRunner
 class V139Test {
     private val unarmed = """
         {"mode":"paper","cashUsd":900,"equityUsd":1000,"positionCapUsd":100,"liveRequested":true,
-         "liveBook":null,"liveNotArmed":"Live not armed: wallet key missing (WALLET_PRIVATE_KEY on Austin is not a private key).",
+         "liveBook":null,"liveNotArmed":"Live not armed: wallet key missing (WALLET_PRIVATE_KEY on the desk host is not a private key).",
          "wallet":{"keyLoaded":false,"keyInvalid":true,"live":false},
          "prefs":{"liveTradeUsd":5},
          "rules":{"stopLossPct":0.03},
@@ -37,7 +37,7 @@ class V139Test {
 
     @Test fun unarmedDeskShowsPlainMessageAndSendsNothing() {
         val snap = parseDeskPayload(unarmed)!!
-        assertEquals("Live not armed: wallet key missing (WALLET_PRIVATE_KEY on Austin is not a private key). Nothing was sent.", LiveTap.block(snap))
+        assertEquals("Live not armed: wallet key missing (WALLET_PRIVATE_KEY on the desk host is not a private key). Nothing was sent.", LiveTap.block(snap))
         assertEquals(5.0, LiveTap.size(snap), 1e-9)
         assertTrue(LiveTap.held(snap).isEmpty())
         assertEquals("Desk not loaded yet. Nothing was sent.", LiveTap.block(null))

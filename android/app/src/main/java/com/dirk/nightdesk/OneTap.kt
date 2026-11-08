@@ -44,7 +44,7 @@ object OneTap {
         lines += when {
             w.keyLoaded -> "Key loaded: yes (" + (if (w.keySource == "env") "WALLET_PRIVATE_KEY" else "keypair file") + ")."
             w.keyInvalid -> "Key loaded: no. WALLET_PRIVATE_KEY is set but is not a Solana private key."
-            else -> "Key loaded: no. Fill WALLET_PRIVATE_KEY= in Austin's .env."
+            else -> "Key loaded: no. Set WALLET_PRIVATE_KEY on the desk host."
         }
         if (w.balanceError != null) lines += "Balance: unavailable (${w.balanceError})."
         lines += if (w.live) "LIVE is ON. " + (w.liveScopeLine ?: "One-tap and auto-buys send real swaps.") else

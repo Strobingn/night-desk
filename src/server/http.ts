@@ -170,7 +170,7 @@ export function startServer(
           return json(res, 400, {
             ok: false,
             error:
-              'This route only accepts {"operatorReady": true|false}. It cannot set LIVE_TRADING, a keypair, or a seed. Edit Austin .env and restart the desk. Mode stays paper until then.'
+              'This route only accepts {"operatorReady": true|false}. It cannot set LIVE_TRADING, a keypair, or a seed. Edit the desk host .env and restart the desk. Mode stays paper until then.'
           });
         }
         const result = desk.setOperatorReady(record.operatorReady);
