@@ -161,7 +161,10 @@ export function parseDexPaprika(payload: unknown, now = Date.now()): RawSighting
   return out;
 }
 
-/** v13.3 Pump.fun frontend-api-v3 newest coins (keyless). Only coins created inside `maxAgeMs` count as new. */
+/**
+ * Legacy coin list. Cloudflare answers this host with a challenge page.
+ * Scout does not request it. `parsePumpApiCoins` stays for a saved payload only.
+ */
 export const PUMP_API_NEW_URL =
   "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false";
 

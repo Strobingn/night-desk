@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
 import type { DatabaseSync } from "node:sqlite";
 import { CANONICAL_SOL_CURVE, curveState, reservesOf, solToReachMarketCap } from "./curve.js";
-import { tradeId } from "./events.js";
+import { TAPE_PROVIDER_LIMIT, tradeId } from "./events.js";
 import { PUMP_FEATURES, attachPumpFeatures, dispatchPumpFeature, handlePumpFeature } from "./features/index.js";
 import type { PumpFeatureHost } from "./features/host.js";
 import { sniperFor } from "./sniper/sniper.js";
@@ -63,14 +63,15 @@ export class PumpCore {
         }
         this.topics.publish(`pump.coin:${state.mint}`, state);
         sniperFor(this.extras).onCurve(state);
+        const solQuote = state.quoteIsSol !== false;
         const quote = Number(state.virtualQuoteReserves);
         const token = Number(state.virtualTokenReserves);
         evaluateDesk(this, this.deskHost(), {
           mint: state.mint,
           at: this.now(),
-          marketCapLamports: Number(state.marketCapLamports),
-          progressPct: state.progressPct,
-          price: token > 0 ? quote / token : undefined,
+          marketCapLamports: solQuote ? Number(state.marketCapLamports) : undefined,
+          progressPct: state.progressPct ?? undefined,
+          price: solQuote && token > 0 ? quote / token : undefined,
           graduated: state.complete
         });
       }
@@ -177,7 +178,18 @@ export class PumpCore {
     if (path === "/api/pump/prepare" && method === "POST") return { status: 200, body: { ok: true, intent: await this.prepare(body) } };
     if (path === "/api/pump/coins" && method === "GET") return { status: 200, body: { ok: true, coins: this.store.listCoins(limitOf(url)) } };
     if (path === "/api/pump/trades" && method === "GET") {
-      return { status: 200, body: { ok: true, trades: this.store.recentTrades(limitOf(url), url.searchParams.get("mint") ?? undefined) } };
+      const trades = this.store.recentTrades(limitOf(url), url.searchParams.get("mint") ?? undefined);
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          trades,
+          tape: {
+            status: trades.length ? "partial" : "provider_limited",
+            reason: TAPE_PROVIDER_LIMIT
+          }
+        }
+      };
     }
     if (path === "/api/pump/alerts" && method === "GET") return { status: 200, body: { ok: true, alerts: this.store.recentAlerts(limitOf(url)) } };
     if (path === "/api/pump/watch" && method === "POST") {
@@ -274,8 +286,8 @@ export class PumpCore {
     evaluateDesk(this, this.deskHost(), {
       mint: event.mint,
       at: event.timestamp || this.now(),
-      marketCapLamports: coin?.curve ? Number(coin.curve.marketCapLamports) : undefined,
-      progressPct: coin?.curve?.progressPct,
+      marketCapLamports: coin?.curve?.quoteIsSol !== false && coin?.curve ? Number(coin.curve.marketCapLamports) : undefined,
+      progressPct: coin?.curve?.progressPct ?? undefined,
       graduated: coin?.complete,
       buy: event.isBuy ? { lamports, signature } : undefined,
       sell: event.isBuy ? undefined : { lamports, signature }

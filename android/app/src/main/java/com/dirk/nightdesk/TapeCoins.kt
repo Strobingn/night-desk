@@ -196,10 +196,11 @@ fun dayBase(points: List<EquityPoint>, fallback: Double, midnightMs: Long): Doub
 object TapeToolbar {
     const val PREF_SCOUT_OPEN = "tape_scout_open"
 
-    data class ScoutSummary(val live: Int, val total: Int, val perMin: Int, val down: Int, val slow: Int) {
+    data class ScoutSummary(val live: Int, val total: Int, val perMin: Int, val down: Int, val slow: Int, val blocked: Int = 0) {
         val text: String get() = "$live/$total live · $perMin/min"
         val badge: String? get() = when {
             down > 0 -> "$down down"
+            blocked > 0 -> "$blocked blocked"
             slow > 0 -> "$slow slow"
             else -> null
         }
@@ -210,7 +211,8 @@ object TapeToolbar {
         total = sources.size,
         perMin = sources.sumOf { it.sightingsPerMin },
         down = sources.count { it.state == "down" },
-        slow = sources.count { it.state == "backoff" || it.state == "stale" }
+        slow = sources.count { it.state == "backoff" || it.state == "stale" },
+        blocked = sources.count { it.state == "blocked" }
     )
 
     fun oneTapChip(tapUsd: Double, slipPct: Double): String {

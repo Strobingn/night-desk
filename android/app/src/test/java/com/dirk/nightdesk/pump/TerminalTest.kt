@@ -31,7 +31,13 @@ class TerminalTest {
     @Test
     fun canonicalCurveMatchesGraduationNumbersAndReverseQuote() {
         val reserves = CurveMath.canonical()
-        assertEquals(0.0, CurveMath.progressPct(reserves), 0.001)
+        assertEquals(0.0, CurveMath.progressPct(reserves)!!, 0.001)
+        val dust = reserves.copy(
+            virtualTokenReserves = BigInteger("500000000000000"),
+            realTokenReserves = BigInteger("400000000000000"),
+            realQuoteReserves = BigInteger.ONE
+        )
+        assertEquals(null, CurveMath.progressPct(dust))
         assertEquals(BigInteger("85005359057"), CurveMath.solRemaining(reserves))
         val mcapSol = CurveMath.marketCap(reserves).toDouble() / 1e9
         assertTrue(abs(mcapSol - 27.96) < 0.02)

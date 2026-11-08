@@ -16,6 +16,8 @@ class V134TapeTest {
         assertEquals("1 down", sum.badge)
         val slow = TapeToolbar.scout(listOf(src("pump", "stale"), src("dex", "live")))
         assertEquals("1 slow", slow.badge)
+        val blocked = TapeToolbar.scout(listOf(src("pump", "live", 8), src("pumpapi", "blocked")))
+        assertEquals("1 blocked", blocked.badge)
         assertNull(TapeToolbar.scout(listOf(src("dex", "live"))).badge)
     }
 

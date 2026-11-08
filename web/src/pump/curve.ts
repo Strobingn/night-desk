@@ -62,7 +62,7 @@ const MAX_TAPE = 40;
 function isCurve(data: unknown): data is CurveState {
   if (!data || typeof data !== "object") return false;
   const row = data as Partial<CurveState>;
-  return typeof row.marketCapLamports === "string" && typeof row.virtualTokenReserves === "string" && typeof row.progressPct === "number" && !("isBuy" in row);
+  return typeof row.marketCapLamports === "string" && typeof row.virtualTokenReserves === "string" && (typeof row.progressPct === "number" || row.progressPct === null) && !("isBuy" in row);
 }
 
 function isTrade(data: unknown): data is TradeEvent {
@@ -80,9 +80,10 @@ function pushTick(ticks: ChartPoint[], point: ChartPoint): ChartPoint[] {
 /** Applies one `/ws` pump frame or a polled curve/trade. `now` is the receive time. */
 export function reducePumpFrame(state: FeedState, data: unknown, now: number): FeedState {
   if (isCurve(data)) {
+    const ticks = data.quoteIsSol === false ? state.ticks : pushTick(state.ticks, { t: now, marketCapLamports: data.marketCapLamports });
     return {
       curve: data,
-      ticks: pushTick(state.ticks, { t: now, marketCapLamports: data.marketCapLamports }),
+      ticks,
       tape: state.tape,
       lastTickAt: now
     };

@@ -440,6 +440,7 @@ fun feedSourceStateText(src: FeedSource, nowMs: Long): String {
         "live" -> if (src.id == "pump") "live · websocket" else "live"
         "off" -> if (detail != null) "off · $detail" else "off"
         "down" -> if (detail != null) "down · $detail" else "down"
+        "blocked" -> if (detail != null) "blocked · $detail" else "blocked"
         // v13.3 watchdog: connected but silent past 60s. Never shown as live.
         "stale" -> if (detail != null) "stale · $detail" else "stale · reconnecting"
         else -> {

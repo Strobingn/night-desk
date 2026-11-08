@@ -1953,7 +1953,7 @@ private fun ScoutStatusList(sources: List<FeedSource>) {
         sources.forEach { src ->
             val tint = when (src.state) {
                 "live" -> Mint
-                "backoff", "stale" -> Amber
+                "backoff", "stale", "blocked" -> Amber
                 "down" -> Coral
                 else -> Dim
             }

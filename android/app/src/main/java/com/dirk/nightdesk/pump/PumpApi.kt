@@ -14,16 +14,17 @@ import java.util.concurrent.TimeUnit
 data class CurveView(
     val mint: String,
     val marketCapLamports: BigInteger,
-    val progressPct: Double,
-    val solInCurveLamports: BigInteger,
-    val solRemainingLamports: BigInteger,
-    val graduationMarketCapLamports: BigInteger,
+    val progressPct: Double?,
+    val solInCurveLamports: BigInteger?,
+    val solRemainingLamports: BigInteger?,
+    val graduationMarketCapLamports: BigInteger?,
     val virtualTokenReserves: BigInteger,
     val virtualQuoteReserves: BigInteger,
     val realTokenReserves: BigInteger,
     val realQuoteReserves: BigInteger,
     val tokenTotalSupply: BigInteger,
-    val complete: Boolean
+    val complete: Boolean,
+    val quoteIsSol: Boolean = true
 ) {
     fun reserves(): CurveMath.Reserves = CurveMath.Reserves(
         virtualTokenReserves, virtualQuoteReserves, realTokenReserves, realQuoteReserves, tokenTotalSupply, complete
@@ -31,6 +32,8 @@ data class CurveView(
 }
 
 data class TapePrint(val id: String, val isBuy: Boolean, val solLamports: String, val user: String)
+
+data class TapePage(val prints: List<TapePrint>, val note: String?)
 
 data class PreparedBuy(
     val unsignedTx: String?,
@@ -54,23 +57,26 @@ class PumpApi(private val http: OkHttpClient = OkHttpClient.Builder().callTimeou
         parseCurve(JSONObject(get(base, token, "/api/pump/curve?mint=${enc(mint)}")).getJSONObject("curve"))
     }.getOrNull()
 
-    fun trades(base: String, token: String, mint: String): List<TapePrint> = runCatching {
-        val arr = JSONObject(get(base, token, "/api/pump/trades?mint=${enc(mint)}&limit=40")).optJSONArray("trades")
-            ?: return emptyList()
-        buildList {
-            for (i in 0 until arr.length()) {
-                val row = arr.getJSONObject(i)
-                add(
-                    TapePrint(
-                        id = row.optString("signature").ifBlank { "${row.optLong("timestamp")}:${row.optString("user")}:$i" },
-                        isBuy = row.optBoolean("isBuy"),
-                        solLamports = row.optString("solAmountLamports", "0"),
-                        user = row.optString("user")
+    fun trades(base: String, token: String, mint: String): TapePage = runCatching {
+        val json = JSONObject(get(base, token, "/api/pump/trades?mint=${enc(mint)}&limit=40"))
+        val arr = json.optJSONArray("trades")
+        val prints = buildList {
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val row = arr.getJSONObject(i)
+                    add(
+                        TapePrint(
+                            id = row.optString("signature").ifBlank { "${row.optLong("timestamp")}:${row.optString("user")}:$i" },
+                            isBuy = row.optBoolean("isBuy"),
+                            solLamports = row.optString("solAmountLamports", "0"),
+                            user = row.optString("user")
+                        )
                     )
-                )
+                }
             }
         }
-    }.getOrDefault(emptyList())
+        TapePage(prints, json.optJSONObject("tape")?.optString("reason")?.ifBlank { null })
+    }.getOrDefault(TapePage(emptyList(), null))
 
     fun watch(base: String, token: String, mint: String) {
         post(base, token, "/api/pump/watch", JSONObject().put("mint", mint).toString())
@@ -144,19 +150,27 @@ class PumpApi(private val http: OkHttpClient = OkHttpClient.Builder().callTimeou
         fun parseCurve(json: JSONObject): CurveView = CurveView(
             mint = json.optString("mint"),
             marketCapLamports = big(json, "marketCapLamports"),
-            progressPct = json.optDouble("progressPct", 0.0),
-            solInCurveLamports = big(json, "solInCurveLamports"),
-            solRemainingLamports = big(json, "solRemainingLamports"),
-            graduationMarketCapLamports = big(json, "graduationMarketCapLamports"),
+            progressPct = if (!json.has("progressPct") || json.isNull("progressPct")) null else json.optDouble("progressPct"),
+            solInCurveLamports = optionalBig(json, "solInCurveLamports"),
+            solRemainingLamports = optionalBig(json, "solRemainingLamports"),
+            graduationMarketCapLamports = optionalBig(json, "graduationMarketCapLamports"),
             virtualTokenReserves = big(json, "virtualTokenReserves"),
             virtualQuoteReserves = big(json, "virtualQuoteReserves"),
             realTokenReserves = big(json, "realTokenReserves"),
             realQuoteReserves = big(json, "realQuoteReserves"),
             tokenTotalSupply = big(json, "tokenTotalSupply"),
-            complete = json.optBoolean("complete")
+            complete = json.optBoolean("complete"),
+            quoteIsSol = if (json.has("quoteIsSol")) json.optBoolean("quoteIsSol") else true
         )
 
         private fun big(json: JSONObject, name: String): BigInteger = json.optString(name, "0").toBigIntegerOrNull() ?: BigInteger.ZERO
+
+        private fun optionalBig(json: JSONObject, name: String): BigInteger? {
+            if (!json.has(name) || json.isNull(name)) return null
+            val text = json.optString(name, "")
+            if (text.isBlank()) return null
+            return text.toBigIntegerOrNull()
+        }
         private fun enc(value: String) = java.net.URLEncoder.encode(value, Charsets.UTF_8)
     }
 }

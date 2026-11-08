@@ -1,0 +1,7 @@
+{
+  "mint": "2BobgJUPZBKZuvCG3W7TLCmiLuiy6vqjQqie9cSDpump",
+  "curve": "4Z3maR8fdf4ieie2z4LQFhiSrXAXJegrYAt8vSAJqgBA",
+  "signature": "4WYHKXrDD6NYfWzAtm4iwdw1ohHu7ib6GNWYTaDXEt58xGtsrXarnWH4fCi1C9TXQo6o3gCW8nyg43Tsh8a7ZQ18",
+  "slot": 466743166,
+  "source": "public mainnet-beta getAccountInfo + getTransaction, confirmed, maxSupportedTransactionVersion 1"
+}
