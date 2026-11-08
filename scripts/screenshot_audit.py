@@ -355,18 +355,28 @@ def paper_fill_gate() -> None:
     buy = None
     for _ in range(5):
         xml = dump()
+        done = find(xml, "Done")
+        if done and "One tap" in xml:
+            tap(done)
+            time.sleep(0.4)
+            xml = dump()
         candidates = []
         for node in nodes(xml):
             text = blob_of(node)
-            if "LIVE" in text or "Sell" in text:
+            # The toolbar chip is "⚡ $100 · slip 3%". The paper button is "⚡ Buy $100".
+            if "slip" in text.lower() or "LIVE" in text or "Sell" in text:
                 continue
-            if "⚡" not in text and "Buy $" not in text:
+            if "Buy $" not in text:
                 continue
             bounds = bounds_of(node)
-            if bounds and on_screen(bounds) and bounds[2] - bounds[0] > 80:
+            if not bounds or not on_screen(bounds):
+                continue
+            width = bounds[2] - bounds[0]
+            height = bounds[3] - bounds[1]
+            if 80 < width < 700 and 40 < height < 220:
                 candidates.append(bounds)
         if candidates:
-            buy = candidates[0]
+            buy = sorted(candidates, key=lambda bounds: (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]))[0]
             break
         swipe_up()
     if not buy:
