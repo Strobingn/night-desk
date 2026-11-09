@@ -193,6 +193,10 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                             Spacer(Modifier.width(4.dp))
                             Chip("VOL #$rank", P.accent, P.accent.copy(alpha = 0.2f), size = 11)
                         }
+                        if (!coin.unenriched.isNullOrBlank()) {
+                            Spacer(Modifier.width(4.dp))
+                            Chip("not enriched", P.amber, P.amber.copy(alpha = 0.16f), bold = false, size = 10)
+                        }
                         if (safety.isNotBlank()) {
                             Spacer(Modifier.width(4.dp))
                             Chip(safety, if (safety.startsWith("Blocked")) P.down else P.dim, P.card3, bold = false, size = 10)
@@ -511,6 +515,7 @@ fun NightDeskApp(desk: DeskRepository) {
                     mode = snap?.mode ?: "paper",
                     liveScope = snap?.liveScope,
                     tapeQuotes = snap?.tapeQuotes.orEmpty(),
+                    rawTape = snap?.rawTape.orEmpty(),
                     tapeOrders = orderActions,
                     safetyChips = snap?.safetyChips.orEmpty()
                 )
@@ -1379,6 +1384,7 @@ private fun TapeScreen(
     mode: String = "paper",
     liveScope: String? = null,
     tapeQuotes: Map<String, com.dirk.nightdesk.TapeQuote> = emptyMap(),
+    rawTape: List<com.dirk.nightdesk.RawTapeRow> = emptyList(),
     tapeOrders: OrderActions? = null,
     safetyChips: List<com.dirk.nightdesk.SafetyChip> = emptyList()
 ) {
@@ -1514,7 +1520,7 @@ private fun TapeScreen(
                 else Text(if (tapeView == "coins") "Tape" else "Activity log", color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 if (tapeView == "coins") {
                 Spacer(Modifier.width(6.dp))
-                // v13.1 sort: Volume (default), Newest, Score. Saved on this phone only. Now a compact menu.
+                // v13.27 sort: Newest (default), Volume, Score. Saved on this phone only.
                 Box {
                     ToolChip(com.dirk.nightdesk.TapeToolbar.sortChip(tapeSort), on = true) { sortMenu = true }
                     DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }, containerColor = P.card) {
@@ -1593,12 +1599,30 @@ private fun TapeScreen(
         }
         if (tapeView == "coins") {
             val coins = sortCoins(
-                remember(idKey, positionMints, tapeQuotes) { coinCards(events, positionMints, quotes = tapeQuotes) }
+                remember(idKey, positionMints, tapeQuotes, rawTape) { coinCards(events, positionMints, quotes = tapeQuotes, raw = rawTape) }
                     .filter { coinFilter == "all" || it.verdict.name.lowercase() == coinFilter || (coinFilter == "trade" && it.verdict == Verdict.BOUGHT) },
                 tapeSort
             )
+            val coinState = rememberLazyListState()
+            var pinNewest by remember { mutableStateOf(true) }
+            val coinStick = remember {
+                object : NestedScrollConnection {
+                    override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                        if (source == NestedScrollSource.UserInput && consumed.y != 0f) {
+                            pinNewest = coinState.firstVisibleItemIndex == 0 && coinState.firstVisibleItemScrollOffset < 8
+                        }
+                        return Offset.Zero
+                    }
+                }
+            }
+            LaunchedEffect(coins.firstOrNull()?.mint, tapeSort) {
+                if (tapeSort == TapeSort.NEWEST && pinNewest && coins.isNotEmpty() && !coinState.isScrollInProgress) {
+                    runCatching { coinState.scrollToItem(0) }
+                }
+            }
             LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
+                state = coinState,
+                modifier = Modifier.weight(1f).fillMaxWidth().nestedScroll(coinStick),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -2152,6 +2176,7 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                         mode = snap.mode,
                         liveScope = snap.liveScope,
                         tapeQuotes = snap.tapeQuotes,
+                        rawTape = snap.rawTape,
                         tapeOrders = previewOrders,
                         safetyChips = snap.safetyChips
                     )

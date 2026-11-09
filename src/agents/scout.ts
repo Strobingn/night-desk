@@ -15,6 +15,7 @@ import {
   parseLaunchLabList,
   parsePumpApiCoins
 } from "../market/listings.js";
+import { draftFromRaw, type RawTapeRow } from "../desk/raw-tape.js";
 import type { DeskEvents, FeedStatus, RawSighting } from "../types.js";
 
 /**
@@ -109,6 +110,11 @@ export interface ScoutOptions {
   pumpSocketFactory?: (url: string) => PumpSocket;
   /** Test hook. Default PUMP_STALE_MS. */
   pumpStaleMs?: number;
+  /**
+   * v13.27 one lightweight Tape row per sighting. Called synchronously, before enrich.
+   * Must not fetch. `queue_full` is a sighting dropped before enrich; the row stays.
+   */
+  onTape?: (row: RawTapeRow) => void;
   /**
    * Every raw PumpPortal frame, on the socket Scout already opened.
    * Pump core listens here. It must not open a second PumpPortal socket.
@@ -228,6 +234,8 @@ export class Scout {
     const mint = raw.mint.trim();
     if (!mint) return;
     raw.mint = mint;
+    // The Tape row is the sighting itself. Enrichment is still queued below and does not block this.
+    this.opts.onTape?.(draftFromRaw(raw, "pending"));
     const hint = raw.volume1hUsd ?? 0;
     const prior = this.seen.get(mint);
     if (prior) {
@@ -254,7 +262,10 @@ export class Scout {
     if (origin) this.health.sighting(origin);
     if (this.queue.length >= this.queueCap) {
       const dropped = this.queue.shift();
-      if (dropped) this.seen.delete(dropped.mint);
+      if (dropped) {
+        this.seen.delete(dropped.mint);
+        this.opts.onTape?.(draftFromRaw(dropped, "queue_full"));
+      }
       this.status.dropped += 1;
     }
     this.queue.push(raw);
@@ -291,6 +302,20 @@ export class Scout {
       }
       this.status.enriched += 1;
       this.opts.onStatus({ ...this.status });
+      this.opts.onTape?.(
+        draftFromRaw(
+          {
+            ...raw,
+            symbol: token.symbol,
+            name: token.name,
+            priceUsd: token.priceUsd > 0 ? token.priceUsd : raw.priceUsd,
+            volume1hUsd: token.volume1hUsd > 0 ? token.volume1hUsd : raw.volume1hUsd,
+            liquidityUsd: token.liquidityUsd > 0 ? token.liquidityUsd : raw.liquidityUsd,
+            marketCapUsd: token.marketCapUsd ?? raw.marketCapUsd
+          },
+          "enriched"
+        )
+      );
       this.publish(token);
     } catch (err) {
       // One coin failing to enrich is not a feed outage; it never reaches the banner.

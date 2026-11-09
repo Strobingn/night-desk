@@ -424,6 +424,8 @@ data class DeskSnapshot(
     val liveNotArmed: String? = null,
     /** v13.10 live price / volume / change per Tape coin. */
     val tapeQuotes: Map<String, TapeQuote> = emptyMap(),
+    /** v13.27 raw sightings on the Tape before enrichment. Empty on an older desk. */
+    val rawTape: List<RawTapeRow> = emptyList(),
     /** v13.11 limit / take-profit / stop orders, open first. */
     val orders: List<DeskOrder> = emptyList(),
     /** v13.7 saved toggle: AI auto-buys go live too (default off). */
@@ -769,6 +771,7 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         liveBook = if (data.isNull("liveBook")) null else parseLiveBook(data.optJSONObject("liveBook"), receivedAt),
         liveNotArmed = if (data.isNull("liveNotArmed")) null else data.optText("liveNotArmed").ifBlank { null },
         tapeQuotes = parseTapeQuotes(data.optJSONObject("tapeQuotes")),
+        rawTape = parseRawTape(data.optJSONArray("rawTape")),
         orders = parseOrders(data.optJSONArray("orders")),
         liveAutoBuy = prefs?.optBoolean("liveAutoBuy", false) ?: false,
         startingBalanceUsd = data.optFinite("startingBalanceUsd", 100.0),
@@ -864,6 +867,32 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         senderTipSol = (prefs?.optFinite("senderTipSol", 0.000005) ?: 0.000005).coerceAtLeast(0.000005),
         safetyChips = parseSafetyChips(data.optJSONArray("safetyChips"))
     )
+}
+
+private fun parseRawTape(rows: org.json.JSONArray?): List<RawTapeRow> {
+    if (rows == null) return emptyList()
+    return buildList {
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val mint = row.optText("mint")
+            if (mint.isBlank()) continue
+            fun optPos(key: String): Double? = if (!row.has(key) || row.isNull(key)) null else row.optFinite(key, Double.NaN).takeIf { it > 0 && it.isFinite() }
+            add(
+                RawTapeRow(
+                    mint = mint,
+                    symbol = row.optText("symbol").ifBlank { mint.take(4) },
+                    name = row.optText("name"),
+                    source = row.optText("source", "scout"),
+                    seenAt = row.optFinite("seenAt").toLong(),
+                    priceUsd = optPos("priceUsd"),
+                    volume1hUsd = optPos("volume1hUsd"),
+                    liquidityUsd = optPos("liquidityUsd"),
+                    marketCapUsd = optPos("marketCapUsd"),
+                    enrich = row.optText("enrich", "pending")
+                )
+            )
+        }
+    }
 }
 
 private fun parseSafetyChips(rows: org.json.JSONArray?): List<SafetyChip> {

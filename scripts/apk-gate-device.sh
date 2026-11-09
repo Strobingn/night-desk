@@ -33,17 +33,19 @@ mkdir -p "${GITHUB_WORKSPACE:-.}/gate-logs"
 set +e
 adb shell am instrument -w -r com.dirk.nightdesk.test/androidx.test.runner.AndroidJUnitRunner | tee "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"
 set -e
-adb pull /data/data/com.dirk.nightdesk/files/home-collapsed.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-collapsed-13.26.png" || true
-adb pull /data/data/com.dirk.nightdesk/files/home-expanded.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-expanded-13.26.png" || true
-adb pull /data/data/com.dirk.nightdesk/files/settings-onetap.png "${GITHUB_WORKSPACE:-.}/gate-logs/settings-onetap-13.26.png" || true
-adb pull /data/data/com.dirk.nightdesk/files/search.png "${GITHUB_WORKSPACE:-.}/gate-logs/search-13.26.png" || true
-adb pull /data/data/com.dirk.nightdesk/files/pump-watch.png "${GITHUB_WORKSPACE:-.}/gate-logs/pump-watch-13.26.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/home-collapsed.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-collapsed-13.27.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/home-expanded.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-expanded-13.27.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/settings-onetap.png "${GITHUB_WORKSPACE:-.}/gate-logs/settings-onetap-13.27.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/search.png "${GITHUB_WORKSPACE:-.}/gate-logs/search-13.27.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/pump-watch.png "${GITHUB_WORKSPACE:-.}/gate-logs/pump-watch-13.27.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/tape.png "${GITHUB_WORKSPACE:-.}/gate-logs/tape-13.27.png" || true
 if grep -q "FAILURES!!!" "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"; then
   exit 1
 fi
-test -s "${GITHUB_WORKSPACE:-.}/gate-logs/home-collapsed-13.26.png"
-test -s "${GITHUB_WORKSPACE:-.}/gate-logs/home-expanded-13.26.png"
-test -s "${GITHUB_WORKSPACE:-.}/gate-logs/settings-onetap-13.26.png"
-test -s "${GITHUB_WORKSPACE:-.}/gate-logs/search-13.26.png"
-test -s "${GITHUB_WORKSPACE:-.}/gate-logs/pump-watch-13.26.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/home-collapsed-13.27.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/home-expanded-13.27.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/settings-onetap-13.27.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/search-13.27.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/pump-watch-13.27.png"
+test -s "${GITHUB_WORKSPACE:-.}/gate-logs/tape-13.27.png"
 node "${GITHUB_WORKSPACE:-/agent/repos/night-desk}/scripts/apk-gate-assert.mjs" /tmp/nd-gate/http.jsonl /tmp/nd-gate/swaps.jsonl

@@ -27,9 +27,10 @@ describe("v13.1 tape: volume first", () => {
     expect(by.D.volRank).toBeUndefined();
   });
 
-  it("sorts Volume by default, then Newest and Score", () => {
-    expect(parseTapeSort(null)).toBe("volume");
-    expect(parseTapeSort("junk")).toBe("volume");
+  it("sorts Newest by default, and still sorts Volume and Score", () => {
+    expect(parseTapeSort(null)).toBe("newest");
+    expect(parseTapeSort("junk")).toBe("newest");
+    expect(parseTapeSort("volume")).toBe("volume");
     expect(sortCoins(rows, "volume").map((r) => r.mint)).toEqual(["B", "C", "A", "D"]);
     expect(sortCoins(rows, "newest").map((r) => r.mint)).toEqual(["D", "A", "C", "B"]);
     expect(sortCoins(rows, "score")[0].mint).toBe("A");

@@ -31,8 +31,8 @@ class V131TapeTest {
 
     @Test fun sortsVolumeFirstByDefault() {
         val rows = coinCards(events, emptySet())
-        assertEquals(TapeSort.VOLUME, TapeSort.parse(null))
-        assertEquals(TapeSort.VOLUME, TapeSort.parse("junk"))
+        assertEquals(TapeSort.NEWEST, TapeSort.parse(null))
+        assertEquals(TapeSort.NEWEST, TapeSort.parse("junk"))
         assertEquals(listOf("B", "C", "A", "D"), sortCoins(rows, TapeSort.VOLUME).map { it.mint })
         assertEquals(listOf("D", "A", "C", "B"), sortCoins(rows, TapeSort.NEWEST).map { it.mint })
         assertEquals("A", sortCoins(rows, TapeSort.SCORE).first().mint)

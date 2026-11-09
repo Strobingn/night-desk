@@ -24,7 +24,23 @@ data class CoinCard(
     val volRank: Int? = null,
     /** v13.10 short reason a live value is missing ("no pool yet"); where the live price came from. */
     val why: String? = null,
-    val quoteSource: String? = null
+    val quoteSource: String? = null,
+    /** v13.27 "not enriched yet" or "not enriched yet / queue full". Null once enrichment lands. */
+    val unenriched: String? = null
+)
+
+/** v13.27 a raw sighting already on the Tape. `enrich` is pending, queue_full, or enriched. */
+data class RawTapeRow(
+    val mint: String,
+    val symbol: String,
+    val name: String,
+    val source: String,
+    val seenAt: Long,
+    val priceUsd: Double?,
+    val volume1hUsd: Double?,
+    val liquidityUsd: Double?,
+    val marketCapUsd: Double?,
+    val enrich: String
 )
 
 /** v13.10 the desk's live Tape quote (snapshot `tapeQuotes`). Unknown values are null, never 0 for price. */
@@ -63,12 +79,14 @@ fun tapeMissing(coin: CoinCard, field: String): String = when {
     else -> "checking…"
 }
 
-/** v13.1 per-device Tape sort. Volume is the default. */
-enum class TapeSort(val label: String) { VOLUME("Volume"), NEWEST("Newest"), SCORE("Score");
+/** v13.27 per-device Tape sort. Newest is the default. Volume and Score stay in the menu. */
+enum class TapeSort(val label: String) { NEWEST("Newest"), VOLUME("Volume"), SCORE("Score");
     companion object {
-        fun parse(raw: String?): TapeSort = entries.firstOrNull { it.name == raw } ?: VOLUME
+        fun parse(raw: String?): TapeSort = entries.firstOrNull { it.name == raw } ?: NEWEST
     }
 }
+
+const val TAPE_CARD_CAP = 150
 
 const val TOP_VOLUME = 10
 const val HOT_RANK = 3
@@ -90,7 +108,13 @@ fun sortCoins(rows: List<CoinCard>, mode: TapeSort): List<CoinCard> {
 
 private val SCOUT_RE = Regex("""Mark ([0-9.eE₀-₉+-]+), 1h volume \$([0-9,.]+)""")
 
-fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60, quotes: Map<String, TapeQuote> = emptyMap()): List<CoinCard> {
+fun coinCards(
+    events: List<TapeEvent>,
+    openMints: Set<String>,
+    limit: Int = TAPE_CARD_CAP,
+    quotes: Map<String, TapeQuote> = emptyMap(),
+    raw: List<RawTapeRow> = emptyList()
+): List<CoinCard> {
     class Acc(var symbol: String, val first: TapeEvent) {
         var lastTs = 0L
         var source: String? = null
@@ -105,6 +129,8 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60, 
         var change: Double? = null
         var firstMark: Double? = null
         var changeSeen: Double? = null
+        var sawScout = false
+        var unenriched: String? = null
     }
     val map = LinkedHashMap<String, Acc>()
     for (e in events) {
@@ -134,6 +160,7 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60, 
                     m.groupValues[2].toDoubleOrNull()?.takeIf { it.isFinite() }?.let { acc.change = if (m.groupValues[1] == "-") -it else it }
                 }
                 if (!e.detail.isNullOrBlank()) acc.source = e.detail
+                acc.sawScout = true
             }
             e.stage == "filter" && e.kind == "reject" -> {
                 if (acc.verdict != Verdict.OPEN && acc.verdict != Verdict.BOUGHT) acc.verdict = Verdict.KILLED
@@ -150,12 +177,42 @@ fun coinCards(events: List<TapeEvent>, openMints: Set<String>, limit: Int = 60, 
             e.stage == "executor" && e.kind == "fill" -> bump(Verdict.BOUGHT)
         }
     }
+    for (rawRow in raw) {
+        if (rawRow.mint.isBlank()) continue
+        val acc = map.getOrPut(rawRow.mint) {
+            val ev = TapeEvent(
+                id = "raw-${rawRow.mint}",
+                ts = rawRow.seenAt,
+                stage = "scout",
+                kind = "info",
+                message = "Scout saw ${rawRow.symbol}.",
+                code = null,
+                mint = rawRow.mint,
+                symbol = rawRow.symbol,
+                detail = rawRow.source
+            )
+            Acc(rawRow.symbol.ifBlank { rawRow.mint.take(4) }, ev).also {
+                it.lastTs = rawRow.seenAt
+                it.source = rawRow.source
+                it.event = ev
+            }
+        }
+        if (acc.symbol.isBlank()) acc.symbol = rawRow.symbol
+        if (acc.source.isNullOrBlank()) acc.source = rawRow.source
+        if (acc.mark == null && rawRow.priceUsd != null && rawRow.priceUsd > 0) acc.mark = rawRow.priceUsd
+        if (acc.vol == null && rawRow.volume1hUsd != null && rawRow.volume1hUsd > 0) acc.vol = rawRow.volume1hUsd
+        if (acc.lastTs <= 0) acc.lastTs = rawRow.seenAt
+        val decided = acc.sawScout || acc.verdict != Verdict.SEEN || acc.score != null || acc.codes.isNotEmpty() || rawRow.enrich == "enriched"
+        acc.unenriched = if (decided) null else if (rawRow.enrich == "queue_full") "not enriched yet / queue full" else "not enriched yet"
+        if (acc.reason.isNullOrBlank() && acc.unenriched != null) acc.reason = acc.unenriched
+    }
     val rows = map.entries
         .map { (mint, a) ->
             CoinCard(
                 mint, a.symbol, a.lastTs, a.source, a.mark, a.vol, a.score, if (mint in openMints) Verdict.OPEN else a.verdict, a.reason, a.codes, a.event,
                 vol5m = a.vol5m,
-                change1h = a.change ?: a.changeSeen?.takeIf { it.isFinite() }
+                change1h = a.change ?: a.changeSeen?.takeIf { it.isFinite() },
+                unenriched = a.unenriched
             ).let { withQuote(it, quotes[mint]) }
         }
         .filter { it.lastTs > 0 || it.verdict == Verdict.OPEN }
