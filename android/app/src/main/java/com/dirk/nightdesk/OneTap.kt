@@ -85,6 +85,48 @@ object OneTap {
         return lines
     }
 
+    /** v13.25 hard-kill refusals keep the desk reason and open Buy anyway. Null when this is not a hard kill. */
+    fun hardKillReason(code: String?, error: String?): String? {
+        if (code != "HARD_KILL") return null
+        val reason = error?.trim().orEmpty()
+        return if (reason.isEmpty()) "Hard kill." else reason
+    }
+
+    /** Wallet USDC. Dust under one cent is not forced to $0.00. */
+    fun formatBalanceUsd(n: Double): String {
+        if (!n.isFinite()) return "—"
+        val sign = if (n < 0) "−" else ""
+        val abs = kotlin.math.abs(n)
+        return when {
+            abs > 0 && abs < 0.0001 -> sign + "<$0.0001"
+            abs < 0.01 -> sign + "$" + "%.4f".format(java.util.Locale.US, abs)
+            else -> sign + formatUsd(abs)
+        }
+    }
+
+    /** `0.2951 SOL · ~$25.45` when the desk already has a SOL/USD mark. */
+    fun formatSolHolding(sol: Double?, solUsd: Double?): String {
+        if (sol == null || !sol.isFinite()) return "—"
+        val qty = "%.4f".format(java.util.Locale.US, sol) + " SOL"
+        if (sol > 0 && solUsd != null && solUsd.isFinite() && solUsd > 0) return "$qty · ~${formatBalanceUsd(sol * solUsd)}"
+        return qty
+    }
+
+    /**
+     * Home LIVE strip. SOL plus an approximate dollar value, and USDC with sub-cent precision.
+     * Rounded book cash is only a fallback when the raw balance is missing.
+     */
+    fun liveCashLabel(sol: Double?, solUsd: Double?, usdc: Double?, cashUsd: Double, cashKnown: Boolean, balanceError: String?): String {
+        val known = cashKnown && balanceError.isNullOrBlank()
+        val usdcText = when {
+            usdc != null && usdc.isFinite() && (known || usdc > 0) -> "USDC ${formatBalanceUsd(usdc)}" + if (balanceError.isNullOrBlank()) "" else " stale"
+            !balanceError.isNullOrBlank() && cashUsd > 0 -> "USDC ${formatBalanceUsd(cashUsd)} stale"
+            !known -> "USDC unknown"
+            else -> "USDC ${formatBalanceUsd(usdc ?: cashUsd)}"
+        }
+        return if (sol != null && sol.isFinite()) formatSolHolding(sol, solUsd) + " · " + usdcText else usdcText
+    }
+
     fun buyText(symbol: String, json: JSONObject?, ok: Boolean, ms: Long): String {
         if (json == null) return "$symbol: buy refused"
         if (!ok) {
@@ -103,7 +145,10 @@ object OneTap {
 
     fun sellText(symbol: String, json: JSONObject?, ok: Boolean, ms: Long): String {
         if (json == null) return "$symbol: sell failed"
-        if (!ok) return "$symbol: ${json.optText("error", "sell failed")}"
+        if (!ok) {
+            val code = json.optText("code").ifBlank { null }
+            return "$symbol: ${json.optText("error", "sell failed")}" + (if (code != null) " ($code)" else "")
+        }
         val sym = json.optText("symbol").ifBlank { symbol }
         val proceeds = json.optFinite("proceedsUsd", Double.NaN).takeIf { it.isFinite() }
         val pnl = json.optFinite("pnlUsd", Double.NaN).takeIf { it.isFinite() }

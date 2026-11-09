@@ -27,10 +27,21 @@ import { ReplayFeed } from "../demo/replay.js";
 import { advise, AdvisorBook, noteEntry, noteKill, noteNearMissSurface, noteNearMissTaken, noteOutcome, notePass, type Advice, type FeatureSample, type WeakSurvivor } from "./advisor.js";
 import { classifyNearMiss } from "./near-miss.js";
 import { phraseAdvice } from "./commentary.js";
-import { ABSURD_RISE, LOG_THROTTLE_MS, LIVE_FRESH_MS, QUOTE_CONFIRM_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, entryAnchor, isJump, markUnusable, needsShockConfirm, outlierReason, quoteConfirms, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
+import { ABSURD_RISE, LOG_THROTTLE_MS, LIVE_FRESH_MS, QUOTE_CONFIRM_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, absurdScale, entryAnchor, isJump, markUnusable, needsShockConfirm, outlierReason, quoteConfirms, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
 
 /** Shown when a sell would fill on a mark dozens of times entry that no other feed confirms. */
 const UNVERIFIED_SELL = "Price unverified - sell refused, retry";
+
+/** Paper gate refusal. Carries EXIT_IMPACT so the banner is not labeled LIVE_SWAP_FAILED. */
+class GateError extends Error {
+  constructor(
+    message: string,
+    readonly code: "EXIT_IMPACT" | "UNVERIFIED_SELL"
+  ) {
+    super(message);
+    this.name = "GateError";
+  }
+}
 import { visibleEquity } from "./equity-series.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
@@ -292,6 +303,10 @@ export class Desk {
   /** v13.6 ticker search (own spacing, cache and 429 backoff). */
   private dexSearch: DexSearchClient | null = null;
   private solUsdCache: { value: number; at: number } | null = null;
+  /** Absurd post-fill marks already held once. The next agreeing print may stop. */
+  private readonly absurdHeld = new Set<string>();
+  /** Last sell refusal, so a manual close can show the gate text instead of a generic miss. */
+  private readonly closeRefusals = new Map<string, { code: string; error: string }>();
   private readonly curveQueue = new Set<string>();
   private curveTimer: NodeJS.Timeout | null = null;
   private watchTimer: NodeJS.Timeout | null = null;
@@ -493,7 +508,7 @@ export class Desk {
       deps.walletBalances ??
       (async () =>
         owner
-          ? fetchWalletBalances(this.net.fetchAt(0), config.walletRpcUrl, owner)
+          ? fetchWalletBalances(this.net.fetchAt(-1), config.walletRpcUrl, owner)
           : { sol: null, usdc: null, at: Date.now(), error: "No wallet key loaded" });
     this.rugs = new LayeredRugRegistry(new StaticRugRegistry(loadRugWalletMap(config.rugWalletsFile)));
     // v13.7: the paper book (and the AI on it) always runs. An armed desk adds a separate live book,
@@ -669,13 +684,20 @@ export class Desk {
     this.wire();
     if (restored) {
       for (const pos of this.book.positions.values()) {
-        this.review(pos.mint, this.book.price(pos.mint, pos.entryPrice));
+        const px = this.book.price(pos.mint, pos.entryPrice);
+        // A restored absurd mark is not a rug. The next prints have to agree before a stop.
+        if (this.absurdUnverified(pos, px)) continue;
+        this.review(pos.mint, px);
       }
     } else {
       this.persist();
     }
     if (this.liveBook) {
-      for (const pos of [...this.liveBook.positions.values()]) this.review(pos.mint, this.liveBook.price(pos.mint, pos.entryPrice), "live");
+      for (const pos of [...this.liveBook.positions.values()]) {
+        const px = this.liveBook.price(pos.mint, pos.entryPrice);
+        if (this.absurdUnverified(pos, px)) continue;
+        this.review(pos.mint, px, "live");
+      }
     }
     this.log({
       stage: "logger",
@@ -987,12 +1009,13 @@ export class Desk {
     bookArg?: BookKind
   ): Promise<
     | { ok: true; soldFraction?: number; proceedsUsd?: number; symbol?: string; pnlUsd?: number; pnlPct?: number; exitPrice?: number; exitCode?: string }
-    | { ok: false; error: string }
+    | { ok: false; error: string; code?: string }
   > {
     // v13.7: a sell names its book. No book = the paper book, so an old client can never sell real coins by accident.
     const kind: BookKind = bookArg === "live" ? "live" : "paper";
     if (kind === "live" && !this.liveBook) return { ok: false, error: `No live position to sell. ${this.liveNotArmedMessage()}` };
     const book = this.bk(kind);
+    this.closeRefusals.delete(bookKey(kind, mint));
     // Read before heal. healAbsurdMarks puts entry back on the card, and selling at that
     // entry would hide a poisoned mark instead of refusing it.
     const prior = book.lastPrice.get(mint);
@@ -1042,7 +1065,15 @@ export class Desk {
     });
     this.bus.emit("risk.exit", order);
     await this.drain();
-    if (book.positions.has(mint)) return { ok: false, error: `Close of ${pos.symbol} did not complete. Position is still open.` };
+    if (book.positions.has(mint)) {
+      const refused = this.closeRefusals.get(bookKey(kind, mint));
+      this.closeRefusals.delete(bookKey(kind, mint));
+      return {
+        ok: false,
+        error: refused?.error ?? `Close of ${pos.symbol} did not complete. Position is still open.`,
+        ...(refused ? { code: refused.code } : {})
+      };
+    }
     const closed = this.store.recentClosed(20).find((trade) => trade.id === pos.tradeId);
     return {
       ok: true,
@@ -1364,11 +1395,12 @@ export class Desk {
     pos: Position,
     mark: number,
     split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number }
-  ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string } {
-    if (this.sellUnverified(pos, mark)) return { ok: false, error: UNVERIFIED_SELL };
+  ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string; code?: string } {
+    if (this.sellUnverified(pos, mark)) return { ok: false, error: UNVERIFIED_SELL, code: "UNVERIFIED_SELL" };
     const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
-    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity);
-    if (impact) return { ok: false, error: impact };
+    // Sell 25/50/100 is a manual paper close. The exit-impact gate stays on automatic exits only.
+    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity, true);
+    if (impact) return { ok: false, error: impact, code: "EXIT_IMPACT" };
     const quote = quotePaperSell(mark, split.sellQty, liquidity);
     const proceedsUsd = roundUsd(quote.proceedsUsd ?? 0);
     assertNonNegativeFinite("proceedsUsd", proceedsUsd);
@@ -1476,6 +1508,14 @@ export class Desk {
     const liquidityUsd = 2 * q.virtualSol * sol;
     if (!(priceUsd > 0) || !Number.isFinite(priceUsd) || !(liquidityUsd > 0)) return { ok: false, reason: "the bonding curve is empty" };
     return { ok: true, priceUsd, liquidityUsd, curve: q.curve };
+  }
+
+  /** Last SOL/USD already on the desk, for the wallet line. Does not fetch. */
+  private displaySolUsd(): number | null {
+    const held = this.pricer?.quotes.solUsd;
+    if (held && held.value > 0 && Number.isFinite(held.value)) return held.value;
+    if (this.solUsdCache && this.solUsdCache.value > 0 && Number.isFinite(this.solUsdCache.value)) return this.solUsdCache.value;
+    return null;
   }
 
   /** SOL/USD no older than 2 minutes: the held-mark loop's, else one Jupiter call. */
@@ -2831,10 +2871,11 @@ export class Desk {
         return;
       }
       const mark = this.exitMark(pos, order.markPrice, kind);
-      if (!(mark > 0) || this.sellUnverified(pos, mark) || this.sellUnverified(pos, order.markPrice)) throw new Error(UNVERIFIED_SELL);
+      if (!(mark > 0) || this.sellUnverified(pos, mark) || this.sellUnverified(pos, order.markPrice)) throw new GateError(UNVERIFIED_SELL, "UNVERIFIED_SELL");
       const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
-      const impact = this.paperExitImpact(pos, mark, pos.qty, liquidity);
-      if (impact) throw new Error(impact);
+      const manual = order.reason.code === "MANUAL_CLOSE";
+      const impact = this.paperExitImpact(pos, mark, pos.qty, liquidity, manual);
+      if (impact) throw new GateError(impact, "EXIT_IMPACT");
       const quote = quotePaperSell(mark, pos.qty, liquidity);
       this.applySell(
         pos,
@@ -2865,7 +2906,8 @@ export class Desk {
         return;
       }
       const message = err instanceof Error ? err.message : String(err);
-      const code = err instanceof LiveSubmitError ? err.code : "LIVE_SWAP_FAILED";
+      const code = err instanceof LiveSubmitError ? err.code : err instanceof GateError ? err.code : "LIVE_SWAP_FAILED";
+      this.closeRefusals.set(bookKey(kind, pos.mint), { code, error: message });
       this.log({
         stage: "executor",
         kind: "reject",
@@ -2970,11 +3012,13 @@ export class Desk {
     this.markEquity(true);
   }
 
-  private review(mint: string, mark: number, kind: BookKind = "paper"): void {
+  private review(mint: string, mark: number, kind: BookKind = "paper", shockConfirmed = false): void {
     const pos = kind === "live" ? this.liveBook?.positions.get(mint) : this.book.positions.get(mint);
     if (!pos || pos.closing) return;
     // A spike that no other feed confirms is not a trail or a stop. A drop still is.
     if (this.sellUnverified(pos, mark)) return;
+    // The first absurd post-fill mark is not a rug. A second agreeing print still stops.
+    if (this.holdAbsurdStop(pos, mark, kind, shockConfirmed)) return;
     const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit, liveTrailPct: this.liveTrailFor(pos) });
     const peakRose = view.peakPrice > pos.peakPrice || (view.markPeak != null && view.markPeak > (pos.markPeak ?? 0));
     const armChanged = view.trailArmed !== pos.trailArmed;
@@ -3232,17 +3276,22 @@ export class Desk {
         return;
       }
     }
-    const shock = !!pos && !pos.closing && needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now());
+    const absurdDown = !!pos && !pos.closing && this.absurdUnverified(pos, priceUsd);
+    const firstAbsurd = absurdDown && !this.absurdHeld.has(key);
+    const shock = !!pos && !pos.closing && (needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now()) || firstAbsurd);
     // Operator and replay marks carry no feed and are trusted as before; feed prints must repeat a >30% jump.
     const jump = !!pos && !pos.closing && !reanchored && !!origin?.feed && isJump(book.lastPrice.get(mint), priceUsd);
+    let shockConfirmed = false;
     if (pos && (shock || jump)) {
       const feed = origin?.feed ?? pos.priceFeed ?? "mark";
       const pending = this.shocks.get(key);
       const agrees = pending?.price == null || Math.abs(priceUsd / pending.price - 1) <= SHOCK_MOVE;
       if (!pending || pending.feed !== feed || !agrees) {
         this.shocks.set(key, { feed, price: priceUsd });
+        if (absurdDown) this.absurdHeld.add(key);
         const base = shock ? pos.entryPrice : book.price(mint, pos.entryPrice);
         const move = ((priceUsd - base) / base) * 100;
+        const heldAbsurd = firstAbsurd && !needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now());
         this.log({
           stage: "risk",
           kind: "info",
@@ -3250,12 +3299,15 @@ export class Desk {
           symbol: pos.symbol,
           code: "PRICE_UNCONFIRMED",
           message: shock
-            ? `Risk held a ${pos.symbol} move of ${move.toFixed(2)}% from ${originLabel(origin)} inside 10s of entry. A second tick from the same source has to confirm it before the stop fires.`
+            ? heldAbsurd
+              ? `Risk held a ${pos.symbol} mark of ${price(priceUsd)} from ${originLabel(origin)} (${move.toFixed(2)}% versus entry). One absurd print is not a rug. A second tick from the same source has to confirm it before the stop fires.`
+              : `Risk held a ${pos.symbol} move of ${move.toFixed(2)}% from ${originLabel(origin)} inside 10s of entry. A second tick from the same source has to confirm it before the stop fires.`
             : `Risk held a ${pos.symbol} jump of ${move.toFixed(2)}% from ${originLabel(origin)}. A second tick from the same source has to confirm it before the stop fires.`
         });
         return;
       }
       this.shocks.delete(key);
+      shockConfirmed = true;
     } else if (pos) {
       this.shocks.delete(key);
     }
@@ -3268,7 +3320,7 @@ export class Desk {
       this.riskFeed.set(key, origin?.feed ?? pos.priceFeed ?? pos.source);
       this.bus.emit("position.mark", { mint, at: Date.now() });
     }
-    this.review(mint, priceUsd, kind);
+    this.review(mint, priceUsd, kind, shockConfirmed);
     if (advise) this.publishAdvice(this.buildAdvice());
     // v13.11: a held coin's order fires on the same confirmed mark the hard stop uses.
     if (this.orders.open().some((o) => o.mint === mint)) this.checkOrders(mint);
@@ -3475,6 +3527,25 @@ export class Desk {
     return !markUnusable(last) ? last : pos.entryPrice;
   }
 
+  /** Absurd versus entry and not confirmed by another feed. */
+  private absurdUnverified(pos: Position, mark: number): boolean {
+    if (!(pos.entryPrice > 0) || !(mark > 0) || absurdScale(pos.entryPrice, mark) < ABSURD_RISE) return false;
+    return !quoteConfirms(mark, this.otherQuotes(pos.mint, undefined, Date.now()));
+  }
+
+  /**
+   * The first absurd post-fill mark does not fire a stop.
+   * A second agreeing print (shockConfirmed, or a later print after one was held) still can.
+   */
+  private holdAbsurdStop(pos: Position, mark: number, kind: BookKind, shockConfirmed: boolean): boolean {
+    if (!this.absurdUnverified(pos, mark) || mark >= pos.entryPrice) return false;
+    if (shockConfirmed) return false;
+    const key = bookKey(kind, pos.mint);
+    if (this.absurdHeld.has(key)) return false;
+    this.absurdHeld.add(key);
+    return true;
+  }
+
   /** Mark is dozens of times entry and no fresh Dex or Jupiter print sits near it. Drops are never this. */
   private sellUnverified(pos: Position, mark: number): boolean {
     if (!(pos.entryPrice > 0) || !(mark > 0) || !Number.isFinite(mark)) return false;
@@ -3482,8 +3553,9 @@ export class Desk {
     return !quoteConfirms(mark, this.otherQuotes(pos.mint, undefined, Date.now()));
   }
 
-  /** Flat or rising paper sells still have to fit the exit-impact cap. A falling mark is a rug and must be able to leave. */
-  private paperExitImpact(pos: Position, mark: number, qty: number, liquidityUsd: number): string | null {
+  /** Flat or rising paper sells still have to fit the exit-impact cap. A falling mark is a rug and must be able to leave. Manual paper closes skip the gate and still fill at the modeled price. */
+  private paperExitImpact(pos: Position, mark: number, qty: number, liquidityUsd: number, manual = false): string | null {
+    if (manual) return null;
     if (pos.entryPrice > 0 && mark < pos.entryPrice) return null;
     const notional = mark * qty;
     const gate = exitImpactAllowed(notional, liquidityUsd, this.config.rules.maxEntrySlippage, this.maxExitSlippage);
@@ -4265,6 +4337,8 @@ export class Desk {
       publicKey: this.walletStatus.walletPublicKey,
       solBalance: bal?.sol ?? null,
       usdcBalance: bal?.usdc ?? null,
+      // Display only. The desk's existing SOL/USD print (Jupiter, cached on the held-mark loop). No extra feed.
+      solPriceUsd: this.displaySolUsd(),
       balanceAt: bal?.at ?? null,
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",

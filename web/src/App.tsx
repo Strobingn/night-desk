@@ -11,7 +11,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
-import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
+import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, hardKillFollowUp, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
 import { PumpScreen } from "./pump/PumpScreen";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
@@ -247,12 +247,13 @@ export function App() {
         : "Paper fill against the same pool model as a stop.";
     if (!window.confirm(`${verb} ${how} The hard stop still fires on its own.`)) return;
     setBusy(`${mint}:${percent}`);
-    const res = await api<{ proceedsUsd?: number }>("/api/positions/sell", { body: { mint, percent, ...(book ? { book } : {}) } });
+    const res = await api<{ proceedsUsd?: number; error?: string; code?: string }>("/api/positions/sell", { body: { mint, percent, ...(book ? { book } : {}) } });
     setBusy(null);
+    const refused = res.body.error ? `${res.body.error}${res.body.code ? ` (${res.body.code})` : ""}` : "Sell failed.";
     setNotice(
       res.ok
         ? { ok: true, text: percent === 100 ? `Closed ${symbol}.` : `Sold ${percent}% of ${symbol}${res.body.proceedsUsd != null ? ` for ${usd(res.body.proceedsUsd)}` : ""}.` }
-        : { ok: false, text: res.body.error ?? "Sell failed." }
+        : { ok: false, text: refused }
     );
   }, []);
 
@@ -275,8 +276,9 @@ export function App() {
       const res = await api<BuyReply>("/api/positions/buy", { body: { mint, sizeUsd: sizeUsd ?? tapUsd, book: "paper", idemKey: newIdemKey(), oneTap: true } });
       track(key, false);
       const body = { ...res.body, ok: res.ok };
-      const hint = !res.ok && (body.code === "HARD_KILL" || body.code === "REVENGE_COOLDOWN") ? " Use Buy… on the card to override." : "";
-      setNotice({ ok: res.ok, toast: true, text: buyToast(symbol, body, Math.round(performance.now() - started)) + hint });
+      const kill = hardKillFollowUp(body.code, body.error);
+      if (kill) setBuyAsk({ mint, symbol, sizeUsd: sizeUsd ?? tapUsd, minutesLeft: null, hardKill: kill.reason });
+      setNotice({ ok: res.ok, toast: true, text: buyToast(symbol, body, Math.round(performance.now() - started)) });
     },
     [tapUsd, track]
   );

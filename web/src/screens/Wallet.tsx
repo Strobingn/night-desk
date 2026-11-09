@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
-import { usd } from "../format";
+import { formatBalanceUsd, formatSolHolding, usd } from "../format";
 import type { DeskSnapshot, WalletView } from "../types";
 import { shortAddress, walletLines } from "../walletText";
 
@@ -28,11 +28,11 @@ export function WalletCard({ snap }: { snap: DeskSnapshot }) {
         </div>
         <div>
           <dt>SOL</dt>
-          <dd>{w?.solBalance != null ? w.solBalance.toFixed(4) : "—"}</dd>
+          <dd>{w?.solBalance != null ? formatSolHolding(w.solBalance, w.solPriceUsd) : "—"}</dd>
         </div>
         <div>
           <dt>USDC</dt>
-          <dd>{w?.usdcBalance != null ? usd(w.usdcBalance) : "—"}</dd>
+          <dd>{w?.usdcBalance != null ? formatBalanceUsd(w.usdcBalance) : "—"}</dd>
         </div>
         <div>
           <dt>Key loaded</dt>

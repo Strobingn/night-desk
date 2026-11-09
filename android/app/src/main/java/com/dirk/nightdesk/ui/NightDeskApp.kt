@@ -607,11 +607,15 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
     }
 }
 
-private fun liveCashLabel(book: LiveBookInfo): String {
-    if (book.cashKnown && book.balanceError.isNullOrBlank()) return "USDC ${money(book.cashUsd)}"
-    if (!book.balanceError.isNullOrBlank() && book.cashUsd > 0) return "USDC ${money(book.cashUsd)} stale"
-    return "USDC unknown"
-}
+private fun liveCashLabel(book: LiveBookInfo, wallet: com.dirk.nightdesk.WalletInfo?): String =
+    com.dirk.nightdesk.OneTap.liveCashLabel(
+        wallet?.solBalance,
+        wallet?.solPriceUsd,
+        wallet?.usdcBalance,
+        book.cashUsd,
+        book.cashKnown,
+        book.balanceError
+    )
 
 @Composable
 private fun BookScreen(
@@ -681,7 +685,7 @@ private fun BookScreen(
             item {
                 SectionTitle(
                     "LIVE",
-                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · ${liveCashLabel(liveBook)}",
+                    "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · ${liveCashLabel(liveBook, snap?.wallet)}",
                     P.down
                 )
             }

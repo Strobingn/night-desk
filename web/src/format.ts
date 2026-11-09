@@ -51,6 +51,47 @@ export function tinyPx(n: number): string {
   return `0.0${sub}${String(digits).replace(/0+$/, "") || "0"}`;
 }
 
+/**
+ * Wallet and live-strip dollars. Sub-cent balances keep four places so $0.001 is not shown as $0.00.
+ * PnL and book math stay on the two-cent formatter.
+ */
+export function formatBalanceUsd(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "−" : "";
+  const abs = Math.abs(n);
+  if (abs > 0 && abs < 0.0001) return `${sign}<$0.0001`;
+  if (abs < 0.01) return `${sign}$${abs.toFixed(4)}`;
+  return `${sign}${usd(abs)}`;
+}
+
+/** `0.2951 SOL · ~$25.45` when a SOL/USD mark is already on the desk. */
+export function formatSolHolding(sol: number, solUsd?: number | null): string {
+  if (!Number.isFinite(sol)) return "—";
+  const qty = `${sol.toFixed(4)} SOL`;
+  if (sol > 0 && solUsd != null && Number.isFinite(solUsd) && solUsd > 0) return `${qty} · ~${formatBalanceUsd(sol * solUsd)}`;
+  return qty;
+}
+
+/** Home LIVE strip: SOL and its dollar estimate, plus USDC that does not round dust to $0.00. */
+export function liveCashLabel(input: {
+  sol?: number | null;
+  solUsd?: number | null;
+  usdc?: number | null;
+  cashUsd?: number;
+  cashKnown?: boolean;
+  balanceError?: string | null;
+}): string {
+  const known = input.cashKnown !== false && !input.balanceError;
+  const usdc = input.usdc != null && Number.isFinite(input.usdc) ? input.usdc : null;
+  let usdcText: string;
+  if (usdc != null && (known || usdc > 0)) usdcText = `USDC ${formatBalanceUsd(usdc)}${input.balanceError ? " stale" : ""}`;
+  else if (input.balanceError && (input.cashUsd ?? 0) > 0) usdcText = `USDC ${formatBalanceUsd(input.cashUsd ?? 0)} stale`;
+  else if (!known) usdcText = "USDC unknown";
+  else usdcText = `USDC ${formatBalanceUsd(usdc ?? input.cashUsd ?? 0)}`;
+  if (input.sol != null && Number.isFinite(input.sol)) return `${formatSolHolding(input.sol, input.solUsd)} · ${usdcText}`;
+  return usdcText;
+}
+
 export function markAge(ms: number | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
   if (ms < 1_000) return "just now";

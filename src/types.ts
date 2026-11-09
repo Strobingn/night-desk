@@ -628,6 +628,8 @@ export interface WalletView {
   publicKey: string | null;
   solBalance: number | null;
   usdcBalance: number | null;
+  /** SOL/USD already cached on the desk. Null when no print has arrived. Display only. */
+  solPriceUsd?: number | null;
   balanceAt: number | null;
   balanceError: string | null;
   /** Desk is placing real swaps (LIVE_TRADING=true and a usable key at boot). */

@@ -40,8 +40,18 @@ export interface BuyReply {
   replayed?: boolean;
 }
 
+/** Hard-kill refusals keep the desk's reason and open the existing Buy anyway confirm. */
+export function hardKillFollowUp(code: string | undefined, error: string | undefined): { reason: string } | null {
+  if (code !== "HARD_KILL") return null;
+  const reason = error?.trim() ? error.trim() : "Hard kill.";
+  return { reason };
+}
+
 export function buyToast(symbol: string, r: BuyReply, roundTripMs: number): string {
-  if (!r.ok) return `${symbol}: ${r.error ?? "buy refused"}${r.code ? ` (${r.code})` : ""}`;
+  if (!r.ok) {
+    const hint = r.code === "HARD_KILL" || r.code === "REVENGE_COOLDOWN" ? " Use Buy… on the card to override." : "";
+    return `${symbol}: ${r.error ?? "buy refused"}${r.code ? ` (${r.code})` : ""}${hint}`;
+  }
   const clamp = r.clampedFrom != null ? ` (cut from ${usd(r.clampedFrom)} to the cap)` : "";
   const fill = r.fillPriceUsd ? ` @ ${px(r.fillPriceUsd)}` : "";
   const mode = r.mode === "live" ? "LIVE" : r.mode ?? "paper";
@@ -57,11 +67,12 @@ export interface SellReply {
   exitPrice?: number;
   exitCode?: string;
   error?: string;
+  code?: string;
   ms?: number;
 }
 
 export function sellToast(symbol: string, r: SellReply, roundTripMs: number): string {
-  if (!r.ok) return `${symbol}: ${r.error ?? "sell failed"}`;
+  if (!r.ok) return `${symbol}: ${r.error ?? "sell failed"}${r.code ? ` (${r.code})` : ""}`;
   const pnl = r.pnlUsd != null ? ` ${signedUsd(r.pnlUsd)}${r.pnlPct != null ? ` (${signedPct(r.pnlPct)})` : ""}` : "";
   const fill = r.exitPrice ? ` @ ${px(r.exitPrice)}` : "";
   const gap = r.exitCode === "GAP_RUG" ? " · gap/rug" : "";

@@ -84,7 +84,7 @@ export const BUCKETS: BucketSpec[] = [
     budgetPerMin: 10,
     burst: 3,
     cacheMs: 0,
-    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. 10/min average, at most 3 back-to-back. Together with the exec lane this is 18/min. The URL is not logged; it may carry an API key. Nothing is cached."
+    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. 10/min average, at most 3 back-to-back. Together with the exec lane this is 18/min. The URL is not logged; it may carry an API key. Nothing is cached."
   },
   {
     id: "helius:exec",
@@ -143,7 +143,8 @@ export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined,
   const pri = priority ?? 1;
   // Safety and bundle reads share the existing read budget at the lowest priority.
   if (pri === 2 && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
-  if (pri !== 0) return BY_ID.get(execId)!;
+  // Wallet balance (-1) and mark polls (0) stay on the read lane. Higher priorities are the exec lane.
+  if (pri > 0) return BY_ID.get(execId)!;
   if (typeof body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(body) ?? "")) return BY_ID.get(execId)!;
   return spec;
 }
@@ -170,8 +171,11 @@ export function solanaExecSpec(): BucketSpec {
   return BY_ID.get("solana:public:exec")!;
 }
 
-/** 0 = held-position marks and Add coin (never starve), 1 = enrichment, 2 = Scout list polls. */
-export type Priority = 0 | 1 | 2;
+/**
+ * -1 = wallet SOL/USDC reads (same read-lane budget, served before mark polls).
+ * 0 = held-position marks and Add coin (never starve), 1 = enrichment, 2 = Scout list polls.
+ */
+export type Priority = -1 | 0 | 1 | 2;
 
 export const BACKOFF_BASE_MS = 2_000;
 export const BACKOFF_CAP_MS = 120_000;
