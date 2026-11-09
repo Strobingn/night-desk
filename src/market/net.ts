@@ -342,10 +342,15 @@ export class NetLimiter {
     this.buckets.set(ENRICH_BUCKET_ID, new Bucket({ ...base, ...budget }, this.clock.now()));
   }
 
-  private specFor(url: string): BucketSpec | null {
+  /**
+   * Known hosts keep their own buckets. The enrich host is the enrich bucket only for a
+   * scout enrich read. Wallet, marks, and live swaps use that same host when
+   * DESK_WALLET_RPC_URL is empty, and a paused enrich lane must not answer them.
+   */
+  private specFor(url: string, enrichCall: boolean): BucketSpec | null {
     const known = bucketFor(url);
     if (known) return known;
-    if (!this.enrichHost) return null;
+    if (!enrichCall || !this.enrichHost) return null;
     try {
       if (new URL(url).hostname.toLowerCase() !== this.enrichHost) return null;
     } catch {
@@ -513,7 +518,7 @@ export class NetLimiter {
 
   /** True when this enrich host is in its circuit pause. Wallet and Helius URLs are never open. */
   circuitOpenFor(url: string): boolean {
-    const spec = this.specFor(url);
+    const spec = this.specFor(url, true);
     const lane = rpcLane(spec, 1, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [] }));
     if (!lane || lane.id !== ENRICH_BUCKET_ID) return false;
     const b = this.buckets.get(lane.id);
@@ -548,11 +553,11 @@ export class NetLimiter {
    * Never throws on 429 itself: the 429 Response is returned after the bucket is paused,
    * so callers keep their own error handling. GETs retry once after the pause when asked.
    */
-  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number }): Promise<Response> => {
+  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; ndEnrich?: boolean; retry429?: boolean; timeoutMs?: number }): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const spec = this.specFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
-    const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
+    const { ndPriority: priority, ndEnrich, retry429, timeoutMs, ...rest } = init ?? {};
+    const spec = this.specFor(url, ndEnrich === true);
     const lane = rpcLane(spec, priority, rest.body);
     if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
@@ -596,10 +601,15 @@ export class NetLimiter {
     return ((input: string | URL | Request, init?: RequestInit) => this.fetch(input, { ...(init ?? {}), ndPriority: priority })) as typeof fetch;
   }
 
+  /** Scout enrich reads. Same priority as other enrichment, but the only calls that enter the enrich lane. */
+  fetchEnrich(): typeof fetch {
+    return ((input: string | URL | Request, init?: RequestInit) => this.fetch(input, { ...(init ?? {}), ndPriority: 1, ndEnrich: true })) as typeof fetch;
+  }
+
   private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number): Promise<CachedResponse> {
     for (let attempt = 0; ; attempt += 1) {
       // A paused enrich host returns at once so the sighting stays pending.
-      // This lane is not Helius, so a wallet or mark read is not held here.
+      // Wallet, mark, and swap calls are not on this spec, even when they share the host.
       if (spec.id === ENRICH_BUCKET_ID && this.pausedUntil(spec)) {
         const circuit = (this.buckets.get(spec.id)?.circuitUntil ?? 0) > this.clock.now();
         return {

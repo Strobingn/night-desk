@@ -158,7 +158,7 @@ export class Scout {
     this.concurrency = clampInt(opts.enrichConcurrency, 8, 1, 16);
     this.queueCap = clampInt(opts.queueCap, 160, 1, 2000);
     this.listFetch = opts.net ? opts.net.fetchAt(2) : opts.fetchImpl ?? fetch;
-    this.enrichFetch = opts.net ? opts.net.fetchAt(1) : opts.fetchImpl;
+    this.enrichFetch = opts.net ? opts.net.fetchEnrich() : opts.fetchImpl;
     this.batcher = opts.net ? new DexTokenBatcher(opts.net.fetchAt(1)) : null;
     this.status = {
       mode: opts.feedMode,
@@ -283,7 +283,10 @@ export class Scout {
   }
 
   private drain(): void {
-    if (Date.now() < this.holdUntil) return;
+    if (Date.now() < this.holdUntil) {
+      this.ensureHoldTimer();
+      return;
+    }
     while (this.active < this.concurrency && this.queue.length) {
       const raw = this.queue.splice(bestIndex(this.queue), 1)[0]!;
       this.inflight.set(raw.mint, raw);
@@ -320,13 +323,23 @@ export class Scout {
       this.queue.push(raw);
     }
     const at = Date.now() + Math.max(250, retryMs);
-    this.holdUntil = Math.max(this.holdUntil, at);
-    if (!this.holdTimer) {
-      this.holdTimer = setTimeout(() => {
+    if (at > this.holdUntil) {
+      this.holdUntil = at;
+      if (this.holdTimer) {
+        clearTimeout(this.holdTimer);
         this.holdTimer = null;
-        if (!this.stopped) this.drain();
-      }, Math.max(1, this.holdUntil - Date.now()));
+      }
     }
+    this.ensureHoldTimer();
+  }
+
+  /** Arm a wake-up for `holdUntil`. A longer pause replaces a timer that would fire too soon. */
+  private ensureHoldTimer(): void {
+    if (this.holdTimer || this.stopped) return;
+    this.holdTimer = setTimeout(() => {
+      this.holdTimer = null;
+      if (!this.stopped) this.drain();
+    }, Math.max(1, this.holdUntil - Date.now()));
   }
 
   private async enrich(raw: RawSighting): Promise<void> {

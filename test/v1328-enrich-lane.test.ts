@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Scout, enrichBefore } from "../src/agents/scout.js";
 import { EventBus } from "../src/bus.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { draftFromRaw, type RawTapeRow } from "../src/desk/raw-tape.js";
 import { enrichSighting, needsFilterRugcheck } from "../src/market/enrich.js";
-import { BUCKETS, ENRICH_RPS_CAP, NetLimiter, bucketFor, rpcLane } from "../src/market/net.js";
+import { BUCKETS, ENRICH_CIRCUIT_MS, ENRICH_RPS_CAP, NetLimiter, bucketFor, rpcLane } from "../src/market/net.js";
 import type { DeskEvents, RawSighting } from "../src/types.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { testConfig } from "./helpers.js";
@@ -42,7 +42,7 @@ describe("v13.28 enrich lane stays off Helius", () => {
       }) as typeof fetch
     });
     net.useEnrichRpc(ALCHEMY, 45);
-    await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("getMultipleAccounts") });
+    await net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getMultipleAccounts") });
     await net.fetchAt(-1)(HELIUS, { method: "POST", body: rpcBody("getBalance") });
     const stats = net.stats();
     expect(stats.find((row) => row.id === "enrich")?.reqLastMin).toBe(1);
@@ -72,7 +72,7 @@ describe("v13.28 enrich lane stays off Helius", () => {
     net.useEnrichRpc("https://rpc.example.test/secret", 1_200);
     const url = "https://rpc.example.test/secret";
     for (let i = 0; i < 30; i += 1) {
-      await net.fetchAt(1)(url, { method: "POST", body: rpcBody("getAccountInfo") });
+      await net.fetchEnrich()(url, { method: "POST", body: rpcBody("getAccountInfo") });
     }
     for (const start of sent) {
       const inSecond = sent.filter((t) => t >= start && t < start + 1_000).length;
@@ -91,9 +91,9 @@ describe("v13.28 enrich lane stays off Helius", () => {
       }) as typeof fetch
     });
     net.useEnrichRpc(ALCHEMY, 45);
-    await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") });
-    await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("getTokenLargestAccounts") });
-    await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("getMultipleAccounts") });
+    await net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") });
+    await net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getTokenLargestAccounts") });
+    await net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getMultipleAccounts") });
     const enrich = net.stats().find((row) => row.id === "enrich")!;
     expect(enrich.count429).toBeGreaterThanOrEqual(1);
     expect(enrich.circuitOpen || enrich.pausedUntil != null).toBe(true);
@@ -118,8 +118,8 @@ describe("v13.28 enrich lane stays off Helius", () => {
       }) as typeof fetch
     });
     net.useEnrichRpc(ALCHEMY, 45);
-    await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") });
-    const again = await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") });
+    await net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") });
+    const again = await net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") });
     expect(again.status).toBe(429);
     expect(again.headers.get("x-nd-local")).toBe("1");
     expect(enrichCalls).toBe(1);
@@ -127,6 +127,33 @@ describe("v13.28 enrich lane stays off Helius", () => {
     expect(wallet.status).toBe(200);
     expect(net.stats().find((row) => row.id === "enrich")?.count5xx).toBe(1);
     expect(net.stats().find((row) => row.id === "helius")?.count429).toBe(0);
+  });
+
+  it("keeps wallet, mark, and swap calls off a paused enrich host they share", async () => {
+    let calls = 0;
+    const net = new NetLimiter({
+      clock: { random: () => 0.5 },
+      fetchImpl: (async () => {
+        calls += 1;
+        if (calls <= 3) return new Response("", { status: 429 });
+        return Response.json({ jsonrpc: "2.0", result: { value: 1 } });
+      }) as typeof fetch
+    });
+    net.useEnrichRpc(ALCHEMY, 45);
+    await Promise.all([
+      net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getAccountInfo") }),
+      net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getTokenLargestAccounts") }),
+      net.fetchEnrich()(ALCHEMY, { method: "POST", body: rpcBody("getMultipleAccounts") })
+    ]);
+    expect(net.stats().find((row) => row.id === "enrich")?.circuitOpen).toBe(true);
+    const balance = await net.fetchAt(-1)(ALCHEMY, { method: "POST", body: rpcBody("getBalance") });
+    const marks = await net.fetchAt(0)(ALCHEMY, { method: "POST", body: rpcBody("getMultipleAccounts") });
+    const sim = await net.fetchAt(1)(ALCHEMY, { method: "POST", body: rpcBody("simulateTransaction") });
+    expect(balance.status).toBe(200);
+    expect(marks.status).toBe(200);
+    expect(sim.status).toBe(200);
+    expect(balance.headers.get("x-nd-local")).toBeNull();
+    expect(net.stats().find((row) => row.id === "enrich")?.reqLastMin).toBe(3);
   });
 });
 
@@ -232,6 +259,49 @@ describe("v13.28 enrich calls", () => {
     expect(urls.some((url) => url.includes("helius"))).toBe(false);
     expect(urls.some((url) => url.includes("solana-mainnet.g.alchemy.com"))).toBe(true);
     scout.stop();
+  });
+
+  it("waits out the longer pause when a second 429 extends the enrich hold", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    const pending: Array<(res: Response) => void> = [];
+    let rpcPosts = 0;
+    const second = "Mint222222222222222222222222222222222222222";
+    const scout = new Scout({
+      bus: new EventBus<DeskEvents>(),
+      feedMode: "live",
+      demo: false,
+      rpcUrl: ALCHEMY,
+      rugcheckUrl: "https://api.rugcheck.xyz/v1",
+      pumpWsUrl: "ws://unused",
+      enrichConcurrency: 2,
+      queueCap: 8,
+      fetchImpl: async (_input, init) => {
+        if (init?.method !== "POST") return Response.json({ pairs: [] });
+        rpcPosts += 1;
+        if (rpcPosts > 2) return Response.json({ result: { value: null } });
+        return await new Promise<Response>((resolve) => pending.push(resolve));
+      },
+      onTape: () => {},
+      onStatus: () => {}
+    });
+    try {
+      scout.ingest({ mint: MINT, source: "pumpfun", observedAt: 1 });
+      scout.ingest({ mint: second, source: "pumpfun", observedAt: 2 });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pending).toHaveLength(2);
+      pending[0]!(new Response("", { status: 429 }));
+      pending[1]!(new Response("", { status: 429, headers: { "x-nd-local": "1", "x-nd-circuit": "1" } }));
+      await vi.advanceTimersByTimeAsync(1);
+      const pausedAt = rpcPosts;
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(rpcPosts).toBe(pausedAt);
+      await vi.advanceTimersByTimeAsync(ENRICH_CIRCUIT_MS);
+      expect(rpcPosts).toBeGreaterThan(pausedAt);
+    } finally {
+      scout.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("does not ask RugCheck for a tape row that is still under the volume floor", () => {
