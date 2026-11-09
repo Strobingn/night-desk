@@ -78,8 +78,8 @@ describe("Risk stop, trail, and no averaging down", () => {
       expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS")).toBe(true);
 
       await desk.submitCandidate(makeToken({ mint, symbol: "RISK", priceUsd: 1 }));
-      expect(desk.book.positions.has(mint)).toBe(false);
-      expect(desk.snapshot().events.some((event) => event.code === "REVENGE_COOLDOWN")).toBe(true);
+      expect(desk.book.positions.has(mint)).toBe(true);
+      expect(desk.snapshot().events.some((event) => event.code === "REVENGE_COOLDOWN")).toBe(false);
     } finally {
       desk.stop();
     }
@@ -121,7 +121,7 @@ describe("Risk stop, trail, and no averaging down", () => {
     expect(loose.stopLossPct).toBe(0.06);
     expect(loose.trailArmPct).toBe(0.12);
     expect(loose.trailGapPct).toBe(0.04);
-    expect(loose.revengeCooldownMs).toBe(6 * 60 * 60 * 1000);
+    expect(loose.revengeCooldownMs).toBe(0);
   });
 
   it("planOrder is the same no-add gate the executor uses", () => {

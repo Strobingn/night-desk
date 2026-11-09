@@ -316,7 +316,10 @@ export class PositionPricer {
     const jup = quotes.find((q) => q.feed === "jupiter");
     const dex = quotes.find((q) => q.feed === "dexscreener" && q.pairAddress === read.pair);
     const recentJup = list.some((s) => s.feed === "jupiter" && now - s.at <= 30_000);
-    const pick = jup ?? (!recentJup ? dex : undefined);
+    // A Jupiter print dozens of times the pool quote is the Pepetide failure mode. Do not
+    // calibrate the chain mark from it; the pool quote is the one that matches reserves.
+    const jupSane = jup && (!dex || !(dex.priceUsd > 0) || jup.priceUsd <= dex.priceUsd * 25);
+    const pick = (jupSane ? jup : undefined) ?? (!recentJup ? dex : undefined);
     if (pick && pick.priceUsd > 0 && read.native > 0) {
       const ratio = pick.priceUsd / read.native;
       if (Number.isFinite(ratio) && ratio > 0) list.push({ ratio, at: now, feed: pick.feed === "jupiter" ? "jupiter" : "dexscreener" });

@@ -65,6 +65,28 @@ export const REANCHOR_GAP_MS = 2_000;
 export const REANCHOR_AGREE = 0.25;
 /** …and not dust: at least this fraction of the last good mark. */
 export const REANCHOR_DUST = 0.01;
+/**
+ * v13.20 one print this many times the last good mark is not a price.
+ * A real move can still arrive in smaller steps. A drop is never rejected here:
+ * a genuine rug has to reach the stop.
+ */
+export const ABSURD_RISE = 25;
+
+/**
+ * Upward unit/decimal or SOL-vs-USD confusion, or an implausible jump vs the last good mark.
+ * Null means the print may update equity. A crash is never an outlier.
+ */
+export function outlierReason(lastGood: number, next: number): "unit" | "spike" | null {
+  if (!(lastGood > 0) || !(next > 0) || !Number.isFinite(next)) return null;
+  const ratio = next / lastGood;
+  if (!(ratio > 1)) return null;
+  for (const step of [1e3, 1e6, 1e9]) {
+    if (Math.abs(ratio / step - 1) < 0.08) return "unit";
+  }
+  if (ratio >= ABSURD_RISE) return "spike";
+  return null;
+}
+
 /** One PRICE_SOURCE / PRICE_UNUSABLE line per mint per window. */
 export const LOG_THROTTLE_MS = 5 * 60_000;
 /** A live (on-chain) mark this young wins the display over an older risk mark. */
@@ -94,6 +116,8 @@ export function reanchorCandidate(
   const feed = origin.feed;
   if (!feed || feed === "chain" || markUnusable(price)) return { verdict: "refuse" };
   if (!markUnusable(lastGood) && price < lastGood * REANCHOR_DUST) return { verdict: "refuse" };
+  // A silent entry feed must not adopt a Jupiter print that is dozens of times the last good mark.
+  if (!markUnusable(lastGood) && outlierReason(lastGood, price)) return { verdict: "refuse" };
   const key = `${feed}|${origin.pairAddress ?? ""}`;
   const fresh: ReanchorCandidate = { key, feed, pairAddress: origin.pairAddress, dex: origin.dex, price, at: now };
   if (!pending || pending.key !== key) return { verdict: "wait", next: fresh };

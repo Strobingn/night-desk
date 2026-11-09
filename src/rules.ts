@@ -16,7 +16,8 @@ export const HARD_RULES = {
   stopLossPct: 0.06,
   trailArmPct: 0.12,
   trailGapPct: 0.04,
-  revengeCooldownMs: 6 * 60 * 60 * 1000,
+  /** v13.20 off. A hard stop does not ban the mint. Settings can show 0. */
+  revengeCooldownMs: 0,
   /** New paper book, and the in-app reset. Env PAPER_BALANCE_USD can override a fresh boot only. */
   paperStartingUsd: 100,
   /** Base slippage added to a liquidity-impact estimate. */
@@ -248,12 +249,12 @@ export function clampDailyLossUsd(raw: number, fallback = 0): number {
 }
 
 /**
- * Hours after a hard stop before that mint can be auto-bought again.
- * 6 is the floor. A smaller number is refused by the caller.
+ * Hours after a hard stop before that mint can be bought again.
+ * 0 is off and is the default. The slider still goes to 72.
  */
-export function clampCooldownHours(raw: number, fallback = 6): number {
-  if (!Number.isFinite(raw)) return fallback;
-  return Math.min(72, Math.max(6, Math.round(raw)));
+export function clampCooldownHours(raw: number, fallback = 0): number {
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(72, Math.max(0, Math.round(raw)));
 }
 
 /** Stop fraction. Callers reject anything looser than 6% before this runs. */
@@ -345,11 +346,8 @@ export function resolveRules(env: NodeJS.ProcessEnv = process.env): ResolvedRule
     stopLossPct: tighterCap(env.STOP_LOSS_PCT, HARD_RULES.stopLossPct, HARD_RULES.stopLossPct),
     trailArmPct: tighterFloor(env.TRAIL_ARM_PCT, HARD_RULES.trailArmPct, HARD_RULES.trailArmPct),
     trailGapPct: tighterCap(env.TRAIL_GAP_PCT, HARD_RULES.trailGapPct, HARD_RULES.trailGapPct),
-    revengeCooldownMs: tighterFloor(
-      env.REVENGE_COOLDOWN_MS,
-      HARD_RULES.revengeCooldownMs,
-      HARD_RULES.revengeCooldownMs
-    ),
+    // v13.20: a host env of 6h must not turn the ban back on. Settings is the only switch, and it boots at 0.
+    revengeCooldownMs: 0,
     maxEntrySlippage: clampEntrySlippage(
       readPositive(env.MAX_ENTRY_SLIPPAGE) ?? HARD_RULES.maxEntrySlippage,
       HARD_RULES.maxEntrySlippage

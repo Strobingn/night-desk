@@ -71,9 +71,12 @@ describe("v10 settings stay fail-closed", () => {
       const loose = desk.updateSettings({ stopLossPct: 8 });
       expect(loose.ok).toBe(false);
       expect(desk.snapshot().rules.stopLossPct).toBe(0.04);
-      const shortBan = desk.updateSettings({ cooldownHours: 2 });
-      expect(shortBan.ok).toBe(false);
-      expect(desk.snapshot().rules.revengeCooldownMs).toBe(8 * 3_600_000);
+      const off = desk.updateSettings({ cooldownHours: 0 });
+      expect(off.ok).toBe(true);
+      expect(desk.snapshot().rules.revengeCooldownMs).toBe(0);
+      const twoHours = desk.updateSettings({ cooldownHours: 2 });
+      expect(twoHours.ok).toBe(true);
+      expect(desk.snapshot().rules.revengeCooldownMs).toBe(2 * 3_600_000);
       const easyTrail = desk.updateSettings({ trailArmPct: 5 });
       expect(easyTrail.ok).toBe(false);
     } finally {

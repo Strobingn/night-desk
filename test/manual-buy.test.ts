@@ -116,10 +116,8 @@ describe("manual buy and live-ready checklist", () => {
       expect(desk.snapshot().events.some((event) => (event.code === "STOP_LOSS" || event.code === "GAP_RUG"))).toBe(true);
       const banned = await desk.manualBuy(mint, 10);
       expect(banned.ok).toBe(false);
-      if (!banned.ok) {
-        expect(banned.code).toBe("REVENGE_COOLDOWN");
-        expect(banned.error).toContain("minute");
-      }
+      if (!banned.ok) expect(banned.code).toBe("PRICE_CRASH");
+      expect(desk.snapshot().cooldowns.some((row) => row.mint === mint)).toBe(false);
       expect(desk.book.positions.has(mint)).toBe(false);
       // v13.3: right after a 1.4 → 0.93 fall the crash guard refuses even an override.
       const tooSoon = await desk.manualBuy(mint, 10, { ignoreCooldown: true });
