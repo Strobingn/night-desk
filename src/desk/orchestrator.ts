@@ -380,6 +380,11 @@ export class Desk {
   private killReasons: Record<string, number> = {};
   /** v13.3 recent marks and liquidity per mint for the pre-buy crash guard. */
   readonly momentum = new MomentumTracker();
+  /**
+   * Last price the crash guard accepted. Survives the close, so a Jupiter or pool spike
+   * after the stop cannot become the 60s high and block the re-entry.
+   */
+  private crashAnchor = new Map<string, number>();
   private feed: FeedStatus;
 
   constructor(
@@ -2207,13 +2212,9 @@ export class Desk {
 
     this.bus.on("market.tick", (tick) => {
       this.pricer.noteTick(tick.mint);
-      const held = this.book.positions.get(tick.mint) ?? this.liveBook?.positions.get(tick.mint);
-      const heldBook = this.book.positions.has(tick.mint) ? this.book : this.liveBook;
-      const lastGood = held && heldBook ? heldBook.price(tick.mint, held.entryPrice) : undefined;
       // A rejected outlier must not become the crash-guard high and block the next buy.
-      if (!markUnusable(tick.priceUsd) && !(lastGood != null && outlierReason(lastGood, tick.priceUsd))) {
-        this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
-      }
+      // The position is already gone by the time that next buy is attempted.
+      if (!markUnusable(tick.priceUsd)) this.noteCrash(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
       this.applyMark(tick.mint, tick.priceUsd, {
         feed: tick.feed,
         pairAddress: tick.pairAddress,
@@ -3370,7 +3371,44 @@ export class Desk {
       const supply = (token.marketCapUsd as number) / token.priceUsd;
       if (Number.isFinite(supply) && supply > 0) this.supplyByMint.set(token.mint, supply);
     }
-    this.momentum.note(token.mint, token.priceUsd, token.liquidityUsd);
+    this.noteCrash(token.mint, token.priceUsd, token.liquidityUsd);
+  }
+
+  /**
+   * Record a print for the pre-buy crash guard. An upward outlier versus the open mark,
+   * or versus the last accepted print after the close, is not a price and is not stored.
+   */
+  private noteCrash(mint: string, priceUsd: number, liquidityUsd?: number, at?: number): void {
+    if (!markUnusable(priceUsd)) {
+      const baseline = this.openMark(mint) ?? this.crashAnchor.get(mint) ?? this.flatMark(mint);
+      if (baseline != null && baseline > 0 && outlierReason(baseline, priceUsd)) {
+        this.crashAnchor.set(mint, baseline);
+        return;
+      }
+      this.crashAnchor.set(mint, priceUsd);
+    }
+    this.momentum.note(mint, priceUsd, liquidityUsd, at);
+  }
+
+  /** Mark the crash guard should trust while the mint is still open. */
+  private openMark(mint: string): number | undefined {
+    const paper = this.book.positions.get(mint);
+    if (paper) {
+      const marked = this.book.price(mint, paper.entryPrice);
+      return marked > 0 ? marked : undefined;
+    }
+    const live = this.liveBook?.positions.get(mint);
+    if (live && this.liveBook) {
+      const marked = this.liveBook.price(mint, live.entryPrice);
+      return marked > 0 ? marked : undefined;
+    }
+    return undefined;
+  }
+
+  /** Last booked price, still present after a close and after a restart. */
+  private flatMark(mint: string): number | undefined {
+    const price = this.book.lastPrice.get(mint) ?? this.liveBook?.lastPrice.get(mint);
+    return price != null && price > 0 ? price : undefined;
   }
 
   /**
@@ -3677,7 +3715,25 @@ export class Desk {
       this.config.rules.revengeCooldownMs = 0;
       this.store.writeJson("settings", { ...saved, cooldownHours: 0, cooldownRetired: true });
     }
-    if (this.config.rules.revengeCooldownMs <= 0) this.cooldowns.clear();
+    if (this.config.rules.revengeCooldownMs <= 0) {
+      this.cooldowns.clear();
+      // The book on disk still has the old until-timestamps. A later slider-on restart
+      // would load them again if nothing persisted the empty map first.
+      this.dropStoredCooldowns();
+    }
+  }
+
+  private dropStoredCooldowns(): void {
+    for (const key of ["book", "book:live"] as const) {
+      const saved = this.store.loadBook(key);
+      if (!saved?.cooldowns?.length) continue;
+      const inMemory = key === "book" ? this.book : this.liveBook;
+      if (inMemory) {
+        this.persist();
+        continue;
+      }
+      this.store.saveBook({ ...saved, cooldowns: [] }, key);
+    }
   }
 
   private absorbGates(saved: DeskSettings): void {

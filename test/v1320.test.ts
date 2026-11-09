@@ -28,6 +28,14 @@ describe("v13.20 cooldown off and sane marks", () => {
     expect(sane).toBeCloseTo(0.0001, 8);
     expect(Number.isNaN(pumpSwapNative(1_000_000_000, 100_000_000, 6, 10n ** 24n, true))).toBe(true);
     expect(Number.isNaN(pumpSwapNative(1_000_000_000, 100_000_000, 6, -(10n ** 24n), false))).toBe(true);
+    // Reversed pool: virtual quote is coin raw, far above the lamport vault, and still a price.
+    const coinRaw = 1_000_000_000_000_000;
+    const solRaw = 50_000_000_000;
+    const virtual = 200_000_000_000_000n;
+    const vaultOnly = pumpSwapNative(coinRaw, solRaw, 6, 0n, false);
+    const reversed = pumpSwapNative(coinRaw, solRaw, 6, virtual, false);
+    expect(Number.isFinite(reversed)).toBe(true);
+    expect(reversed / vaultOnly).toBeCloseTo(coinRaw / (coinRaw + Number(virtual)), 4);
   });
 
   it("retires a stored 6h ban and still keeps the other saved risk values", () => {
@@ -48,12 +56,23 @@ describe("v13.20 cooldown off and sane marks", () => {
       expect(desk.snapshot().rules.stopLossPct).toBe(0.05);
       expect(desk.snapshot().rules.maxPositionPct).toBe(0.07);
       expect(desk.snapshot().cooldowns).toEqual([]);
+      expect(desk.store.loadBook()?.cooldowns ?? []).toEqual([]);
       const saved = desk.store.readJson("settings") as { cooldownHours: number; cooldownRetired: boolean; stopLossPct: number };
       expect(saved.cooldownRetired).toBe(true);
       expect(saved.cooldownHours).toBe(0);
       expect(saved.stopLossPct).toBe(0.05);
+      const turnedOn = desk.updateSettings({ cooldownHours: 6 });
+      expect(turnedOn.ok).toBe(true);
+      expect(desk.store.loadBook()?.cooldowns ?? []).toEqual([]);
     } finally {
       desk.stop();
+    }
+    const again = new Desk(cfg);
+    try {
+      expect(again.snapshot().rules.revengeCooldownMs).toBe(6 * 3_600_000);
+      expect(again.snapshot().cooldowns).toEqual([]);
+    } finally {
+      again.stop();
     }
   });
 
@@ -139,6 +158,9 @@ describe("v13.20 cooldown off and sane marks", () => {
       expect(desk.snapshot().equityUsd).toBeLessThan(before);
       expect(desk.snapshot().equityUsd).toBeGreaterThan(100);
 
+      // Scout and Jupiter keep printing the spike after the stop. That must not ban the re-entry.
+      await desk.markPrice(MINT, 0.5);
+      await desk.markPrice(MINT, 0.5);
       await desk.submitCandidate(
         makeToken({
           mint: MINT,

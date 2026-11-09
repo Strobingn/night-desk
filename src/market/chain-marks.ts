@@ -300,13 +300,18 @@ export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMi
 /**
  * SOL per whole coin. solRaw is always the WSOL vault in lamports: a reversed pool (WSOL base)
  * is normalized by solSides before this runs, so the 9-decimal quote scale stays. Virtual 0 keeps
- * the vault ratio. A virtual reserve hundreds of times that vault is a bad decode, not a price.
+ * the vault ratio. The signed virtual reserve is quote-token raw: lamports when the quote is SOL,
+ * coin raw when the pool is reversed. A value hundreds of times the side it is added to is a bad
+ * decode, not a price.
  */
 export function pumpSwapNative(coinRaw: number, solRaw: number, decimals: number, virtualQuote: bigint, quoteIsSol: boolean): number {
-  if (virtualQuote !== 0n && solRaw > 0 && Number.isFinite(solRaw)) {
-    const abs = virtualQuote < 0n ? -virtualQuote : virtualQuote;
-    const raw = BigInt(Math.max(0, Math.trunc(solRaw)));
-    if (raw > 0n && abs > raw * 1_000n) return Number.NaN;
+  if (virtualQuote !== 0n) {
+    const side = quoteIsSol ? solRaw : coinRaw;
+    if (side > 0 && Number.isFinite(side)) {
+      const abs = virtualQuote < 0n ? -virtualQuote : virtualQuote;
+      const raw = BigInt(Math.max(0, Math.trunc(side)));
+      if (raw > 0n && abs > raw * 1_000n) return Number.NaN;
+    }
   }
   if (virtualQuote === 0n) {
     const baseAmt = coinRaw / 10 ** decimals;
