@@ -13,6 +13,9 @@ import { Desk } from "../src/desk/orchestrator.js";
 import { startServer } from "../src/server/http.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { testConfig } from "../test/helpers.js";
+import { liveCashLabel } from "../web/src/format.js";
+
+const WSOL = "So11111111111111111111111111111111111111112";
 
 const DIR = "/tmp/nd-gate";
 const LOG = `${DIR}/http.jsonl`;
@@ -41,6 +44,9 @@ const lookupFetch = (async (input: RequestInfo | URL) => {
     return Response.json({ pairs: [seekPair()] });
   }
   if (url.includes(`/latest/dex/tokens/${SEEK}`)) return Response.json({ pairs: [seekPair()] });
+  if (url.includes("api.jup.ag/price") && url.includes(WSOL)) {
+    return Response.json({ [WSOL]: { usdPrice: 86.24 } });
+  }
   return new Response("{}", { status: 404, headers: { "content-type": "application/json" } });
 }) as typeof fetch;
 
@@ -60,7 +66,8 @@ vi.mock("../src/market/pump-live.js", () => ({
   }
 }));
 
-const rich = async (): Promise<WalletBalances> => ({ sol: 1, usdc: 25, at: Date.now(), error: null });
+// USDC must cover the $5 live tap. Dust display stays in the unit tests; this mock is the hung-swap path.
+const rich = async (): Promise<WalletBalances> => ({ sol: 0.2951, usdc: 25, at: Date.now(), error: null });
 
 beforeAll(async () => {
   mkdirSync(DIR, { recursive: true });
@@ -130,6 +137,18 @@ beforeAll(async () => {
       priceFeed: "jupiter"
     })
   );
+  await desk.refreshWallet();
+  await desk.refreshDisplaySol();
+  const wallet = desk.snapshot().wallet;
+  const strip = liveCashLabel({
+    sol: wallet?.solBalance,
+    solUsd: wallet?.solPriceUsd,
+    usdc: wallet?.usdcBalance,
+    cashKnown: true
+  });
+  if (!strip.includes("0.2951 SOL · ~$25.45") || !strip.includes("USDC $25.00")) {
+    throw new Error(`gate wallet strip is missing the SOL dollar estimate: ${strip}`);
+  }
   const server = startServer(desk, "127.0.0.1", 8791);
   await once(server, "listening");
   const port = (server.address() as AddressInfo).port;

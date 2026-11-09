@@ -630,6 +630,8 @@ export interface WalletView {
   usdcBalance: number | null;
   /** SOL/USD already cached on the desk. Null when no print has arrived. Display only. */
   solPriceUsd?: number | null;
+  /** When that SOL/USD print was cached. Display only. */
+  solPriceAt?: number | null;
   balanceAt: number | null;
   balanceError: string | null;
   /** Desk is placing real swaps (LIVE_TRADING=true and a usable key at boot). */

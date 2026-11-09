@@ -84,7 +84,7 @@ export const BUCKETS: BucketSpec[] = [
     budgetPerMin: 10,
     burst: 3,
     cacheMs: 0,
-    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. 10/min average, at most 3 back-to-back. Together with the exec lane this is 18/min. The URL is not logged; it may carry an API key. Nothing is cached."
+    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. 10/min is a hard sliding-minute ceiling (burst 3 only when that minute still has room). Together with the exec lane the two reqLastMin counts never pass 18. The URL is not logged; it may carry an API key. Nothing is cached."
   },
   {
     id: "helius:exec",
@@ -93,7 +93,7 @@ export const BUCKETS: BucketSpec[] = [
     budgetPerMin: 8,
     burst: 2,
     cacheMs: 0,
-    note: "Same Helius host, separate lane for swap preparation, simulation, and broadcast. 8/min, burst 2. A full read-lane queue cannot delay these. Nothing here is cached."
+    note: "Same Helius host, separate lane for swap preparation, simulation, and broadcast. 8/min is a hard sliding-minute ceiling, burst 2 only inside that minute. A full read-lane queue cannot delay these. Together with the read lane the two reqLastMin counts never pass 18. Nothing here is cached."
   }
 ];
 
@@ -306,11 +306,29 @@ export class NetLimiter {
     });
   }
 
+  /**
+   * Helius read (10) and exec (8) are hard sliding-minute ceilings. A full token bucket
+   * must not push the pair past 18 reqLastMin (a minute of 11+8 was the leak).
+   * Other hosts keep the token bucket they already had.
+   */
+  private heliusWait(b: Bucket, now: number): number {
+    if (b.spec.id !== "helius" && b.spec.id !== "helius:exec") return 0;
+    const own = b.windowCount(now);
+    const other = this.buckets.get(b.spec.id === "helius" ? "helius:exec" : "helius");
+    const otherCount = other?.windowCount(now) ?? 0;
+    const combinedCap = b.spec.budgetPerMin + (other?.spec.budgetPerMin ?? 0);
+    const blocked = own >= b.spec.budgetPerMin || own + otherCount >= combinedCap;
+    if (!blocked) return 0;
+    const oldest = [b.sentTimes[0], other?.sentTimes[0]].filter((t): t is number => t != null).sort((a, c) => a - c)[0];
+    if (oldest == null) return 60_000;
+    return Math.max(1, oldest + 60_000 + 1 - now);
+  }
+
   private pump(b: Bucket): void {
     if (b.timer) return;
     const now = this.clock.now();
     b.refill(now);
-    while (b.queue.length && now >= b.pauseUntil && b.tokens >= 1) {
+    while (b.queue.length && now >= b.pauseUntil && b.tokens >= 1 && this.heliusWait(b, now) === 0) {
       b.tokens -= 1;
       b.sent += 1;
       b.sentTimes.push(now);
@@ -319,7 +337,7 @@ export class NetLimiter {
     if (!b.queue.length) return;
     const perMs = (b.spec.budgetPerMin * b.rateFactor) / 60_000;
     const waitToken = b.tokens >= 1 ? 0 : Math.ceil((1 - b.tokens) / perMs);
-    const wait = Math.max(waitToken, b.pauseUntil - now, 1);
+    const wait = Math.max(waitToken, this.heliusWait(b, now), b.pauseUntil - now, 1);
     b.timer = true;
     this.clock.setTimeout(() => {
       b.timer = false;
