@@ -76,6 +76,25 @@ export const ABSURD_RISE = 25;
  * Upward unit/decimal or SOL-vs-USD confusion, or an implausible jump vs the last good mark.
  * Null means the print may update equity. A crash is never an outlier.
  */
+/** How long a Dex or Jupiter print may confirm a chain mark or a large rise. */
+export const QUOTE_CONFIRM_MS = 60_000;
+
+/**
+ * The anchor for an upward sanity check. A saved mark already dozens of times entry
+ * is not "last good" — the first chain read can poison it and then agree with itself.
+ */
+export function entryAnchor(entry: number, lastGood: number): number {
+  if (!(entry > 0) || !Number.isFinite(entry)) return lastGood;
+  if (!(lastGood > 0) || !Number.isFinite(lastGood) || lastGood / entry >= ABSURD_RISE) return entry;
+  return lastGood;
+}
+
+/** True when some other feed's price is within ABSURD_RISE of this print. */
+export function quoteConfirms(next: number, quotes: Array<number | undefined>): boolean {
+  if (!(next > 0) || !Number.isFinite(next)) return false;
+  return quotes.some((q) => q != null && q > 0 && Number.isFinite(q) && next / q < ABSURD_RISE && q / next < ABSURD_RISE);
+}
+
 export function outlierReason(lastGood: number, next: number): "unit" | "spike" | null {
   if (!(lastGood > 0) || !(next > 0) || !Number.isFinite(next)) return null;
   const ratio = next / lastGood;

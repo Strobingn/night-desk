@@ -84,8 +84,14 @@ function u64(buf: Uint8Array, offset: number): number {
 
 export type PoolKind = "curve" | "pumpswap" | "raydium" | "cpmm" | "dbc" | "dammv2" | "dammv1" | "dlmm" | "clmm" | "whirlpool";
 
-/** v13.8 kinds whose price is an exact on-chain SOL ratio from a sqrt price / bin / vault shares. */
-export const EXACT_KINDS: ReadonlySet<PoolKind> = new Set(["dbc", "dammv2", "dammv1", "dlmm", "clmm", "whirlpool"]);
+/**
+ * Kinds whose native price is SOL per whole coin, so USD is native × SOL/USD after one
+ * agreeing Dex or Jupiter sample. PumpSwap is in this set: vaults are SOL and the coin
+ * (solSides puts WSOL on the SOL side even when the pool base is WSOL). Calibrating
+ * USD as native × (quote / native) just republishes the quote and a stream refresh
+ * keeps that number looking fresh.
+ */
+export const EXACT_KINDS: ReadonlySet<PoolKind> = new Set(["pumpswap", "dbc", "dammv2", "dammv1", "dlmm", "clmm", "whirlpool"]);
 
 export interface PoolInfo {
   kind: PoolKind;
@@ -303,6 +309,14 @@ export function parsePumpSwapPool(data: Uint8Array): { baseMint: string; quoteMi
  * the vault ratio. A virtual reserve hundreds of times that vault is a bad decode, not a price.
  */
 export function pumpSwapNative(coinRaw: number, solRaw: number, decimals: number, virtualQuote: bigint, quoteIsSol: boolean): number {
+  // Both vaults dust: 14 token atoms against 30,000 lamports prices as ~2 SOL per coin.
+  // That ratio is noise from an emptied pool, not a mark. A rug that leaves coins in the
+  // vault and pulls SOL still prices (token side stays above 1 whole coin).
+  if (Number.isFinite(coinRaw) && Number.isFinite(solRaw) && decimals >= 0 && decimals <= 12) {
+    const tokens = coinRaw / 10 ** decimals;
+    const sol = solRaw / 1e9;
+    if (tokens < 1 && sol < 0.001) return Number.NaN;
+  }
   if (virtualQuote !== 0n && solRaw > 0 && Number.isFinite(solRaw)) {
     const abs = virtualQuote < 0n ? -virtualQuote : virtualQuote;
     const raw = BigInt(Math.max(0, Math.trunc(solRaw)));

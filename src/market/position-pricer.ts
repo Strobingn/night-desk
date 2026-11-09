@@ -29,6 +29,9 @@ export interface LiveOrigin {
   pairAddress: string;
   kind: PoolKind;
   at: number;
+  /** Latest Dex and Jupiter prints, when this fresh, so the desk can reject a chain mark both disagree with. */
+  dexUsd?: number;
+  jupUsd?: number;
 }
 
 export interface PositionPricerOptions {
@@ -99,6 +102,8 @@ export class PositionPricer {
   private subKey = new Map<string, string>();
   private heldNow = new Set<string>();
   private readonly lastStreamEmit = new Map<string, number>();
+  /** Latest independent quotes, so a stream mark can be checked without waiting for the next poll. */
+  private readonly indep = new Map<string, { dex?: { price: number; at: number }; jup?: { price: number; at: number } }>();
   /** A public-RPC pool read can sit in the rate-limit queue. It must not hold Dex/Jupiter marks. */
   private chainBusy = false;
 
@@ -173,6 +178,7 @@ export class PositionPricer {
         this.lastPriced.delete(mint);
         this.warned.delete(mint);
         this.cal.delete(mint);
+        this.indep.delete(mint);
         this.lastPair.delete(mint);
         this.confirmWanted.delete(mint);
       }
@@ -251,6 +257,7 @@ export class PositionPricer {
     for (const mint of held) {
       const quotes = prices.get(mint) ?? [];
       for (const quote of quotes) if (quote.feed === "dexscreener" && quote.pairAddress) this.lastPair.set(mint, quote.pairAddress);
+      this.rememberQuotes(mint, quotes, this.now());
       if (quotes.length) {
         this.lastPriced.set(mint, this.now());
         if (this.warned.delete(mint)) this.opts.onRecovered?.(mint);
@@ -282,7 +289,7 @@ export class PositionPricer {
         const factor = this.factor(mint, read.kind, this.now());
         if (factor == null) continue;
         const usd = read.native * factor;
-        if (usd > 0 && Number.isFinite(usd)) this.opts.live(mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at });
+        if (usd > 0 && Number.isFinite(usd)) this.opts.live(mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at, ...this.quoteOrigin(mint, this.now()) });
       }
     };
     if (force) await applyChain();
@@ -307,7 +314,23 @@ export class PositionPricer {
     const usd = read.native * factor;
     if (!(usd > 0) || !Number.isFinite(usd)) return;
     this.lastStreamEmit.set(read.mint, now);
-    this.opts.live(read.mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at });
+    this.opts.live(read.mint, usd, { feed: "chain", pairAddress: read.pair, kind: read.kind, at: read.at, ...this.quoteOrigin(read.mint, now) });
+  }
+
+  private rememberQuotes(mint: string, quotes: DexQuote[], now: number): void {
+    const row = this.indep.get(mint) ?? {};
+    for (const quote of quotes) {
+      if (!(quote.priceUsd > 0)) continue;
+      if (quote.feed === "dexscreener") row.dex = { price: quote.priceUsd, at: now };
+      else if (quote.feed === "jupiter") row.jup = { price: quote.priceUsd, at: now };
+    }
+    this.indep.set(mint, row);
+  }
+
+  private quoteOrigin(mint: string, now: number): { dexUsd?: number; jupUsd?: number } {
+    const row = this.indep.get(mint);
+    const fresh = (q: { price: number; at: number } | undefined) => (q && now - q.at <= 60_000 && q.price > 0 ? q.price : undefined);
+    return { dexUsd: fresh(row?.dex), jupUsd: fresh(row?.jup) };
   }
 
   /** USD per SOL-native unit for this pool, learned from the same cycle's quotes. */
@@ -329,7 +352,9 @@ export class PositionPricer {
 
   /**
    * Null means "do not show a chain mark": too few or disagreeing samples.
-   * A bonding curve is exact in SOL, so a fresh SOL/USD is enough once one sample agrees.
+   * A bonding curve and a PumpSwap vault ratio are exact in SOL, so a fresh SOL/USD is
+   * enough once one Dex or Jupiter sample agrees within 15%. A quote that is 25× off
+   * never becomes the chain mark.
    */
   factor(mint: string, kind: PoolKind, now: number): number | null {
     const list = (this.cal.get(mint) ?? []).filter((s) => now - s.at <= CAL_MAX_AGE_MS);

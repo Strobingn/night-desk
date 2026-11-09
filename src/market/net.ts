@@ -76,6 +76,24 @@ export const BUCKETS: BucketSpec[] = [
     burst: 16,
     cacheMs: 0,
     note: "Same public host, separate lane for swap preparation, simulation, and broadcast (priority 1). A full read-lane queue cannot delay these. Burst 16 covers one pump or Jupiter transaction. 64/min is still under the published 40 requests/10s per method. Nothing here is cached."
+  },
+  {
+    id: "helius",
+    source: "solana",
+    limitPerMin: 33,
+    budgetPerMin: 25,
+    burst: 8,
+    cacheMs: 0,
+    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. 25/min average, at most 8 back-to-back. The URL is not logged; it may carry an API key. Nothing is cached: a held mark must not look newer than the account read."
+  },
+  {
+    id: "helius:exec",
+    source: "solana",
+    limitPerMin: 32,
+    budgetPerMin: 24,
+    burst: 8,
+    cacheMs: 0,
+    note: "Same Helius host, separate lane for swap preparation, simulation, and broadcast. A full read-lane queue cannot delay these. Burst 8 covers one transaction. Nothing here is cached."
   }
 ];
 
@@ -105,7 +123,25 @@ export function bucketFor(url: string): BucketSpec | null {
   if (host === "frontend-api-v3.pump.fun") return BY_ID.get("pumpapi")!;
   if (host === "launch-mint-v1.raydium.io") return BY_ID.get("launchlab")!;
   if (host === PUBLIC_SOLANA_RPC_HOST) return BY_ID.get("solana:public")!;
+  if (host === "helius-rpc.com" || host.endsWith(".helius-rpc.com")) return BY_ID.get("helius")!;
   return null;
+}
+
+/** Read-lane hosts split polls from swap/simulate traffic. Null when this spec is not split. */
+function execLaneId(id: string): string | null {
+  if (id === "solana:public") return "solana:public:exec";
+  if (id === "helius") return "helius:exec";
+  return null;
+}
+
+export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown): BucketSpec | null {
+  if (!spec) return null;
+  const execId = execLaneId(spec.id);
+  if (!execId) return spec;
+  const pri = priority ?? 1;
+  if (pri !== 0) return BY_ID.get(execId)!;
+  if (typeof body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(body) ?? "")) return BY_ID.get(execId)!;
+  return spec;
 }
 
 const RPC_METHOD = /"method"\s*:\s*"([A-Za-z]+)"/;
@@ -355,15 +391,10 @@ export class NetLimiter {
     const spec = bucketFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
     const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
-    const lane =
-      spec?.id === "solana:public" && (priority ?? 1) !== 0
-        ? solanaExecSpec()
-        : spec?.id === "solana:public" && typeof rest.body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(rest.body) ?? "")
-          ? solanaExecSpec()
-          : spec;
+    const lane = rpcLane(spec, priority, rest.body);
     if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
-    const rpcRead = method === "POST" && typeof rest.body === "string" && lane.id === "solana:public" && rpcReadMethod(rest.body) != null;
+    const rpcRead = method === "POST" && typeof rest.body === "string" && (lane.id === "solana:public" || lane.id === "helius") && rpcReadMethod(rest.body) != null;
     const key = rpcRead ? `POST ${url} ${rest.body}` : `${method} ${url}`;
     const now = this.clock.now();
     if ((isGet || rpcRead) && lane.cacheMs > 0) {
