@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,6 +39,7 @@ import com.dirk.nightdesk.ui.P
 import com.dirk.nightdesk.wallet.MwaHost
 import com.dirk.nightdesk.wallet.MwaSigner
 import com.dirk.nightdesk.wallet.SecureStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -117,26 +119,33 @@ fun TerminalScreen() {
             return@LaunchedEffect
         }
         val api = PumpApi()
-        api.status(base, link.token)?.let {
-            armed = it.armed
-            cap = it.tradeCapLamports
-        }
-        api.watch(base, link.token, active)
-        api.fetchCurve(base, link.token, active)?.let {
-            curve = it
-            if (it.quoteIsSol) {
-                points.add(it.marketCapLamports)
-                while (points.size > 240) points.removeAt(0)
+        try {
+            api.status(base, link.token)?.let {
+                armed = it.armed
+                cap = it.tradeCapLamports
             }
-            lastTick = System.currentTimeMillis()
-        }
-        val page = api.trades(base, link.token, active)
-        tapeNote = page.note
-        val prints = page.prints
-        if (prints.isNotEmpty()) {
-            tape.clear()
-            tape.addAll(prints.take(40))
-            lastTick = System.currentTimeMillis()
+            api.watch(base, link.token, active)
+            api.fetchCurve(base, link.token, active)?.let {
+                curve = it
+                if (it.quoteIsSol) {
+                    points.add(it.marketCapLamports)
+                    while (points.size > 240) points.removeAt(0)
+                }
+                lastTick = System.currentTimeMillis()
+            }
+            val page = api.trades(base, link.token, active)
+            tapeNote = page.note
+            val prints = page.prints
+            if (prints.isNotEmpty()) {
+                tape.clear()
+                tape.addAll(prints.take(40))
+                lastTick = System.currentTimeMillis()
+            }
+            note = "Watching ${active.take(4)}…"
+        } catch (err: CancellationException) {
+            throw err
+        } catch (err: Exception) {
+            note = err.message?.takeIf { it.isNotBlank() } ?: "Curve watch failed."
         }
     }
 
@@ -167,8 +176,8 @@ fun TerminalScreen() {
             Text("Bonding curve", color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Text(if (stale) "Stale" else if (lastTick > 0) "Live" else "Waiting", color = if (stale) P.amber else P.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
-        OutlinedTextField(mint, { mint = it }, label = { Text("Mint") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Button(onClick = { active = mint.trim(); tick += 1 }) { Text("Watch") }
+        OutlinedTextField(mint, { mint = it }, label = { Text("Mint") }, modifier = Modifier.fillMaxWidth().testTag("pump-mint"), singleLine = true)
+        Button(onClick = { active = mint.trim(); tick += 1 }, modifier = Modifier.testTag("pump-watch")) { Text("Watch") }
         val shown = curve
         Text("Mcap ${solLine(shown?.quoteIsSol, shown?.marketCapLamports, " SOL")}", color = P.ink)
         Text("Progress ${shown?.progressPct?.let { "%.2f".format(java.util.Locale.US, it) } ?: "—"}%", color = P.ink)
@@ -245,7 +254,7 @@ fun TerminalScreen() {
                 note = "Price alert armed for ${CurveMath.formatSol(target)} SOL mcap."
             }
         }) { Text("Alert at target mcap") }
-        Text(note, color = P.muted, fontSize = 12.sp)
+        Text(note, color = P.muted, fontSize = 12.sp, modifier = Modifier.testTag("pump-note"))
     }
 }
 

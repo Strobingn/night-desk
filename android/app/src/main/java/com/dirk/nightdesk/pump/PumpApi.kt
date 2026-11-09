@@ -1,5 +1,8 @@
 package com.dirk.nightdesk.pump
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -45,19 +48,19 @@ data class PreparedBuy(
 
 data class PumpStatus(val armed: Boolean, val tradeCapLamports: String)
 
-/** HTTP client for the pump core routes the terminal already has. */
+/** HTTP client for the pump core routes the terminal already has. Blocking calls run on Dispatchers.IO. */
 class PumpApi(private val http: OkHttpClient = OkHttpClient.Builder().callTimeout(12, TimeUnit.SECONDS).build()) {
-    fun status(base: String, token: String): PumpStatus? = runCatching {
+    suspend fun status(base: String, token: String): PumpStatus? = offMain {
         val json = JSONObject(get(base, token, "/api/pump/status"))
         val caps = json.optJSONObject("caps")
         PumpStatus(json.optBoolean("armed"), caps?.optString("tradeLamports") ?: "5000000")
-    }.getOrNull()
+    }
 
-    fun fetchCurve(base: String, token: String, mint: String): CurveView? = runCatching {
+    suspend fun fetchCurve(base: String, token: String, mint: String): CurveView? = offMain {
         parseCurve(JSONObject(get(base, token, "/api/pump/curve?mint=${enc(mint)}")).getJSONObject("curve"))
-    }.getOrNull()
+    }
 
-    fun trades(base: String, token: String, mint: String): TapePage = runCatching {
+    suspend fun trades(base: String, token: String, mint: String): TapePage = offMain {
         val json = JSONObject(get(base, token, "/api/pump/trades?mint=${enc(mint)}&limit=40"))
         val arr = json.optJSONArray("trades")
         val prints = buildList {
@@ -76,13 +79,15 @@ class PumpApi(private val http: OkHttpClient = OkHttpClient.Builder().callTimeou
             }
         }
         TapePage(prints, json.optJSONObject("tape")?.optString("reason")?.ifBlank { null })
-    }.getOrDefault(TapePage(emptyList(), null))
+    } ?: TapePage(emptyList(), null)
 
-    fun watch(base: String, token: String, mint: String) {
-        post(base, token, "/api/pump/watch", JSONObject().put("mint", mint).toString())
+    suspend fun watch(base: String, token: String, mint: String) {
+        withContext(Dispatchers.IO) {
+            post(base, token, "/api/pump/watch", JSONObject().put("mint", mint).toString())
+        }
     }
 
-    fun prepare(base: String, token: String, wallet: String, mint: String, solLamports: String, live: Boolean): PreparedBuy? = runCatching {
+    suspend fun prepare(base: String, token: String, wallet: String, mint: String, solLamports: String, live: Boolean): PreparedBuy? = offMain {
         val body = JSONObject()
             .put("wallet", wallet)
             .put("mint", mint)
@@ -101,7 +106,18 @@ class PumpApi(private val http: OkHttpClient = OkHttpClient.Builder().callTimeou
             feePayer = intent.optString("feePayer", wallet),
             simulationOk = if (sim == null) null else sim.optBoolean("ok")
         )
-    }.getOrNull()
+    }
+
+    /** Null on a transport or HTTP failure. Cancellation still cancels the caller. */
+    private suspend fun <T> offMain(block: () -> T): T? = withContext(Dispatchers.IO) {
+        try {
+            block()
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun openCurveSocket(base: String, token: String, mint: String, onText: (String) -> Unit): WebSocket {
         val wsBase = base.trimEnd('/').replaceFirst(Regex("^http"), "ws")

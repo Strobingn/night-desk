@@ -28,6 +28,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.math.BigInteger
 import java.net.HttpURLConnection
 import java.net.URL
@@ -96,7 +97,9 @@ class SniperApproveActivity : ComponentActivity() {
                 return@launch
             }
             signed = true
-            val acked = ack(intent.getStringExtra(EXTRA_URL).orEmpty(), intent.getStringExtra(EXTRA_TOKEN).orEmpty(), mint)
+            val acked = withContext(Dispatchers.IO) {
+                ack(intent.getStringExtra(EXTRA_URL).orEmpty(), intent.getStringExtra(EXTRA_TOKEN).orEmpty(), mint)
+            }
             status = if (acked) "Signed. The desk will not build another buy for this graduation." else "Signed. The desk ack did not land; do not arm it again."
             busy = false
         }

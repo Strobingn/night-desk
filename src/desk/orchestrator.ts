@@ -1583,32 +1583,42 @@ export class Desk {
     const resolved = await resolveCoinMint(parsed, this.lookupFetch);
     if (!resolved.ok) return { ok: false, error: resolved.error, code: "LOOKUP_FAILED", platform: parsed.platform };
     const mint = resolved.mint;
-    let token: CandidateToken;
-    try {
-      token = await enrichSighting(
-        { mint, source: "raydium", observedAt: Date.now() },
-        { rpcUrl: this.config.rpcUrl || undefined, rugcheckUrl: this.config.rugcheckUrl, fetchImpl: this.lookupFetch, holderPagesMax: 0 }
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: `Could not read that coin (${message}). Buy is off.`, code: "LOOKUP_FAILED", platform: parsed.platform, mint };
-    }
-    let priceSource: "dexscreener" | "jupiter" | "chain" = "dexscreener";
+    // Dex and Jupiter are raced. A stuck public-RPC or Rugcheck call must not hold the
+    // phone until OkHttp prints "timeout". Chain checks get a short leftover budget.
+    const priced = await lookupPriceFeeds(
+      enrichSighting({ mint, source: "raydium", observedAt: Date.now() }, { fetchImpl: this.lookupFetch, holderPagesMax: 0 }).catch(() => null),
+      jupiterLookupQuote(mint, 0, this.lookupFetch),
+      LOOKUP_PRICE_MS
+    );
+    let token = priced.token ?? blankLookupToken(mint);
+    let priceSource: "dexscreener" | "jupiter" | "chain" = token.priceFeed === "jupiter" ? "jupiter" : "dexscreener";
     let curveWhy: string | null = null;
-    if (token.priceFeed !== "dexscreener" || !(token.liquidityUsd > 0)) {
-      // Pump curve coins: DexScreener shows a price but no pool depth. Jupiter (the same feed
-      // the desk marks held coins with) gives both. Fail closed when the two disagree.
-      const fallback = await jupiterLookupQuote(mint, token.priceFeed === "dexscreener" ? token.priceUsd : 0, this.lookupFetch);
+    let providerNote: string | undefined;
+    const dexPriced = token.priceFeed === "dexscreener" && token.priceUsd > 0 && token.liquidityUsd > 0;
+    if (!dexPriced) {
+      const dexPrice = token.priceFeed === "dexscreener" ? token.priceUsd : 0;
+      const fallback = priced.jup.ok ? priced.jup : dexPrice > 0 ? await takeFirst(jupiterLookupQuote(mint, dexPrice, this.lookupFetch), 1_000, priced.jup) : priced.jup;
       if (fallback.ok) {
+        if (dexPrice > 0 && Math.abs(fallback.priceUsd / dexPrice - 1) > LOOKUP_PRICE_AGREEMENT) {
+          return {
+            ok: false,
+            error: `Prices disagree (DexScreener ${dexPrice.toPrecision(4)} vs Jupiter ${fallback.priceUsd.toPrecision(4)}). No reliable price, so Buy is off.`,
+            code: "PRICE_UNAVAILABLE",
+            platform: parsed.platform,
+            mint
+          };
+        }
         token.priceUsd = fallback.priceUsd;
         token.liquidityUsd = fallback.liquidityUsd;
         token.priceFeed = "jupiter";
         priceSource = "jupiter";
       } else if (fallback.error) {
-        return { ok: false, error: fallback.error, code: "PRICE_UNAVAILABLE", platform: parsed.platform, mint };
+        return { ok: false, error: fallback.error, code: "PRICE_UNAVAILABLE", platform: parsed.platform, mint, providerNote: "Tap Look up to try again. Nothing was bought." };
       } else if (!(token.priceUsd > 0) || !(token.liquidityUsd > 0)) {
-        // v13.6: a brand-new pump.fun coin: price it from its bonding curve on-chain.
-        const curve = await this.curvePrice(mint);
+        const curve = await takeFirst(this.curvePrice(mint), LOOKUP_CURVE_MS, {
+          ok: false as const,
+          reason: "the public RPC did not answer inside the lookup budget"
+        });
         if (curve.ok) {
           token.priceUsd = curve.priceUsd;
           token.liquidityUsd = curve.liquidityUsd;
@@ -1627,8 +1637,35 @@ export class Desk {
         error: `No reliable price for ${token.symbol || mint.slice(0, 6)}. Tried DexScreener (no priced pool with depth), Jupiter (no quote) and the pump.fun bonding curve on-chain (${curveWhy ?? "not readable"}). Buy is off.`,
         code: "PRICE_UNAVAILABLE",
         platform: parsed.platform,
-        mint
+        mint,
+        providerNote: "Tap Look up to try again. Nothing was bought."
       };
+    }
+    if (this.config.rpcUrl || this.config.rugcheckUrl) {
+      const chain = await takeFirst(
+        enrichSighting(
+          { mint, source: token.source === "pumpfun" ? "pumpfun" : "raydium", observedAt: Date.now(), symbol: token.symbol, name: token.name },
+          { rpcUrl: this.config.rpcUrl || undefined, rugcheckUrl: this.config.rugcheckUrl || undefined, fetchImpl: this.lookupFetch, holderPagesMax: 0 }
+        ),
+        LOOKUP_CHAIN_MS,
+        null
+      );
+      if (chain) {
+        token.mintAuthorityRevoked = chain.mintAuthorityRevoked;
+        token.top10HolderPct = chain.top10HolderPct;
+        token.holderCount = chain.holderCount;
+        token.lpLockedOrBurned = chain.lpLockedOrBurned;
+        token.lpLockPct = chain.lpLockPct;
+        token.devWallet = token.devWallet ?? chain.devWallet;
+        token.devHoldingPct = chain.devHoldingPct;
+        token.devRug = chain.devRug;
+        token.decimals = token.decimals ?? chain.decimals;
+        token.onBondingCurve = chain.onBondingCurve;
+        if (chain.symbol && token.symbol === mint.slice(0, 4)) token.symbol = chain.symbol;
+        if (chain.name && token.name === mint.slice(0, 6)) token.name = chain.name;
+      } else {
+        providerNote = "Price is in from DexScreener or Jupiter. The public RPC or Rugcheck did not answer in time, so mint authority is unverified and the hard kill stays on. Tap Look up to try again.";
+      }
     }
     this.lookups.set(mint, { at: Date.now(), platform: parsed.platform, token: { ...token, social: { ...token.social } } });
     if (this.lookups.size > 200) {
@@ -1699,7 +1736,8 @@ export class Desk {
       held,
       watching: this.watchlist.some((item) => item.mint === mint),
       canBuy: blocked == null,
-      buyBlockedReason: blocked ?? (cooldownUntil > Date.now() ? `Hard-stop cooldown for ${Math.ceil((cooldownUntil - Date.now()) / 60_000)} more minutes. Buy anyway overrides it.` : null)
+      buyBlockedReason: blocked ?? (cooldownUntil > Date.now() ? `Hard-stop cooldown for ${Math.ceil((cooldownUntil - Date.now()) / 60_000)} more minutes. Buy anyway overrides it.` : null),
+      providerNote
     };
   }
 
@@ -4097,6 +4135,102 @@ export type { CoinLookup, CoinLookupError } from "../types.js";
 
 /** Max gap between DexScreener's curve price and Jupiter's before a lookup refuses to price. */
 export const LOOKUP_PRICE_AGREEMENT = 0.25;
+
+/** Search must answer before the phone's lookup client gives up and prints "timeout". */
+const LOOKUP_PRICE_MS = 3_500;
+const LOOKUP_CHAIN_MS = 2_000;
+const LOOKUP_CURVE_MS = 1_500;
+
+function blankLookupToken(mint: string): CandidateToken {
+  return {
+    mint,
+    symbol: mint.slice(0, 4),
+    name: mint.slice(0, 6),
+    source: "raydium",
+    discoveredAt: Date.now(),
+    priceUsd: 0,
+    liquidityUsd: 0,
+    volume1hUsd: 0,
+    ageSeconds: 0,
+    mintAuthorityRevoked: null,
+    lpLockedOrBurned: null,
+    top10HolderPct: null,
+    holderCount: null,
+    devWallet: null,
+    social: { mentions1h: 0, hasWebsite: false, hasTelegram: false, hasTwitter: false }
+  };
+}
+
+/** Resolve with `fallback` when `work` is still pending. A late result is ignored. */
+function takeFirst<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => done(fallback), ms);
+    work.then(
+      (value) => done(value),
+      () => done(fallback)
+    );
+  });
+}
+
+/**
+ * Dex with price and depth wins immediately. Otherwise wait until Jupiter has also
+ * settled, or until `ms`. A hung provider does not hold the other one.
+ */
+async function lookupPriceFeeds(
+  dex: Promise<CandidateToken | null>,
+  jup: Promise<{ ok: true; priceUsd: number; liquidityUsd: number } | { ok: false; error?: string }>,
+  ms: number
+): Promise<{ token: CandidateToken | null; jup: { ok: true; priceUsd: number; liquidityUsd: number } | { ok: false; error?: string } }> {
+  return new Promise((resolve) => {
+    let token: CandidateToken | null | undefined;
+    let quote: { ok: true; priceUsd: number; liquidityUsd: number } | { ok: false; error?: string } | undefined;
+    let done = false;
+    const finish = (force: boolean) => {
+      if (done) return;
+      const dexReady = !!token && token.priceFeed === "dexscreener" && token.priceUsd > 0 && token.liquidityUsd > 0;
+      const jupReady = !!quote?.ok;
+      if (!force && !dexReady && !(token !== undefined && quote !== undefined) && !(jupReady && token !== undefined)) return;
+      if (!force && jupReady && token === undefined) return;
+      done = true;
+      clearTimeout(timer);
+      clearTimeout(jupGrace);
+      resolve({ token: token ?? null, jup: quote ?? { ok: false } });
+    };
+    const timer = setTimeout(() => finish(true), ms);
+    // Jupiter answered and Dex is still queued: don't wait out the whole budget.
+    const jupGrace = setTimeout(() => {
+      if (quote?.ok) finish(true);
+    }, Math.min(1_500, ms));
+    dex.then(
+      (value) => {
+        token = value;
+        finish(false);
+      },
+      () => {
+        token = null;
+        finish(false);
+      }
+    );
+    jup.then(
+      (value) => {
+        quote = value;
+        finish(false);
+      },
+      () => {
+        quote = { ok: false };
+        finish(false);
+      }
+    );
+    void jupGrace;
+  });
+}
 
 /**
  * Jupiter price + liquidity for one mint. ok=false with no error means "Jupiter has nothing",

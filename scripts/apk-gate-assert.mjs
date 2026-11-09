@@ -34,6 +34,8 @@ if (swaps.length !== 1) problems.push(`expected 1 hung mock swap, saw ${swaps.le
 if (!seekLookup) problems.push("no SEEK search lookup");
 if (seekBuys.length < 1) problems.push("search paper buy missing");
 if (seekSells.length < 1) problems.push("search paper sell missing");
+const watches = http.filter((row) => row.method === "POST" && (row.url || "").startsWith("/api/pump/watch")).map(bodyOf).filter(Boolean);
+if (!watches.some((row) => row.mint === SEEK)) problems.push("pump watch did not post the mint");
 if (seekBuys.some((b) => b.book !== "paper")) problems.push("search buy was not paper");
 if (live.length >= 3) {
   const [first, second, third] = live;

@@ -177,6 +177,7 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
         } else if (found != null && !found.ok) {
             Text(found.error ?: "Lookup failed. No buy without a reliable price.", color = Coral, fontSize = 14.sp)
             found.providerNote?.let { Text(it, color = Amber, fontSize = 12.sp) }
+            TextButton(onClick = { lookup(input) }, enabled = !looking) { Text(if (looking) "Looking" else "Try again", color = Sky) }
         }
         if (found != null && found.ok) {
             Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -142,10 +142,16 @@ fun OneTapBar(
                 }
             }
         }
-        if (ui.live) {
+        if (ui.live && ui.split) {
             Text(
-                "Live size ${fmtUsd(ui.tapUsd)} per trade · trail ${fmt(ui.liveTrailPct * 100)}% · stop −${"%.0f".format(Locale.US, ui.stopPct * 100)}%. Change it in Settings → Live wallet." +
-                    (if (ui.split && !ui.aiLive) " AI: paper." else ""),
+                com.dirk.nightdesk.OneTap.splitSizeLine(ui.tapUsd, ui.liveTapUsd, ui.liveTrailPct, ui.stopPct, ui.aiLive),
+                color = P.ink,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        } else if (ui.live) {
+            Text(
+                "Live size ${fmtUsd(ui.tapUsd)} per trade · trail ${fmt(ui.liveTrailPct * 100)}% · stop −${"%.0f".format(Locale.US, ui.stopPct * 100)}%. Change it in Settings → Live wallet.",
                 color = P.ink,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold
@@ -195,7 +201,11 @@ fun OneTapBar(
             )
         }
         Text(
-            (if (ui.live && !ui.split) "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC." else "One tap buys ${fmtUsd(ui.tapUsd)} now (" + com.dirk.nightdesk.OneTap.capHint(ui.capLine, ui.capUsd, ui.tapUsd) + ").") + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
+            (when {
+                ui.live && ui.split -> com.dirk.nightdesk.OneTap.splitBuyLine(ui.tapUsd, ui.liveTapUsd, com.dirk.nightdesk.OneTap.capHint(ui.capLine, ui.capUsd, ui.tapUsd))
+                ui.live -> "LIVE: one tap is a real buy of ${fmtUsd(ui.tapUsd)} USDC."
+                else -> "One tap buys ${fmtUsd(ui.tapUsd)} now (" + com.dirk.nightdesk.OneTap.capHint(ui.capLine, ui.capUsd, ui.tapUsd) + ")."
+            }) + " No dialog, but slippage (${fmt(slip.toDouble())}%), pool depth, crash guard, hard kills and the −${"%.0f".format(Locale.US, ui.stopPct * 100)}% stop still apply. A stop cannot prevent a gap.",
             color = P.dim,
             fontSize = 11.5.sp,
             lineHeight = 15.sp

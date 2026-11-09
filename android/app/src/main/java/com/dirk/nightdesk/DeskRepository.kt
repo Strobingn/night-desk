@@ -123,6 +123,12 @@ class DeskRepository private constructor(private val context: Context) {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+    /** Search must fail with a sentence, not sit on the 12s paper-buy client until OkHttp says "timeout". */
+    private val lookupHttp = OkHttpClient.Builder()
+        .callTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .build()
 
     private val _snapshot = MutableStateFlow<DeskSnapshot?>(null)
     val snapshot: StateFlow<DeskSnapshot?> = _snapshot
@@ -414,9 +420,16 @@ class DeskRepository private constructor(private val context: Context) {
         val base = link.baseUrl
         if (base.isBlank()) return@withContext CoinLookup(ok = false, error = "No desk URL", code = "LOOKUP_FAILED")
         val query = URLEncoder.encode(q.trim(), Charsets.UTF_8.name())
-        sendRaw("$base/api/lookup?q=$query", null).fold(
+        sendRaw("$base/api/lookup?q=$query", null, lookupHttp).fold(
             onSuccess = { (_, raw) -> parseLookup(raw) },
-            onFailure = { err -> CoinLookup(ok = false, error = err.message ?: "Lookup failed.", code = "LOOKUP_FAILED") }
+            onFailure = { err ->
+                val timedOut = err is InterruptedIOException || (err.message ?: "").contains("timeout", ignoreCase = true)
+                CoinLookup(
+                    ok = false,
+                    error = if (timedOut) "Lookup did not finish in time. Tap Try again. Nothing was bought." else (err.message ?: "Lookup failed."),
+                    code = "LOOKUP_FAILED"
+                )
+            }
         )
     }
 

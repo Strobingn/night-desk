@@ -690,7 +690,7 @@ private fun BookScreen(
         item { HeroCard(snap, openPnl) }
         if (orders != null) item { OrdersCard(orders) }
         item { WalletCard(snap) }
-        item { LiveReadyCard(snap?.readiness, onReady) }
+        item { LiveReadyCard(snap, onReady) }
         item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
         if (snap?.mode != "live" || liveBook != null) {
             item { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
@@ -812,18 +812,24 @@ private fun RecapCard(desk: DeskRepository) {
 }
 
 @Composable
-private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit) {
+private fun LiveReadyCard(snap: DeskSnapshot?, onReady: (Boolean) -> Unit) {
+    val readiness = snap?.readiness
     Column(Modifier.fillMaxWidth().background(P.card, RoundedCornerShape(18.dp)).padding(16.dp)) {
         Text("LIVE READY", color = Lime, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.4.sp)
-        Text(if (readiness?.mode == "live") "LIVE" else "STILL PAPER", color = Ink, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(8.dp))
-        if (readiness == null || readiness.lines.isEmpty()) {
-            Text("Waiting for the desk checklist.", color = Dim, fontSize = 13.sp)
-        } else {
-            readiness.lines.forEach { line ->
-                Text(line, color = Ink, fontSize = 13.sp, modifier = Modifier.padding(bottom = 4.dp))
-            }
-        }
+        Text(
+            if (readiness == null) "Waiting for the desk checklist."
+            else com.dirk.nightdesk.OneTap.liveStatusChip(
+                readiness.mode,
+                readiness.operatorReady,
+                snap.liveBook?.tradeUsd ?: snap.liveTradeUsd,
+                snap.liveBook?.dailyCapUsd ?: snap.liveDailyCapUsd,
+                snap.wallet?.solBalance
+            ),
+            color = Ink,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+            lineHeight = 18.sp
+        )
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Text("Mark checklist ready", color = Ink, modifier = Modifier.weight(1f), fontSize = 14.sp)
             Switch(
@@ -833,11 +839,7 @@ private fun LiveReadyCard(readiness: LiveReadiness?, onReady: (Boolean) -> Unit)
                 colors = SwitchDefaults.colors(checkedTrackColor = Lime, checkedThumbColor = OnAccent)
             )
         }
-        Text(
-            "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY on the desk host. Night Desk has no wallet vault.",
-            color = Dim,
-            fontSize = 12.sp
-        )
+        Text("Does not turn LIVE_TRADING on or store a key.", color = Dim, fontSize = 12.sp)
     }
 }
 
