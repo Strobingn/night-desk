@@ -86,7 +86,9 @@ class NativePaperGateTest {
         waitFor("Sold GATE")
         dismissNotice()
 
-        tap("Buy…")
+        // FRESH stays on the tape with its own Buy…. The dialog has to open from GATE.
+        scrollUntil("GATE")
+        tapBelow("GATE", "Buy…")
         waitFor("This Buy fills the paper book")
         tapRightmost("Buy")
         waitFor("(paper)")
