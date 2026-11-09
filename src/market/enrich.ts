@@ -19,6 +19,11 @@ export interface EnrichDeps {
   dasGapMs?: number;
   /** v12.1: batched DexScreener lookup. When absent, one /latest/dex/tokens call per mint. */
   dexLookup?: (mint: string) => Promise<unknown | null>;
+  /**
+   * Lookup only. Fired when mint authority (and again when Rugcheck) is known,
+   * before DexScreener or holder reads finish.
+   */
+  onChain?: (token: CandidateToken) => void;
 }
 
 const DAS_PAGE = 1_000;
@@ -66,18 +71,53 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   // Dex, the mint account, and RugCheck do not depend on each other.
   // Holder accounts still wait on mint supply, then on the largest-account addresses.
   // A thin 1h volume does not skip mint, holders, or rug checks — Filter still needs those kill reasons.
+  // Mint authority is published as soon as getAccountInfo returns. Lookup's short chain
+  // budget must not throw that away because Dex or the holder reads are still running.
   const rugUrl = deps.rugcheckUrl
     ? `${deps.rugcheckUrl.replace(/\/$/, "")}/tokens/${raw.mint}/report`
     : null;
-  const [dex, mintInfo, report] = await Promise.all([
-    deps.dexLookup
-      ? deps.dexLookup(raw.mint).catch(() => null)
-      : fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`),
-    deps.rpcUrl
-      ? rpc(fetchImpl, deps.rpcUrl, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }])
-      : Promise.resolve(null),
-    rugUrl ? fetchJson(fetchImpl, rugUrl) : Promise.resolve(null)
-  ]);
+  const dexTask = deps.dexLookup
+    ? deps.dexLookup(raw.mint).catch(() => null)
+    : fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`);
+  const mintTask = deps.rpcUrl
+    ? rpc(fetchImpl, deps.rpcUrl, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }])
+    : Promise.resolve(null);
+  const rugTask = rugUrl ? fetchJson(fetchImpl, rugUrl) : Promise.resolve(null);
+  const publishChain = () => {
+    deps.onChain?.({ ...token, social: { ...token.social } });
+  };
+
+  const mintInfo = await mintTask;
+  const mint = parseMintAccount(mintInfo);
+  if (deps.rpcUrl) {
+    if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
+    if (mint.decimals != null) token.decimals = mint.decimals;
+    if (mint.mintAuthorityRevoked != null || mint.decimals != null) publishChain();
+  }
+
+  let riskText = "";
+  const dex = await Promise.all([
+    dexTask,
+    rugTask.then((report) => {
+      if (!report) return;
+      const rug = parseRugcheckReport(report, raw.mint);
+      riskText = rug.riskText;
+      if (token.mintAuthorityRevoked == null && rug.mintAuthorityRevoked != null) {
+        token.mintAuthorityRevoked = rug.mintAuthorityRevoked;
+      }
+      if (rug.lpLockedOrBurned != null) token.lpLockedOrBurned = rug.lpLockedOrBurned;
+      if (rug.lpLockPct != null) token.lpLockPct = rug.lpLockPct;
+      // Believe the more concentrated read. A source that dropped a reserve must not lower the chain figure.
+      if (rug.top10HolderPct != null) {
+        token.top10HolderPct =
+          token.top10HolderPct == null ? rug.top10HolderPct : Math.max(token.top10HolderPct, rug.top10HolderPct);
+      }
+      if (!token.devWallet && rug.devWallet) token.devWallet = rug.devWallet;
+      if (rug.devHoldingPct != null) token.devHoldingPct = rug.devHoldingPct;
+      if (rug.devRug) token.devRug = rug.devRug;
+      publishChain();
+    })
+  ]).then(([body]) => body);
 
   const parsed = dex ? parseDexPair(dex, raw.mint) : null;
   if (parsed && parsed.priceUsd > 0) {
@@ -115,11 +155,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     if (token.priceUsd > 0) token.priceFeed = raw.priceFeed ?? "listing";
   }
 
-  let riskText = "";
   if (deps.rpcUrl) {
-    const mint = parseMintAccount(mintInfo);
-    if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
-    if (mint.decimals != null) token.decimals = mint.decimals;
     const reserves = new Set([...pumpReserveAddresses(raw.mint), ...RESERVE_OWNER_SET]);
     const exclude = { addresses: reserves, owners: RESERVE_OWNER_SET };
     const rpcUrl = deps.rpcUrl;
@@ -153,26 +189,12 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
       }
     }
     if (!holders) holders = await readLargest();
-    if (holders.top10HolderPct != null) token.top10HolderPct = holders.top10HolderPct;
-    if (holders.holderCount != null) token.holderCount = holders.holderCount;
-  }
-
-  if (report) {
-    const rug = parseRugcheckReport(report, raw.mint);
-    riskText = rug.riskText;
-    if (token.mintAuthorityRevoked == null && rug.mintAuthorityRevoked != null) {
-      token.mintAuthorityRevoked = rug.mintAuthorityRevoked;
-    }
-    if (rug.lpLockedOrBurned != null) token.lpLockedOrBurned = rug.lpLockedOrBurned;
-    if (rug.lpLockPct != null) token.lpLockPct = rug.lpLockPct;
-    // Believe the more concentrated read. A source that dropped a reserve must not lower the chain figure.
-    if (rug.top10HolderPct != null) {
+    // Rugcheck may already have the higher figure. A later holder read must not lower it.
+    if (holders.top10HolderPct != null) {
       token.top10HolderPct =
-        token.top10HolderPct == null ? rug.top10HolderPct : Math.max(token.top10HolderPct, rug.top10HolderPct);
+        token.top10HolderPct == null ? holders.top10HolderPct : Math.max(token.top10HolderPct, holders.top10HolderPct);
     }
-    if (!token.devWallet && rug.devWallet) token.devWallet = rug.devWallet;
-    if (rug.devHoldingPct != null) token.devHoldingPct = rug.devHoldingPct;
-    if (rug.devRug) token.devRug = rug.devRug;
+    if (holders.holderCount != null) token.holderCount = holders.holderCount;
   }
 
   token.onBondingCurve = inferOnBondingCurve({ source: token.source, dex: token.dex, riskText });

@@ -518,4 +518,114 @@ describe("v13.19 search lookup budget", () => {
       desk.stop();
     }
   });
+
+  it("prices a curve coin from chain before the phone timeout when Jupiter hangs", async () => {
+    const curve = pumpCurveAddress(MINT)!;
+    let tokenQuotes = 0;
+    const lookupFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/latest/dex/tokens/")) {
+        return Response.json({
+          pairs: [{
+            chainId: "solana",
+            dexId: "pumpfun",
+            pairAddress: curve,
+            priceUsd: "0.0000045",
+            liquidity: { usd: 0 },
+            volume: { h1: 0 },
+            pairCreatedAt: Date.now() - 60_000,
+            baseToken: { address: MINT, symbol: "CURVE", name: "Curve Coin" },
+            quoteToken: { address: WSOL_MINT }
+          }]
+        });
+      }
+      if (url.includes("jup.ag")) {
+        const ids = new URL(url).searchParams.get("ids") ?? "";
+        if (ids.includes(MINT)) {
+          tokenQuotes += 1;
+          return new Promise(() => {
+            /* the token quote never answers */
+          });
+        }
+        return Response.json({ [WSOL_MINT]: { usdPrice: 150 } });
+      }
+      return new Promise(() => {});
+    }) as unknown as typeof fetch;
+    const chainFetch = rpcFrom(() => ({
+      [curve]: { owner: PUMP_PROGRAM, data: curveData(1_000_000_000_000_000n, 30_000_000_000n) },
+      [MINT]: { owner: TOKENKEG, data: mintData(6) }
+    }));
+    const desk = new Desk(testConfig({ rpcUrl: "", rugcheckUrl: "" }), { lookupFetch, chainFetch });
+    try {
+      const started = Date.now();
+      const found = await desk.lookupCoin(MINT);
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(tokenQuotes).toBe(1);
+      expect(found.ok).toBe(true);
+      if (!found.ok) return;
+      expect(found.priceSource).toBe("chain");
+      expect(found.priceUsd).toBeGreaterThan(0);
+      expect(found.symbol).toBe("CURVE");
+      expect(JSON.stringify(found)).not.toMatch(/timeout/i);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("keeps a revoked mint authority when the second Dex fetch and holder reads hang", async () => {
+    let dexCalls = 0;
+    const lookupFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/latest/dex/tokens/")) {
+        dexCalls += 1;
+        if (dexCalls === 1) {
+          return Response.json({
+            pairs: [{
+              chainId: "solana",
+              dexId: "pumpswap",
+              pairAddress: POOL,
+              priceUsd: "0.037",
+              liquidity: { usd: 125_000 },
+              volume: { h1: 34_000 },
+              pairCreatedAt: Date.now() - 3_600_000,
+              baseToken: { address: MINT, symbol: "AUTH", name: "Auth Coin" },
+              quoteToken: { address: WSOL_MINT }
+            }]
+          });
+        }
+        return new Promise(() => {
+          /* the chain pass's Dex fetch stays queued */
+        });
+      }
+      if (url.includes("rugcheck") || url.includes("jup.ag")) return new Promise(() => {});
+      const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
+      if (body.method === "getAccountInfo") {
+        return Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { value: { data: { parsed: { info: { mintAuthority: null, supply: "1000000000000", decimals: 6 } } } } }
+        });
+      }
+      return new Promise(() => {
+        /* getTokenLargestAccounts never answers */
+      });
+    }) as unknown as typeof fetch;
+    const desk = new Desk(
+      testConfig({ rpcUrl: "https://api.mainnet-beta.solana.com", rugcheckUrl: "https://api.rugcheck.xyz/v1" }),
+      { lookupFetch }
+    );
+    try {
+      const started = Date.now();
+      const found = await desk.lookupCoin(MINT);
+      expect(Date.now() - started).toBeLessThan(4_500);
+      expect(found.ok).toBe(true);
+      if (!found.ok) return;
+      expect(found.symbol).toBe("AUTH");
+      expect(found.checks.find((check) => check.code === "MINT_AUTHORITY_ACTIVE")?.pass).toBe(true);
+      expect(found.hardKills.some((kill) => kill.code === "MINT_AUTHORITY_ACTIVE")).toBe(false);
+      expect(found.providerNote ?? "").not.toMatch(/did not answer/i);
+    } finally {
+      desk.stop();
+    }
+  });
 });
