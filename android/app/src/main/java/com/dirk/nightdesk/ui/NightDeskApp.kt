@@ -140,7 +140,7 @@ private fun stageColor(stage: String): Color = when (stage) {
 }
 
 @Composable
-private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null, orders: OrderActions? = null) {
+private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit, onBuy: () -> Unit, oneTap: OneTapUi? = null, orders: OrderActions? = null, safety: String = "", bundle: String = "") {
     // v13.11 limit buy ticket on this card.
     var limitOpen by remember(coin.mint) { mutableStateOf(orders?.openFor?.let { it.first == coin.mint && it.second == "limit_buy" } == true) }
     var liveOrderOpen by remember(coin.mint) { mutableStateOf(false) }
@@ -189,6 +189,14 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                         } else if (top) {
                             Spacer(Modifier.width(4.dp))
                             Chip("VOL #$rank", P.accent, P.accent.copy(alpha = 0.2f), size = 11)
+                        }
+                        if (safety.isNotBlank()) {
+                            Spacer(Modifier.width(4.dp))
+                            Chip(safety, if (safety.startsWith("Blocked")) P.down else P.dim, P.card3, bold = false, size = 10)
+                        }
+                        if (bundle.isNotBlank()) {
+                            Spacer(Modifier.width(4.dp))
+                            Chip(bundle, P.amber, P.amber.copy(alpha = 0.16f), bold = false, size = 10)
                         }
                     }
                 }
@@ -499,7 +507,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     mode = snap?.mode ?: "paper",
                     liveScope = snap?.liveScope,
                     tapeQuotes = snap?.tapeQuotes.orEmpty(),
-                    tapeOrders = orderActions
+                    tapeOrders = orderActions,
+                    safetyChips = snap?.safetyChips.orEmpty()
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
@@ -1123,6 +1132,15 @@ private fun OpenPositionCard(
                     if (pos.live) Chip("LIVE", P.onDown, P.down, size = 10)
                     else if (oneTap != null) BookTag(live = false)
                 }
+                if (pos.safetyChip.isNotBlank() || pos.bundleChip.isNotBlank()) {
+                    Text(
+                        listOf(pos.safetyChip, pos.bundleChip).filter { it.isNotBlank() }.joinToString(" · "),
+                        color = if (pos.safetyChip.startsWith("Blocked")) P.down else P.dim,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 if (expanded) {
                     val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1131,7 +1149,7 @@ private fun OpenPositionCard(
                         Spacer(Modifier.width(6.dp))
                         Text("score ${num(pos.score, "%.2f")}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
+                        if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
                 }
             }
             Column(horizontalAlignment = Alignment.End) {
@@ -1351,7 +1369,8 @@ private fun TapeScreen(
     mode: String = "paper",
     liveScope: String? = null,
     tapeQuotes: Map<String, com.dirk.nightdesk.TapeQuote> = emptyMap(),
-    tapeOrders: OrderActions? = null
+    tapeOrders: OrderActions? = null,
+    safetyChips: List<com.dirk.nightdesk.SafetyChip> = emptyList()
 ) {
     var stage by remember { mutableStateOf("all") }
     var tapeView by rememberSaveable { mutableStateOf("coins") }
@@ -1588,7 +1607,9 @@ private fun TapeScreen(
                             askBuy = true
                         },
                         oneTap = oneTap,
-                        orders = tapeOrders
+                        orders = tapeOrders,
+                        safety = safetyChips.find { it.mint == coin.mint }?.safety ?: "",
+                        bundle = safetyChips.find { it.mint == coin.mint }?.bundle ?: ""
                     )
                 }
             }
@@ -2121,7 +2142,8 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                         mode = snap.mode,
                         liveScope = snap.liveScope,
                         tapeQuotes = snap.tapeQuotes,
-                        tapeOrders = previewOrders
+                        tapeOrders = previewOrders,
+                        safetyChips = snap.safetyChips
                     )
                     2 -> if (addPreview != null) {
                         AddCoinScreen(com.dirk.nightdesk.DeskRepository.get(LocalContext.current), snap, null, oneTap, preview = addPreview)

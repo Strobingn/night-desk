@@ -463,7 +463,8 @@ export const ALLOWED_SETTINGS: ReadonlySet<string> = new Set([
   "pnlAlertPct",
   "positionSizeUsd",
   "maxExposurePct",
-  "paperResetUsd"
+  "paperResetUsd",
+  "senderTipSol"
 ]);
 
 /** 25, 50, 100 (percent) or 0.25, 0.5, 1 (fraction). Omitted = 100%. */

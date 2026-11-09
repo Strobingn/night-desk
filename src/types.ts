@@ -330,6 +330,10 @@ export interface PositionView {
   entrySlippage?: number | null;
   /** Recent marks for the card sparkline. Only points taken while the coin was held. */
   marks?: MarkPoint[];
+  /** v13.23 "Safe", "Blocked: …", or "Unknown". */
+  safetyChip?: string;
+  /** v13.23 "Bundled 24%" when the creation slot is flagged. */
+  bundleChip?: string | null;
 }
 
 export interface MarkPoint {
@@ -506,6 +510,8 @@ export interface DeskPrefs {
   liveTrailPct?: number;
   /** v13.7 AI auto-buys go live too (default false). */
   liveAutoBuy?: boolean;
+  /** v13.23 Helius Sender tip in SOL. Default 0.000005. Paper trades do not tip. */
+  senderTipSol?: number;
 }
 
 /** v12 GET /api/lookup result. */
@@ -540,6 +546,10 @@ export interface CoinLookup {
   watching: boolean;
   canBuy: boolean;
   buyBlockedReason: string | null;
+  /** v13.23 "Safe", "Blocked: …", or "Unknown". */
+  safetyChip?: string;
+  /** v13.23 "Bundled 24%" when flagged. Null when the coin is not a flagged bundle. */
+  bundleChip?: string | null;
   /** v13.6 set when a ticker/name resolved to this coin, e.g. "QTFALCN · held / traded". */
   matchedBy?: string;
   /** v13.17 DexScreener search failed, was rate limited, or the list is cached (up to 60s). */
@@ -696,6 +706,8 @@ export interface DeskSnapshot {
   };
   /** v12. Last crash the phone reported (POST /api/client-crash). */
   lastClientCrash: { at: number; version: string; brief: string } | null;
+  /** v13.23 safety and bundle chips for coins that have been checked. */
+  safetyChips?: Array<{ mint: string; safety: string; bundle?: string }>;
 }
 
 /** v13.2 WS "marks" message: position cards only, a few hundred bytes. */
@@ -723,6 +735,8 @@ export interface MarksDelta {
     netPnlPct?: number | null;
     exitSlippage?: number | null;
     marks?: MarkPoint[];
+    safetyChip?: string;
+    bundleChip?: string | null;
   }>;
 }
 

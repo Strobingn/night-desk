@@ -88,7 +88,9 @@ private data class Draft(
     val useLiveCap: Boolean = false,
     val liveTrail: Float = 1f,
     /** v13.7 AI auto-buys go live too. Off = Live: manual only · AI: paper. */
-    val liveAutoBuy: Boolean = false
+    val liveAutoBuy: Boolean = false,
+    /** v13.23 Sender tip in lamports. 5000 = 0.000005 SOL. */
+    val senderTipLamports: Float = 5000f
 )
 
 private fun draftOf(snap: DeskSnapshot?): Draft {
@@ -139,7 +141,8 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         liveCap = (snap?.liveDailyCapUsd ?: 50.0).toFloat().coerceIn(5f, 100_000f),
         useLiveCap = snap?.liveDailyCapUsd != null,
         liveTrail = ((snap?.liveTrailPct ?: 0.01) * 100.0).toFloat().coerceIn(0.5f, 20f),
-        liveAutoBuy = snap?.liveAutoBuy == true
+        liveAutoBuy = snap?.liveAutoBuy == true,
+        senderTipLamports = ((snap?.senderTipSol ?: 0.000005) * 1_000_000_000.0).toFloat().coerceIn(5000f, 10_000_000f)
     )
 }
 
@@ -214,6 +217,8 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
             Text("Off by default: no max per day.", color = Dim, fontSize = 12.sp)
             ExactSlider("Live trailing stop %", draft.liveTrail, 0.5f..20f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(liveTrail = it) }
             Text("Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first.", color = Dim, fontSize = 12.sp)
+            ExactSlider("Sender tip lamports", draft.senderTipLamports, 5000f..1_000_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(senderTipLamports = it) }
+            Text("Live swaps only. Minimum 5000 lamports (0.000005 SOL). Paper trades do not tip.", color = Dim, fontSize = 12.sp)
         }
         Group("Entry / Filter") {
             ExactSlider("1h volume $", draft.volume, 1_000f..500_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(volume = it) }
@@ -358,7 +363,8 @@ private fun payload(draft: Draft): Map<String, Any?> = mapOf(
     "positionRefreshMs" to Math.round(draft.refresh.toDouble() * 1_000.0),
     "liveTradeUsd" to draft.liveUsd.toDouble(),
     "liveDailyCapUsd" to if (draft.useLiveCap) draft.liveCap.toDouble() else null,
-    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0
+    "liveTrailPct" to Math.round(draft.liveTrail.toDouble() * 10.0) / 10.0,
+    "senderTipSol" to (draft.senderTipLamports.toDouble() / 1_000_000_000.0)
 )
 
 /** v13 group icons and one-line descriptions, same as the web. */

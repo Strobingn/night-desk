@@ -123,6 +123,8 @@ export function bucketFor(url: string): BucketSpec | null {
   if (host === "frontend-api-v3.pump.fun") return BY_ID.get("pumpapi")!;
   if (host === "launch-mint-v1.raydium.io") return BY_ID.get("launchlab")!;
   if (host === PUBLIC_SOLANA_RPC_HOST) return BY_ID.get("solana:public")!;
+  // Sender does not spend Helius credits and is not part of the 18/min cap.
+  if (host === "sender.helius-rpc.com" || host.endsWith("-sender.helius-rpc.com")) return null;
   if (host === "helius-rpc.com" || host.endsWith(".helius-rpc.com")) return BY_ID.get("helius")!;
   return null;
 }
@@ -139,6 +141,8 @@ export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined,
   const execId = execLaneId(spec.id);
   if (!execId) return spec;
   const pri = priority ?? 1;
+  // Safety and bundle reads share the existing read budget at the lowest priority.
+  if (pri === 2 && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
   if (pri !== 0) return BY_ID.get(execId)!;
   if (typeof body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(body) ?? "")) return BY_ID.get(execId)!;
   return spec;
@@ -148,6 +152,8 @@ const RPC_METHOD = /"method"\s*:\s*"([A-Za-z]+)"/;
 
 /** Background polls. Everything else on the public host, including getAccountInfo and getLatestBlockhash, uses the exec lane. */
 const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "getMultipleAccounts"]);
+/** Priority 2 only. Stays on the read lane so a mint check cannot take a swap slot. */
+const LOW_PRIORITY_READ = new Set(["getAccountInfo", "getMultipleAccounts", "getSignaturesForAddress", "getTransaction", "getBlock"]);
 
 export function rpcMethod(body: string): string | null {
   return RPC_METHOD.exec(body)?.[1] ?? null;

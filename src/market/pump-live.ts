@@ -40,6 +40,9 @@ export interface PumpLiveRequest {
   broadcast?: (raw: Uint8Array) => Promise<{ signature: string; err: unknown; state?: "confirmed" | "rejected" | "unknown" }>;
   /** Exec-lane fetch. Preparation and broadcast do not wait on the 9/min poll budget. */
   rpcFetch?: typeof fetch;
+  /** v13.23 Helius Sender tip for this live swap. Omitted in tests that inject broadcast. */
+  senderTipLamports?: number;
+  idemKey?: string;
 }
 
 async function defaultBroadcast(
@@ -53,7 +56,13 @@ async function defaultBroadcast(
     : new web3.Connection(rpcUrl, "confirmed");
   let signature: string;
   try {
-    signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 });
+    const { sendLiveTransaction } = await import("./helius-sender.js");
+    signature = await sendLiveTransaction({
+      idemKey: Buffer.from(raw).toString("base64").slice(0, 44),
+      raw,
+      fetchImpl: fetchImpl ?? fetch,
+      fallback: () => connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 })
+    });
   } catch (err) {
     if (isAmbiguousSendError(err)) return { signature: "", err, state: "unknown" };
     throw err;
@@ -117,6 +126,10 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   const sim = await connection.simulateTransaction(unsigned.tx);
   if (sim.err) throw new Error(`LIVE_SWAP_FAILED: simulation ${sim.err}. Nothing was sent.`);
   const tx = Transaction.from(Buffer.from(unsigned.base64, "base64"));
+  if (req.senderTipLamports != null && req.senderTipLamports > 0) {
+    const { addTipToLegacy } = await import("./helius-sender.js");
+    addTipToLegacy(tx, loaded.keypair.publicKey, req.senderTipLamports);
+  }
   tx.partialSign(loaded.keypair);
   if (!tx.signature) throw new Error("LIVE_SWAP_FAILED: transaction was not signed. Nothing was sent.");
   const raw = tx.serialize();

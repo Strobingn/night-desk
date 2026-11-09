@@ -45,7 +45,11 @@ data class PositionRow(
     val netPnlUsd: Double? = null,
     val netPnlPct: Double? = null,
     val exitSlippage: Double? = null,
-    val marks: List<PricePoint> = emptyList()
+    val marks: List<PricePoint> = emptyList(),
+    /** v13.23 "Safe", "Blocked: …", or "Unknown". */
+    val safetyChip: String = "",
+    /** v13.23 "Bundled 24%" when the creation slot is flagged. */
+    val bundleChip: String = ""
 ) {
     val stopDistancePct: Double
         get() {
@@ -179,6 +183,8 @@ data class CoinLookup(
     val matchedBy: String? = null,
     /** v13.17 provider failure, not-found detail, or a cached search list (up to 60s). */
     val providerNote: String? = null,
+    val safetyChip: String = "",
+    val bundleChip: String = "",
     /** v13.6 code AMBIGUOUS: several coins match a ticker/name; pick one. */
     val query: String? = null,
     val candidates: List<CoinCandidate> = emptyList()
@@ -300,7 +306,9 @@ fun parseLookup(raw: String): CoinLookup {
         canBuy = root.optBoolean("canBuy", false),
         buyBlockedReason = root.optText("buyBlockedReason").ifBlank { null },
         matchedBy = root.optText("matchedBy").ifBlank { null },
-        providerNote = root.optText("providerNote").ifBlank { null }
+        providerNote = root.optText("providerNote").ifBlank { null },
+        safetyChip = root.optText("safetyChip"),
+        bundleChip = root.optText("bundleChip")
     )
 }
 
@@ -421,8 +429,13 @@ data class DeskSnapshot(
     /** v13 hero card. */
     val startingBalanceUsd: Double = 100.0,
     val sessionPnlPct: Double = 0.0,
-    val equityPoints: List<EquityPoint> = emptyList()
+    val equityPoints: List<EquityPoint> = emptyList(),
+    /** v13.23 Helius Sender tip in SOL. Default 0.000005. */
+    val senderTipSol: Double = 0.000005,
+    val safetyChips: List<SafetyChip> = emptyList()
 )
+
+data class SafetyChip(val mint: String, val safety: String, val bundle: String = "")
 
 /** v13 one point of the equity series (for the hero sparkline). */
 data class EquityPoint(val t: Long, val equity: Double)
@@ -837,8 +850,22 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         capLine = data.optJSONObject("capWhy")?.optText("line")?.ifBlank { null },
         exposureUsd = data.optFinite("exposureUsd"),
         watchlist = parseWatchRows(data.optJSONArray("watchlist")),
-        lastClientCrash = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("brief").ifBlank { null } }
+        lastClientCrash = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("brief").ifBlank { null } },
+        senderTipSol = (prefs?.optFinite("senderTipSol", 0.000005) ?: 0.000005).coerceAtLeast(0.000005),
+        safetyChips = parseSafetyChips(data.optJSONArray("safetyChips"))
     )
+}
+
+private fun parseSafetyChips(rows: org.json.JSONArray?): List<SafetyChip> {
+    if (rows == null) return emptyList()
+    return buildList {
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val mint = row.optText("mint")
+            if (mint.isBlank()) continue
+            add(SafetyChip(mint, row.optText("safety", "Unknown"), row.optText("bundle")))
+        }
+    }
 }
 
 /** Position cards from a snapshot array (the paper book's `positions`, or v13.7 `liveBook.positions`). */
@@ -873,7 +900,9 @@ internal fun parsePositionRows(positions: org.json.JSONArray?, receivedAt: Long,
                         netPnlUsd = row.optNullableFinite("netPnlUsd"),
                         netPnlPct = row.optNullableFinite("netPnlPct"),
                         exitSlippage = row.optNullableFinite("exitSlippage"),
-                        marks = parsePricePoints(row) ?: emptyList()
+                        marks = parsePricePoints(row) ?: emptyList(),
+                        safetyChip = row.optText("safetyChip"),
+                        bundleChip = row.optText("bundleChip")
                     )
                 )
             }

@@ -38,6 +38,10 @@ import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from ".
 import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { usesPumpRoute } from "../market/pump-live.js";
+import { bundleShare, isPumpCoin, pumpExcluded, slotActivity, type BundleResult, type SlotTransaction } from "../market/bundle.js";
+import { decodeMintSafety, SAFETY_UNKNOWN, safeMintAccount, type MintAccountBytes, type MintSafety } from "../market/mint-safety.js";
+import { tipLamports } from "../market/helius-sender.js";
+import { bondingCurvePda, canonicalPumpPoolPda } from "../pump/sdk.js";
 import type { LiveSwapResult } from "../market/live-broker.js";
 import { LayeredRugRegistry, loadRugWalletMap, StaticRugRegistry } from "../market/rug-registry.js";
 import { PumpCore } from "../pump/index.js";
@@ -161,6 +165,8 @@ interface DeskSettings {
   liveTradeUsd?: number;
   liveDailyCapUsd?: number | null;
   liveTrailPct?: number;
+  /** v13.23 Helius Sender tip in SOL. Default 0.000005. Paper trades do not use it. */
+  senderTipSol?: number;
 }
 
 interface DeskSettingsView {
@@ -207,6 +213,7 @@ interface DeskSettingsView {
   liveDailyCapUsd: number | null;
   liveTrailPct: number;
   liveAutoBuy: boolean;
+  senderTipSol: number;
 }
 
 /** Codes that make a manual buy ask for "Buy anyway" first. */
@@ -317,6 +324,13 @@ export class Desk {
   private readonly walletStatus: DeskWalletStatus;
   /** v13.5 live per-trade USD. Live auto-buys and one-tap buys use this, never a paper size. */
   private liveTradeUsd: number = LIVE_BAND.tradeUsd.fallback;
+  /** v13.23 live Sender tip. Paper fills never read this. */
+  private senderTipSol = 0.000005;
+  private readonly mintAccounts?: (mint: string) => Promise<MintAccountBytes | null>;
+  private readonly launchBundleFn?: (mint: string) => Promise<BundleResult | null>;
+  private readonly safetyCache = new Map<string, { at: number; ttl: number; result: MintSafety }>();
+  private readonly bundleCache = new Map<string, { at: number; forever: boolean; result: BundleResult }>();
+  private readonly safetyInflight = new Map<string, Promise<MintSafety>>();
   /** v13.5 live daily spend cap. null = off (the default). */
   private liveDailyCapUsd: number | null = null;
   /** v13.5 live trailing stop, fraction. Armed from entry. */
@@ -397,9 +411,15 @@ export class Desk {
       depthFetch?: typeof fetch;
       /** Tests inject this. Production reads signature status and does not send. */
       signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
+      /** Tests inject the mint account. Production reads it on the low-priority RPC lane. */
+      mintAccounts?: (mint: string) => Promise<MintAccountBytes | null>;
+      /** Tests inject the creation-slot result. Production reads it once per mint. */
+      launchBundle?: (mint: string) => Promise<BundleResult | null>;
     } = {}
   ) {
     this.config = config;
+    this.mintAccounts = deps.mintAccounts ?? (process.env.VITEST ? async () => safeMintAccount() : undefined);
+    this.launchBundleFn = deps.launchBundle;
     // v13.8: re-read pool depth before a buy when the sighting has none. Live feeds only (tests inject).
     this.depthFetch = deps.depthFetch ?? (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch ? deps.lookupFetch ?? this.net.fetchAt(0) : undefined);
     if (this.depthFetch) {
@@ -1731,7 +1751,13 @@ export class Desk {
     });
     const report = scoreToken(token, this.config.rules);
     this.analystScores.set(mint, report.score);
-    const hardKills = filter.checks.filter((c) => !c.pass && HARD_KILL_CODES.has(c.code)).map((c) => ({ code: c.code, message: c.message }));
+    const hardKills: Array<{ code: string; message: string }> = filter.checks
+      .filter((c) => !c.pass && HARD_KILL_CODES.has(c.code))
+      .map((c) => ({ code: c.code, message: c.message }));
+    const safety = await this.tokenSafety(mint);
+    if (safety.status === "blocked") hardKills.push({ code: "TOKEN_SAFETY", message: safety.chip });
+    const pump = isPumpCoin({ source: token.source, dex: token.dex, platform: parsed.platform });
+    const bundle = pump ? await this.launchBundleSoon(mint, safety.supply) : null;
     const cooldownUntil = this.cooldowns.get(mint) ?? 0;
     const capUsd = this.positionCapUsd();
     const manualMaxUsd = this.positionCapUsd(this.book.equity(), SIZING_BAND.manualMaxPct);
@@ -1780,7 +1806,9 @@ export class Desk {
       watching: this.watchlist.some((item) => item.mint === mint),
       canBuy: blocked == null,
       buyBlockedReason: blocked ?? (cooldownUntil > Date.now() ? `Hard-stop cooldown for ${Math.ceil((cooldownUntil - Date.now()) / 60_000)} more minutes. Buy anyway overrides it.` : null),
-      providerNote
+      providerNote,
+      safetyChip: safety.chip,
+      bundleChip: bundle?.label ?? null
     };
   }
 
@@ -1933,25 +1961,40 @@ export class Desk {
       code: "MANUAL_BUY",
       message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)} on the ${kind} book.`
     });
-    // Hard kills (mint authority not revoked, dev rug link) need the operator's "Buy anyway".
+    // Hard kills (mint authority not revoked, dev rug link, token safety) need the operator's "Buy anyway".
+    // A safety read that fails is Unknown and does not block a manual buy. AI buys never reach this path.
+    const safety = await this.tokenSafety(token.mint);
+    const bundle = isPumpCoin(token) ? await this.launchBundle(token.mint, safety.supply) : null;
+    if (bundle?.flagged && bundle.label) {
+      this.log({
+        stage: "system",
+        kind: "info",
+        mint: token.mint,
+        symbol: token.symbol,
+        code: "BUNDLED",
+        message: `Warning: ${token.symbol} ${bundle.label}. A manual buy is not blocked.`
+      });
+    }
     if (!this.bk(kind).positions.has(token.mint)) {
       const rug = await this.rugs.lookup(token.devWallet);
       const kills = evaluateFilter(token, rug, this.config.rules, { allowUnlockedLp: this.allowUnlockedLp }).checks.filter(
         (check) => !check.pass && HARD_KILL_CODES.has(check.code)
       );
-      if (kills.length && opts?.confirmHardKill !== true) {
-        const message = `Hard kill on ${token.symbol}: ${kills.map((k) => k.message).join(" ")} Tap Buy anyway to ${kind === "live" ? "buy it with real money" : "paper-buy it"} regardless.`;
+      const safetyBlocked = safety.status === "blocked";
+      if ((kills.length || safetyBlocked) && opts?.confirmHardKill !== true) {
+        const why = [...kills.map((k) => k.message), ...(safetyBlocked ? [safety.chip] : [])].join(" ");
+        const message = `Hard kill on ${token.symbol}: ${why} Tap Buy anyway to ${kind === "live" ? "buy it with real money" : "paper-buy it"} regardless.`;
         this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "HARD_KILL", message: `Manual buy held. ${message}` });
         return { ok: false, error: message, code: "HARD_KILL" };
       }
-      if (kills.length) {
+      if (kills.length || safetyBlocked) {
         this.log({
           stage: "system",
           kind: "info",
           mint: token.mint,
           symbol: token.symbol,
           code: "HARD_KILL",
-          message: `Operator chose Buy anyway on ${token.symbol} past ${kills.map((k) => k.code).join(", ")}. ${kind === "live" ? "Live buy." : "Paper only."}`
+          message: `Operator chose Buy anyway on ${token.symbol} past ${[...kills.map((k) => k.code), ...(safetyBlocked ? [safety.chip] : [])].join(", ")}. ${kind === "live" ? "Live buy." : "Paper only."}`
         });
       }
     }
@@ -2127,7 +2170,8 @@ export class Desk {
       manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
       capWhy: this.capWhy(riskEquityUsd),
       lastClientCrash: this.lastClientCrash,
-      markLoop: this.markLoopView()
+      markLoop: this.markLoopView(),
+      safetyChips: this.safetyChipList()
     };
   }
 
@@ -2236,7 +2280,7 @@ export class Desk {
         },
         { breakdown: report.breakdown }
       );
-      const job = this.buy(report);
+      const job = this.buyIfSafe(report);
       this.track(job);
     });
 
@@ -2987,6 +3031,7 @@ export class Desk {
       riskMarkAgeMs: Math.max(0, Date.now() - (book.markedAt(pos.mint) ?? pos.openedAt)),
       openedAt: pos.openedAt,
       ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {}),
+      ...this.cardChips(pos.mint),
       ...this.netFields(pos, kind, shown, markPrice)
     };
   }
@@ -3328,7 +3373,9 @@ export class Desk {
       netPnlUsd: p.netPnlUsd ?? null,
       netPnlPct: p.netPnlPct ?? null,
       exitSlippage: p.exitSlippage ?? null,
-      marks: p.marks ?? []
+      marks: p.marks ?? [],
+      safetyChip: p.safetyChip,
+      bundleChip: p.bundleChip
     });
     return {
       now: Date.now(),
@@ -3649,7 +3696,8 @@ export class Desk {
       liveTradeUsd: this.liveTradeUsd,
       liveDailyCapUsd: this.liveDailyCapUsd,
       liveTrailPct: this.liveTrailPct,
-      liveAutoBuy: this.liveAutoBuy
+      liveAutoBuy: this.liveAutoBuy,
+      senderTipSol: this.senderTipSol
     };
   }
 
@@ -3760,6 +3808,13 @@ export class Desk {
         next.liveDailyCapUsd = clampLiveDailyCapUsd(n);
       }
     }
+    if ("senderTipSol" in patch) {
+      const raw = num("senderTipSol");
+      if (!Number.isFinite(raw) || raw < 0.000005 - 1e-12 || raw > 0.01) {
+        return { ok: false, error: "Sender tip must be from 0.000005 to 0.01 SOL." };
+      }
+      next.senderTipSol = clampSenderTipSol(raw);
+    }
     if ("liveTrailPct" in patch) {
       const fraction = liveTrailFromWire(num("liveTrailPct"));
       if (!Number.isFinite(fraction)) return { ok: false, error: "Live trailing stop must be a percent from 0.5 to 20." };
@@ -3852,6 +3907,7 @@ export class Desk {
       const trail = liveTrailFromWire(saved.liveTrailPct);
       if (Number.isFinite(trail)) this.liveTrailPct = trail;
     }
+    if (typeof saved.senderTipSol === "number") this.senderTipSol = clampSenderTipSol(saved.senderTipSol);
   }
 
   private buysInLastHour(): number {
@@ -3909,7 +3965,8 @@ export class Desk {
       liveTradeUsd: view.liveTradeUsd,
       liveDailyCapUsd: view.liveDailyCapUsd,
       liveTrailPct: view.liveTrailPct,
-      liveAutoBuy: view.liveAutoBuy
+      liveAutoBuy: view.liveAutoBuy,
+      senderTipSol: view.senderTipSol
     };
   }
 
@@ -4152,7 +4209,9 @@ export class Desk {
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
         rpcUrl: this.config.walletRpcUrl,
-        rpcFetch: this.net.fetchAt(1)
+        rpcFetch: this.net.fetchAt(1),
+        senderTipLamports: tipLamports(this.senderTipSol),
+        idemKey: randomUUID()
       });
     }
     const { executeLiveSwap } = await import("../market/live-broker.js");
@@ -4170,7 +4229,9 @@ export class Desk {
       markPriceUsd: input.markPriceUsd,
       maxEntrySlippage: this.config.rules.maxEntrySlippage,
       maxExitSlippage: input.exit ? slip : undefined,
-      rpcFetch: this.net.fetchAt(1)
+      rpcFetch: this.net.fetchAt(1),
+      senderTipLamports: tipLamports(this.senderTipSol),
+      idemKey: randomUUID()
     });
   }
 
@@ -4206,6 +4267,182 @@ export class Desk {
     this.bus.emit("log.event", full);
   }
 
+  /** AI buys stop on a blocked mint, an unread mint, or a flagged launch bundle. */
+  private async buyIfSafe(report: { token: import("../types.js").CandidateToken; score: number; breakdown: import("../types.js").ScoreFactor[]; decision: "trade" | "reject"; reason?: import("../types.js").Rejection }): Promise<void> {
+    const safety = await this.tokenSafety(report.token.mint);
+    if (safety.status !== "safe") {
+      this.pipeline.executorSkips += 1;
+      this.log({
+        stage: "executor",
+        kind: "reject",
+        mint: report.token.mint,
+        symbol: report.token.symbol,
+        code: "TOKEN_SAFETY",
+        message: `AI buy skipped ${report.token.symbol}. ${safety.chip}.`
+      });
+      return;
+    }
+    if (isPumpCoin(report.token)) {
+      const bundle = await this.launchBundle(report.token.mint, safety.supply);
+      if (bundle.flagged) {
+        this.pipeline.executorSkips += 1;
+        this.log({
+          stage: "executor",
+          kind: "reject",
+          mint: report.token.mint,
+          symbol: report.token.symbol,
+          code: "BUNDLED",
+          message: `AI buy skipped ${report.token.symbol}. ${bundle.label ?? "Bundled"}.`
+        });
+        return;
+      }
+    }
+    await this.buy(report);
+  }
+
+  private cardChips(mint: string): { safetyChip: string; bundleChip: string | null } {
+    void this.tokenSafety(mint);
+    if (isPumpCoin({ source: this.sightings.get(mint)?.source, dex: this.sightings.get(mint)?.dex })) {
+      void this.launchBundle(mint, this.peekSafety(mint).supply);
+    }
+    const bundle = this.bundleCache.get(mint)?.result;
+    return { safetyChip: this.peekSafety(mint).chip, bundleChip: bundle?.label ?? null };
+  }
+
+  private safetyChipList(): Array<{ mint: string; safety: string; bundle?: string }> {
+    const mints = new Set<string>([
+      ...this.book.positions.keys(),
+      ...(this.liveBook ? this.liveBook.positions.keys() : []),
+      ...this.watchlist.map((item) => item.mint),
+      ...this.safetyCache.keys()
+    ]);
+    const out: Array<{ mint: string; safety: string; bundle?: string }> = [];
+    for (const mint of mints) {
+      if (out.length >= 80) break;
+      const safety = this.safetyCache.get(mint)?.result;
+      const bundle = this.bundleCache.get(mint)?.result;
+      if (!safety && !bundle?.label) continue;
+      out.push({ mint, safety: safety?.chip ?? "Unknown", ...(bundle?.label ? { bundle: bundle.label } : {}) });
+    }
+    return out;
+  }
+
+  private peekSafety(mint: string): MintSafety {
+    return this.safetyCache.get(mint)?.result ?? SAFETY_UNKNOWN;
+  }
+
+  private async tokenSafety(mint: string): Promise<MintSafety> {
+    const hit = this.safetyCache.get(mint);
+    if (hit && Date.now() - hit.at < hit.ttl) return hit.result;
+    const pending = this.safetyInflight.get(mint);
+    if (pending) return pending;
+    const job = this.readMintSafety(mint).finally(() => this.safetyInflight.delete(mint));
+    this.safetyInflight.set(mint, job);
+    return job;
+  }
+
+  private async readMintSafety(mint: string): Promise<MintSafety> {
+    let account: MintAccountBytes | null = null;
+    try {
+      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint);
+      account = await Promise.race([
+        read,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_500))
+      ]);
+    } catch {
+      account = null;
+    }
+    const result = decodeMintSafety(account);
+    const ttl = result.status === "unknown" ? 15_000 : 10 * 60_000;
+    this.safetyCache.set(mint, { at: Date.now(), ttl, result });
+    return result;
+  }
+
+  private async rpcMintAccount(mint: string): Promise<MintAccountBytes | null> {
+    const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
+    if (!rpc) return null;
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getAccountInfo",
+      params: [mint, { encoding: "base64", commitment: "confirmed" }]
+    });
+    const res = await this.net.fetchAt(2)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
+    const value = json.result?.value;
+    if (!value?.owner || !value.data?.[0]) return null;
+    return { owner: value.owner, data: Buffer.from(value.data[0], "base64") };
+  }
+
+  private async launchBundleSoon(mint: string, supply: bigint | null): Promise<BundleResult | null> {
+    const cached = this.bundleCache.get(mint);
+    if (cached && (cached.forever || Date.now() - cached.at < 10 * 60_000)) return cached.result;
+    return Promise.race([
+      this.launchBundle(mint, supply),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_500))
+    ]);
+  }
+
+  private async launchBundle(mint: string, supply: bigint | null): Promise<BundleResult> {
+    const cached = this.bundleCache.get(mint);
+    if (cached && (cached.forever || Date.now() - cached.at < 10 * 60_000)) return cached.result;
+    if (this.launchBundleFn) {
+      const injected = await this.launchBundleFn(mint);
+      const result = injected ?? { flagged: false, pct: 0, label: null, acquired: 0n };
+      this.bundleCache.set(mint, { at: Date.now(), forever: injected != null, result });
+      return result;
+    }
+    if (process.env.VITEST) {
+      const result = { flagged: false, pct: 0, label: null, acquired: 0n };
+      this.bundleCache.set(mint, { at: Date.now(), forever: true, result });
+      return result;
+    }
+    const result = await this.rpcBundle(mint, supply);
+    if (!result) {
+      const empty: BundleResult = { flagged: false, pct: 0, label: null, acquired: 0n };
+      this.bundleCache.set(mint, { at: Date.now(), forever: false, result: empty });
+      return empty;
+    }
+    this.bundleCache.set(mint, { at: Date.now(), forever: true, result });
+    return result;
+  }
+
+  private async rpcBundle(mint: string, supply: bigint | null): Promise<BundleResult | null> {
+    if (supply == null || supply <= 0n) return null;
+    const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
+    if (!rpc) return null;
+    try {
+      const sigBody = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getSignaturesForAddress",
+        params: [mint, { limit: 1000, commitment: "confirmed" }]
+      });
+      const sigRes = await this.net.fetchAt(2)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: sigBody });
+      if (!sigRes.ok) return null;
+      const sigJson = (await sigRes.json()) as { result?: Array<{ slot?: number }> };
+      const rows = sigJson.result ?? [];
+      if (!rows.length || rows.length >= 1000) return null;
+      const slot = rows[rows.length - 1]?.slot;
+      if (slot == null) return null;
+      const blockBody = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getBlock",
+        params: [slot, { encoding: "jsonParsed", transactionDetails: "full", rewards: false, maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
+      });
+      const blockRes = await this.net.fetchAt(2)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: blockBody });
+      if (!blockRes.ok) return null;
+      const blockJson = (await blockRes.json()) as { result?: { transactions?: SlotTransaction[] } | null };
+      const txs = blockJson.result?.transactions ?? [];
+      const activity = slotActivity(mint, txs);
+      return bundleShare({ supply, deltas: activity.deltas, excluded: pumpExcluded(mint), funders: activity.funders });
+    } catch {
+      return null;
+    }
+  }
+
   private track(job: Promise<unknown>): void {
     const guarded = job.catch((err) => {
       console.error("[desk] stage failed", err);
@@ -4219,6 +4456,12 @@ export class Desk {
       await Promise.all([...this.inflight]);
     }
   }
+}
+
+function clampSenderTipSol(raw: number): number {
+  const lamports = Math.round(raw * 1_000_000_000);
+  const clamped = Math.min(10_000_000, Math.max(5_000, lamports));
+  return clamped / 1_000_000_000;
 }
 
 function sampleOf(token: { volume1hUsd: number; top10HolderPct: number | null; liquidityUsd: number; ageSeconds: number; onBondingCurve?: boolean }, score?: number): FeatureSample {
