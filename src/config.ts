@@ -47,8 +47,10 @@ export interface DeskConfig {
   enrichConcurrency: number;
   /** Sightings waiting on a worker before the oldest is dropped. Default 160. */
   enrichQueueCap: number;
-  /** Helius DAS holder pages. Default 3. Public RPC ignores this and stays on the top 20. */
+  /** Helius DAS holder pages. Default 0 (top 20 only). A non-Helius enrich RPC ignores this. */
   holderPagesMax: number;
+  /** Enrich-lane budget per minute when SOLANA_RPC_URL is not Helius. Default 45. Hard cap 1200 (20/s). */
+  enrichCallsPerMin: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
@@ -108,7 +110,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     openaiModel: env.OPENAI_MODEL?.trim() || "gpt-4o-mini",
     enrichConcurrency: clampEnvInt(env.SCOUT_ENRICH_CONCURRENCY, 8, 1, 16),
     enrichQueueCap: clampEnvInt(env.SCOUT_ENRICH_QUEUE, 160, 8, 2000),
-    holderPagesMax: clampEnvInt(env.HOLDER_PAGES_MAX, 3, 0, 20)
+    holderPagesMax: clampEnvInt(env.HOLDER_PAGES_MAX, 0, 0, 20),
+    enrichCallsPerMin: clampEnvInt(env.ENRICH_RPC_CALLS_PER_MIN, 45, 1, 1_200)
   };
 }
 

@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import type { EventBus } from "../bus.js";
-import { enrichSighting } from "../market/enrich.js";
+import { EnrichDeferred, EnrichMeter, enrichSighting, isHeliusUrl, rpcHostname } from "../market/enrich.js";
 import { DexTokenBatcher } from "../market/dex-batch.js";
 import { classifyHttpFailure, isPumpDiscoveryUrl, PUMP_API_CHALLENGE } from "../market/http-class.js";
 import { bucketFor, type NetLimiter, type SourceId } from "../market/net.js";
@@ -98,7 +98,7 @@ export interface ScoutOptions {
   enrichConcurrency?: number;
   /** Pending sightings before the oldest is dropped. Default 160. */
   queueCap?: number;
-  /** Helius DAS pages past the 20-account RPC cap. Ignored on a public RPC. */
+  /** Helius DAS pages. Default 0. Ignored unless the enrich RPC is Helius. */
   holderPagesMax?: number;
   fetchImpl?: typeof fetch;
   /** v12.1 shared request budget. Without it (unit tests) calls go straight to fetchImpl. */
@@ -150,6 +150,9 @@ export class Scout {
   private readonly listFetch: typeof fetch;
   private readonly enrichFetch: typeof fetch | undefined;
   private readonly batcher: DexTokenBatcher | null;
+  private readonly meter = new EnrichMeter();
+  private holdUntil = 0;
+  private holdTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly opts: ScoutOptions) {
     this.concurrency = clampInt(opts.enrichConcurrency, 8, 1, 16);
@@ -196,9 +199,15 @@ export class Scout {
     this.sources = { ...this.sources, ...next };
   }
 
+  /** Hostname of SOLANA_RPC_URL and enrich RPC calls in the last minute. No key, no path. */
+  enrichStatus(now = Date.now()): { host: string | null; callsPerMin: number } {
+    return { host: rpcHostname(this.opts.rpcUrl), callsPerMin: this.meter.callsPerMin(now) };
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.pumpTimer) clearTimeout(this.pumpTimer);
+    if (this.holdTimer) clearTimeout(this.holdTimer);
     if (this.pumpWatchdog) clearInterval(this.pumpWatchdog);
     for (const timer of this.timers) clearTimeout(timer);
     this.timers.length = 0;
@@ -261,7 +270,7 @@ export class Scout {
     this.status.sightings += 1;
     if (origin) this.health.sighting(origin);
     if (this.queue.length >= this.queueCap) {
-      const dropped = this.queue.shift();
+      const dropped = this.queue.splice(worstIndex(this.queue), 1)[0];
       if (dropped) {
         this.seen.delete(dropped.mint);
         this.opts.onTape?.(draftFromRaw(dropped, "queue_full"));
@@ -274,8 +283,9 @@ export class Scout {
   }
 
   private drain(): void {
+    if (Date.now() < this.holdUntil) return;
     while (this.active < this.concurrency && this.queue.length) {
-      const raw = this.queue.shift()!;
+      const raw = this.queue.splice(bestIndex(this.queue), 1)[0]!;
       this.inflight.set(raw.mint, raw);
       this.active += 1;
       void this.enrich(raw).finally(() => {
@@ -286,13 +296,46 @@ export class Scout {
     }
   }
 
+  /** Provider 429 or error: leave the Tape row pending and try again after the pause. Never a Helius read. */
+  private defer(raw: RawSighting, retryMs: number): void {
+    const slot = this.seen.get(raw.mint);
+    if (slot) slot.state = "queued";
+    if (!this.queue.some((item) => item.mint === raw.mint)) {
+      if (this.queue.length >= this.queueCap) {
+        const idx = worstIndex(this.queue);
+        const dropped = this.queue[idx];
+        if (dropped && enrichBefore(raw, dropped) > 0) {
+          this.seen.delete(raw.mint);
+          this.opts.onTape?.(draftFromRaw(raw, "queue_full"));
+          this.status.dropped += 1;
+          return;
+        }
+        this.queue.splice(idx, 1);
+        if (dropped) {
+          this.seen.delete(dropped.mint);
+          this.opts.onTape?.(draftFromRaw(dropped, "queue_full"));
+        }
+        this.status.dropped += 1;
+      }
+      this.queue.push(raw);
+    }
+    const at = Date.now() + Math.max(250, retryMs);
+    this.holdUntil = Math.max(this.holdUntil, at);
+    if (!this.holdTimer) {
+      this.holdTimer = setTimeout(() => {
+        this.holdTimer = null;
+        if (!this.stopped) this.drain();
+      }, Math.max(1, this.holdUntil - Date.now()));
+    }
+  }
+
   private async enrich(raw: RawSighting): Promise<void> {
     try {
       const token = await enrichSighting(raw, {
         rpcUrl: this.opts.rpcUrl,
-        rugcheckUrl: this.opts.rugcheckUrl,
         fetchImpl: this.enrichFetch,
-        holderPagesMax: this.opts.holderPagesMax,
+        holderPagesMax: this.isHeliusEnrich() ? this.opts.holderPagesMax : 0,
+        meter: this.meter,
         dexLookup: this.batcher ? (mint) => this.batcher!.get(mint) : undefined
       });
       const slot = this.seen.get(raw.mint);
@@ -318,11 +361,18 @@ export class Scout {
       );
       this.publish(token);
     } catch (err) {
+      if (err instanceof EnrichDeferred) {
+        this.defer(raw, err.retryMs);
+        return;
+      }
       // One coin failing to enrich is not a feed outage; it never reaches the banner.
       const slot = this.seen.get(raw.mint);
       if (slot) slot.state = "done";
-      void err;
     }
+  }
+
+  private isHeliusEnrich(): boolean {
+    return isHeliusUrl(this.opts.rpcUrl);
   }
 
   private pumpFrameHook: ((text: string) => void) | null = null;
@@ -632,6 +682,29 @@ export class Scout {
       this.health.fail("bitquery", err instanceof Error ? err.message.slice(0, 80) : String(err));
     }
   }
+}
+
+/** Positive when `b` should be enriched before `a`: newer sighting, then higher 1h volume. */
+export function enrichBefore(a: RawSighting, b: RawSighting): number {
+  const age = (b.observedAt || 0) - (a.observedAt || 0);
+  if (age !== 0) return age;
+  return (b.volume1hUsd || 0) - (a.volume1hUsd || 0);
+}
+
+function bestIndex(queue: RawSighting[]): number {
+  let idx = 0;
+  for (let i = 1; i < queue.length; i += 1) {
+    if (enrichBefore(queue[idx]!, queue[i]!) > 0) idx = i;
+  }
+  return idx;
+}
+
+function worstIndex(queue: RawSighting[]): number {
+  let idx = 0;
+  for (let i = 1; i < queue.length; i += 1) {
+    if (enrichBefore(queue[i]!, queue[idx]!) > 0) idx = i;
+  }
+  return idx;
 }
 
 function clampInt(raw: number | undefined, fallback: number, min: number, max: number): number {

@@ -17,7 +17,7 @@ import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd
 import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
 import { resolveCoinMint } from "../market/coin-lookup.js";
 import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
-import { enrichSighting } from "../market/enrich.js";
+import { applyRugcheck, enrichSighting, needsFilterRugcheck } from "../market/enrich.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
 import { RawTape, draftFromRaw, rawCandidate } from "./raw-tape.js";
@@ -474,6 +474,7 @@ export class Desk {
         }
       });
     }
+    this.net.useEnrichRpc(config.rpcUrl, config.enrichCallsPerMin);
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
@@ -2297,6 +2298,7 @@ export class Desk {
       exposureUsd: roundUsd(this.exposureUsd()),
       manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
       capWhy: this.capWhy(riskEquityUsd),
+      enrich: this.scout.enrichStatus(),
       appVersion: APP_VERSION,
       lastClientCrash: this.lastClientCrash,
       markLoop: this.markLoopView(),
@@ -2443,6 +2445,9 @@ export class Desk {
     token: CandidateToken,
     prior: { priceUsd: number; volume1hUsd: number } | null
   ): Promise<void> {
+    if (needsFilterRugcheck(token, this.config.rules.minVolume1hUsd)) {
+      token = await applyRugcheck(token, { rugcheckUrl: this.config.rugcheckUrl, fetchImpl: this.net.fetchAt(1) });
+    }
     const rug = await this.rugs.lookup(token.devWallet);
     const result = evaluateFilter(token, rug, this.config.rules, {
       allowUnlockedLp: this.allowUnlockedLp,
