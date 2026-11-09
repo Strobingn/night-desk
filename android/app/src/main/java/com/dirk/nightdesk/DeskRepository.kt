@@ -622,6 +622,16 @@ class DeskRepository private constructor(private val context: Context) {
                 onSuccess = { (code, raw) ->
                     val json = runCatching { JSONObject(raw) }.getOrNull()
                     val ok = code in 200..299 && json?.optBoolean("ok", false) == true
+                    val reason = OneTap.hardKillReason(json?.optText("code"), json?.optText("error"))
+                    if (reason != null) {
+                        _hardKillAsk.value = HardKillAsk(
+                            mint = mint,
+                            symbol = json?.optText("symbol").orEmpty().ifBlank { symbol },
+                            sizeUsd = sizeUsd,
+                            confirmSize = false,
+                            message = reason
+                        )
+                    }
                     DeskNotice(ok, OneTap.buyText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
                 },
                 onFailure = { err -> DeskNotice(false, "$symbol: ${err.message ?: "buy failed"}") }
@@ -942,8 +952,11 @@ class DeskRepository private constructor(private val context: Context) {
             http.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    val message = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
-                    error(message.ifBlank { "HTTP ${response.code}" })
+                    val obj = runCatching { JSONObject(body) }.getOrNull()
+                    val message = obj?.optString("error").orEmpty()
+                    val code = obj?.optString("code").orEmpty()
+                    val text = message.ifBlank { "HTTP ${response.code}" }
+                    error(if (code.isNotBlank() && !text.contains(code)) "$text ($code)" else text)
                 }
                 body
             }

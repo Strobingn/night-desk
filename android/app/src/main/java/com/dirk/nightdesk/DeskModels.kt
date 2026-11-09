@@ -91,6 +91,8 @@ data class WalletInfo(
     val publicKey: String?,
     val solBalance: Double?,
     val usdcBalance: Double?,
+    /** SOL/USD already on the desk. Null when the desk has not priced SOL. Display only. */
+    val solPriceUsd: Double? = null,
     val balanceAt: Long?,
     val balanceError: String?,
     val live: Boolean,
@@ -947,6 +949,7 @@ internal fun parseWallet(row: JSONObject?): WalletInfo? {
         publicKey = row.optText("publicKey").ifBlank { null }?.takeIf { it != "null" },
         solBalance = optNum("solBalance"),
         usdcBalance = optNum("usdcBalance"),
+        solPriceUsd = optNum("solPriceUsd"),
         balanceAt = optNum("balanceAt")?.toLong(),
         balanceError = row.optText("balanceError").ifBlank { null }?.takeIf { it != "null" },
         live = row.optBoolean("live"),

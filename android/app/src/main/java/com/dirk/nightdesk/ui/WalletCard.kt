@@ -52,8 +52,8 @@ fun WalletCard(snap: DeskSnapshot?, modifier: Modifier = Modifier) {
             WalletStat("Key loaded", if (w?.keyLoaded == true) "Yes" else "No", Modifier.weight(1f), color = if (w?.keyLoaded == true) P.up else P.down)
         }
         Row(Modifier.fillMaxWidth()) {
-            WalletStat("SOL", w?.solBalance?.let { "%.4f".format(Locale.US, it) } ?: "—", Modifier.weight(1f))
-            WalletStat("USDC", w?.usdcBalance?.let { money(it) } ?: "—", Modifier.weight(1f))
+            WalletStat("SOL", OneTap.formatSolHolding(w?.solBalance, w?.solPriceUsd), Modifier.weight(1f))
+            WalletStat("USDC", w?.usdcBalance?.let { OneTap.formatBalanceUsd(it) } ?: "—", Modifier.weight(1f))
         }
         val trail = (snap?.liveTrailPct ?: 0.01) * 100
         Text(

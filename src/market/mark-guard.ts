@@ -99,11 +99,28 @@ export function outlierReason(lastGood: number, next: number): "unit" | "spike" 
   if (!(lastGood > 0) || !(next > 0) || !Number.isFinite(next)) return null;
   const ratio = next / lastGood;
   if (!(ratio > 1)) return null;
-  for (const step of [1e3, 1e6, 1e9]) {
-    if (Math.abs(ratio / step - 1) < 0.08) return "unit";
-  }
+  if (unitScale(ratio)) return "unit";
   if (ratio >= ABSURD_RISE) return "spike";
   return null;
+}
+
+/**
+ * How many times apart the entry and the mark are.
+ * A first print this far from entry is not a usable stop. A second agreeing print still is.
+ */
+export function absurdScale(entry: number, mark: number): number {
+  if (!(entry > 0) || !(mark > 0) || !Number.isFinite(entry) || !Number.isFinite(mark)) return 1;
+  return Math.max(mark / entry, entry / mark);
+}
+
+/** True when the ratio sits on ×1e3, ×1e6 or ×1e9 (a decimals or SOL/USD mix-up, either direction). */
+export function unitScale(ratio: number): boolean {
+  if (!(ratio > 0) || !Number.isFinite(ratio)) return false;
+  const scale = ratio >= 1 ? ratio : 1 / ratio;
+  for (const step of [1e3, 1e6, 1e9]) {
+    if (Math.abs(scale / step - 1) < 0.08) return true;
+  }
+  return false;
 }
 
 /** One PRICE_SOURCE / PRICE_UNUSABLE line per mint per window. */

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { OpenOrdersCard, OrderChips, OrderTicket } from "./Orders";
 import { liveAgeMs, markFreshness, sourceAgeLabel, updatedLabel } from "../marks";
 import { api } from "../api";
-import { chartLinks, clock, px, signedPct, signedUsd, usd } from "../format";
+import { chartLinks, clock, liveCashLabel, px, signedPct, signedUsd, usd } from "../format";
 import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../types";
 import { tone, type DeskActions } from "../App";
 import { CoinAvatar, CoinSpark, PnlChip, Sparkline, StopTrailBar } from "../ui";
@@ -311,10 +311,17 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
   );
 }
 
-function liveCashLabel(lb: NonNullable<DeskSnapshot["liveBook"]>): string {
-  if (lb.cashKnown !== false && !lb.balanceError) return `USDC ${usd(lb.cashUsd)}`;
-  if (lb.balanceError && lb.cashUsd > 0) return `USDC ${usd(lb.cashUsd)} stale`;
-  return "USDC unknown";
+function liveBookCash(snap: DeskSnapshot): string {
+  const lb = snap.liveBook;
+  if (!lb) return "USDC unknown";
+  return liveCashLabel({
+    sol: snap.wallet?.solBalance,
+    solUsd: snap.wallet?.solPriceUsd,
+    usdc: snap.wallet?.usdcBalance,
+    cashUsd: lb.cashUsd,
+    cashKnown: lb.cashKnown,
+    balanceError: lb.balanceError
+  });
 }
 
 /** v13.7 armed desk: the live book (real money), apart from the AI's paper book. */
@@ -327,7 +334,7 @@ function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions:
           <span className="live-badge live">LIVE</span> Live positions · real $
         </h2>
         <span className={tone(lb.openPnlUsd)}>
-          {signedUsd(lb.openPnlUsd)} · {lb.positions.length} open · {liveCashLabel(lb)} · {lb.cashKnown === false ? (lb.cashUsd > 0 ? "equity stale" : "equity unknown") : `equity ${usd(lb.equityUsd)}`}
+          {signedUsd(lb.openPnlUsd)} · {lb.positions.length} open · {liveBookCash(snap)} · {lb.cashKnown === false ? (lb.cashUsd > 0 ? "equity stale" : "equity unknown") : `equity ${usd(lb.equityUsd)}`}
         </span>
       </div>
       <p className="fine live-scope">
