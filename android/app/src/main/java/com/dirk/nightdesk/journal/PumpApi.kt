@@ -32,11 +32,11 @@ class PumpApi(private val context: Context) {
         return call(Request.Builder().url(url(path)).post(body))
     }
 
-    private fun call(builder: Request.Builder): String {
+    private suspend fun call(builder: Request.Builder): String = withContext(Dispatchers.IO) {
         http.newCall(builder.header("accept", "application/json").build()).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) error(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
-            return text
+            text
         }
     }
 

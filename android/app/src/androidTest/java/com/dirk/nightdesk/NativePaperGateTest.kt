@@ -5,6 +5,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.swipe
@@ -147,6 +148,16 @@ class NativePaperGateTest {
         dismissNotice()
         tapBelow("GATE", "LIVE BUY $5")
         Thread.sleep(4_000)
+
+        openTab("Pump")
+        // The intro says "tap Watch". Scroll to the button itself so the mint field is on screen.
+        rule.onNode(hasTestTag("pump-watch")).performScrollTo()
+        rule.waitForIdle()
+        rule.onNode(hasTestTag("pump-mint")).performTextReplacement("2HNbRAN6m3bhgYb9mCzH6ULoT8qQuTWE3pM1CyM1pump")
+        closeIme()
+        rule.onNode(hasTestTag("pump-watch")).performScrollTo().performClick()
+        waitFor("Watching 2HNb", 25_000)
+        shot("pump-watch")
     }
 
     private fun dismissBlockers(device: UiDevice) {

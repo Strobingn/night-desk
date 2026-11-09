@@ -1,5 +1,7 @@
 package com.dirk.nightdesk
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -24,7 +26,7 @@ object DeskBeacon {
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
-    fun fetchPublicUrl(): String? {
+    suspend fun fetchPublicUrl(): String? = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(ENDPOINT)
             .header("apikey", ANON_KEY)
@@ -34,7 +36,7 @@ object DeskBeacon {
         http.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) error("beacon HTTP ${response.code}")
-            return parsePublicUrl(body)
+            parsePublicUrl(body)
         }
     }
 

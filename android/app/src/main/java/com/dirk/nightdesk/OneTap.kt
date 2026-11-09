@@ -30,6 +30,38 @@ object OneTap {
     fun effectiveTapUsd(mode: String?, tapUsd: Double, liveTradeUsd: Double?): Double =
         if (mode == "live") (liveTradeUsd?.takeIf { it > 0 && it.isFinite() } ?: 5.0) else tapUsd
 
+    /**
+     * Armed desk: the lightning button is still the phone's paper size. Live buys use liveTradeUsd.
+     * The $100 figure on Search was this paper size, mislabeled as live. Server live size stays $5 unless saved otherwise.
+     */
+    fun splitSizeLine(paperUsd: Double, liveUsd: Double, trailPct: Double, stopPct: Double, aiLive: Boolean): String {
+        val ai = if (aiLive) "" else " AI: paper."
+        return "Paper one tap ${usd(paperUsd)} (this phone). Live buys ${usd(liveUsd)} each · trail ${"%.1f".format(java.util.Locale.US, trailPct * 100)}% · stop −${"%.0f".format(java.util.Locale.US, stopPct * 100)}%.$ai Live size is Settings → Live wallet."
+    }
+
+    fun splitBuyLine(paperUsd: Double, liveUsd: Double, capHint: String): String =
+        "Paper one tap buys ${usd(paperUsd)} now ($capHint). Live buttons buy ${usd(liveUsd)}."
+
+    /** Home checklist chip. Full readiness lines stay collapsed in Settings. */
+    fun liveStatusChip(mode: String?, operatorReady: Boolean, tradeUsd: Double, dailyCapUsd: Double?, sol: Double?): String {
+        val head = when {
+            mode == "live" && operatorReady -> "LIVE ready"
+            mode == "live" -> "LIVE · checklist off"
+            operatorReady -> "STILL PAPER · checklist marked"
+            else -> "STILL PAPER"
+        }
+        val trade = usd(tradeUsd) + "/trade"
+        val day = if (dailyCapUsd != null && dailyCapUsd.isFinite() && dailyCapUsd > 0) usd(dailyCapUsd) + "/day" else "no day cap"
+        val solBit = if (sol != null && sol.isFinite()) " · wallet ${"%.4f".format(java.util.Locale.US, sol)} SOL" else ""
+        return "$head · $trade · $day$solBit"
+    }
+
+    private fun usd(n: Double): String {
+        val v = if (n.isFinite() && n > 0) n else 0.0
+        val whole = kotlin.math.abs(v - kotlin.math.round(v)) < 1e-9
+        return "$" + if (whole) "%.0f".format(java.util.Locale.US, v) else "%.2f".format(java.util.Locale.US, v)
+    }
+
     /** v13.5 wallet card: first 4 … last 4 of the public address. */
     fun shortAddress(address: String?): String = when {
         address.isNullOrBlank() -> "—"

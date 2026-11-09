@@ -187,6 +187,18 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
         }
         Group("Live wallet") {
             WalletCard(snap)
+            var showReady by remember { mutableStateOf(false) }
+            TextButton(onClick = { showReady = !showReady }) { Text(if (showReady) "Hide" else "Details", color = P.accent) }
+            if (showReady) {
+                val lines = snap?.readiness?.lines.orEmpty()
+                if (lines.isEmpty()) Text("Waiting for the desk checklist.", color = Dim, fontSize = 12.sp)
+                lines.forEach { line -> Text(line, color = P.ink, fontSize = 12.sp) }
+                Text(
+                    "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY on the desk host. Night Desk has no wallet vault.",
+                    color = Dim,
+                    fontSize = 12.sp
+                )
+            }
             Text(
                 "AI auto-buys stay on the paper book. The server refuses a request to send them live. Your live buys, sells, limits and stops default to \$5. These limits are not a tested profit system.",
                 color = P.ink,

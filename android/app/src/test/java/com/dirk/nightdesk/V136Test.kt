@@ -46,6 +46,21 @@ class V136Test {
     }
 
     @Test
+    fun searchOneTapNamesPaperAndLiveSeparately() {
+        val size = OneTap.splitSizeLine(100.0, 5.0, 0.01, 0.06, false)
+        val buy = OneTap.splitBuyLine(100.0, 5.0, "cut to \$24.07 by the exposure cap")
+        assertTrue(size, size.contains("Paper one tap \$100"))
+        assertTrue(size, size.contains("Live buys \$5"))
+        assertFalse(size, size.contains("Live size \$100"))
+        assertTrue(buy, buy.contains("Paper one tap buys \$100"))
+        assertTrue(buy, buy.contains("Live buttons buy \$5"))
+        val chip = OneTap.liveStatusChip("live", true, 5.0, 20.0, 0.0037)
+        assertEquals("LIVE ready · \$5/trade · \$20/day · wallet 0.0037 SOL", chip)
+        assertFalse(chip.contains("SOLANA_RPC_URL"))
+        assertFalse(chip.contains("LIVE_TRADING"))
+    }
+
+    @Test
     fun snapshotReadsCapWhy() {
         val raw = """{"type":"snapshot","data":{"mode":"paper","equityUsd":91.43,"cashUsd":65.32,"positionCapUsd":5.97,"capWhy":{"capUsd":5.97,"binding":"exposure","line":"exposure cap: max exposure 35% × ${'$'}91.43 equity"},"positions":[],"closed":[],"events":[],"rules":{},"prefs":{}}}"""
         val snap = parseDeskPayload(raw)!!

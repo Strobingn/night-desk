@@ -474,3 +474,48 @@ describe("v13.6 held pump.fun coin with no DexScreener pair yet", () => {
     expect(lives.at(-1)!).toBeCloseTo(usd, 9);
   });
 });
+
+describe("v13.19 search lookup budget", () => {
+  it("returns the Dex price while Jupiter and the public RPC never answer", async () => {
+    const lookupFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/latest/dex/tokens/")) {
+        return Response.json({
+          pairs: [{
+            chainId: "solana",
+            dexId: "pumpswap",
+            pairAddress: POOL,
+            priceUsd: "0.037",
+            liquidity: { usd: 125_000 },
+            volume: { h1: 34_000 },
+            pairCreatedAt: Date.now() - 3_600_000,
+            baseToken: { address: MINT, symbol: "SLOW", name: "Slow Coin" },
+            quoteToken: { address: WSOL_MINT }
+          }]
+        });
+      }
+      return new Promise(() => {
+        /* Jupiter, Rugcheck, and the public RPC stay queued */
+      });
+    }) as unknown as typeof fetch;
+    const desk = new Desk(
+      testConfig({ rpcUrl: "https://api.mainnet-beta.solana.com", rugcheckUrl: "https://api.rugcheck.xyz/v1" }),
+      { lookupFetch }
+    );
+    try {
+      const started = Date.now();
+      const found = await desk.lookupCoin(MINT);
+      expect(Date.now() - started).toBeLessThan(7_000);
+      expect(found.ok).toBe(true);
+      if (!found.ok) return;
+      expect(found.symbol).toBe("SLOW");
+      expect(found.priceSource).toBe("dexscreener");
+      expect(found.priceUsd).toBeCloseTo(0.037);
+      expect(found.providerNote ?? "").toMatch(/did not answer|hard kill/i);
+      expect(found.hardKills.some((kill) => kill.code === "MINT_AUTHORITY_ACTIVE")).toBe(true);
+      expect(JSON.stringify(found)).not.toMatch(/timeout/i);
+    } finally {
+      desk.stop();
+    }
+  });
+});
