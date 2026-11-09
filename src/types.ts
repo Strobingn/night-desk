@@ -704,8 +704,10 @@ export interface DeskSnapshot {
     /** v13.8 per held coin: the pool kind read on-chain, or why it cannot be. */
     chain?: Array<{ mint: string; symbol: string; pool: string | null; kind: string | null; reason: string | null }>;
   };
-  /** v12. Last crash the phone reported (POST /api/client-crash). */
-  lastClientCrash: { at: number; version: string; brief: string } | null;
+  /** v13.24 installed release. The Home crash card compares a report to this. */
+  appVersion?: string;
+  /** v12. Last crash the phone reported (POST /api/client-crash). Kept after Dismiss. */
+  lastClientCrash: { at: number; version: string; brief: string; text?: string; dismissed?: boolean } | null;
   /** v13.23 safety and bundle chips for coins that have been checked. */
   safetyChips?: Array<{ mint: string; safety: string; bundle?: string }>;
 }

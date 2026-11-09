@@ -144,6 +144,15 @@ class DeskRepository private constructor(private val context: Context) {
     fun dismissNotice() {
         _notice.value = null
     }
+
+    /** Hide the Home crash card. The desk keeps the crash record. */
+    suspend fun dismissClientCrash() {
+        val base = link.baseUrl
+        if (base.isBlank()) return
+        post("$base/api/client-crash/dismiss", "{}")
+        _snapshot.value = _snapshot.value?.copy(lastClientCrashDismissed = true)
+        refresh()
+    }
     private val _activeUrl = MutableStateFlow("")
     val activeUrl: StateFlow<String> = _activeUrl
     /** v12.3: the last URL that answered, for the "Use last good" action on the connection pill. */

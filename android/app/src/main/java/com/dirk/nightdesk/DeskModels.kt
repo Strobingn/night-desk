@@ -432,7 +432,12 @@ data class DeskSnapshot(
     val equityPoints: List<EquityPoint> = emptyList(),
     /** v13.23 Helius Sender tip in SOL. Default 0.000005. */
     val senderTipSol: Double = 0.000005,
-    val safetyChips: List<SafetyChip> = emptyList()
+    val safetyChips: List<SafetyChip> = emptyList(),
+    /** v13.24 version string stored with the desk crash. Empty when there is none. */
+    val lastClientCrashVersion: String = "",
+    val lastClientCrashDismissed: Boolean = false,
+    /** Full crash text. Home shows the short brief. */
+    val lastClientCrashText: String = ""
 )
 
 data class SafetyChip(val mint: String, val safety: String, val bundle: String = "")
@@ -851,6 +856,9 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         exposureUsd = data.optFinite("exposureUsd"),
         watchlist = parseWatchRows(data.optJSONArray("watchlist")),
         lastClientCrash = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("brief").ifBlank { null } },
+        lastClientCrashVersion = data.optJSONObject("lastClientCrash")?.optText("version") ?: "",
+        lastClientCrashDismissed = data.optJSONObject("lastClientCrash")?.optBoolean("dismissed", false) ?: false,
+        lastClientCrashText = data.optJSONObject("lastClientCrash")?.let { c -> c.optText("text").ifBlank { c.optText("brief") } } ?: "",
         senderTipSol = (prefs?.optFinite("senderTipSol", 0.000005) ?: 0.000005).coerceAtLeast(0.000005),
         safetyChips = parseSafetyChips(data.optJSONArray("safetyChips"))
     )

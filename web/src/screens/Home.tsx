@@ -7,6 +7,7 @@ import type { AdviceNote, DeskSnapshot, LiveReadiness, PositionView } from "../t
 import { tone, type DeskActions } from "../App";
 import { CoinAvatar, CoinSpark, PnlChip, Sparkline, StopTrailBar } from "../ui";
 import { dayBase } from "../coins";
+import { crashOnHome } from "../../../src/desk/crash-card";
 import { exitLabel } from "../../../src/desk/gap";
 import { LiveTapPair, OneTapBar, TapSellButton } from "./OneTap";
 import { WalletCard } from "./Wallet";
@@ -49,7 +50,7 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
 
   return (
     <div className="home">
-      {snap.lastClientCrash ? <LastCrashCard crash={snap.lastClientCrash} /> : null}
+      {crashOnHome(snap.lastClientCrash, snap.appVersion ?? "") ? <LastCrashCard crash={snap.lastClientCrash!} actions={actions} /> : null}
 
       <HeroCard snap={snap} openPnl={openPnl} />
 
@@ -387,16 +388,26 @@ function HeroCard({ snap, openPnl }: { snap: DeskSnapshot; openPnl: number }) {
   );
 }
 
-function LastCrashCard({ crash }: { crash: { at: number; version: string; brief: string } }) {
+function LastCrashCard({ crash, actions }: { crash: { at: number; version: string; brief: string }; actions: DeskActions }) {
+  const [busy, setBusy] = useState(false);
+  async function dismiss() {
+    setBusy(true);
+    const res = await api("/api/client-crash/dismiss", { body: {} });
+    setBusy(false);
+    if (!res.ok) actions.notify({ ok: false, text: res.body.error ?? "Could not dismiss the crash card" });
+  }
   return (
     <section className="card crash" aria-label="Last crash">
       <header>
-        <h3>Last app crash</h3>
+        <h3>Last crash on the desk</h3>
         <span>
           {new Date(crash.at).toLocaleString([], { hour12: false })} · {crash.version}
         </span>
       </header>
       <pre>{crash.brief}</pre>
+      <button className="ghost" type="button" disabled={busy} onClick={() => void dismiss()}>
+        Dismiss
+      </button>
     </section>
   );
 }

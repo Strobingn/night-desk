@@ -106,6 +106,10 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
         </div>
         <small className="fine">System follows the phone or computer setting.</small>
       </section>
+      <details className="card">
+        <summary>Crash log</summary>
+        <pre className="fine">{snap.lastClientCrash?.text || snap.lastClientCrash?.brief || "No crash recorded."}</pre>
+      </details>
       {SETTING_GROUPS.map((group) => (
         <section className={`card setting-group${group === "Live wallet" ? " live-group" : ""}`} key={group}>
           <header className="group-head">

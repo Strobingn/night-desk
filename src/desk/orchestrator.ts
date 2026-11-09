@@ -37,6 +37,7 @@ import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
 import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
+import { APP_VERSION, type ClientCrash } from "./crash-card.js";
 import { usesPumpRoute } from "../market/pump-live.js";
 import { bundleShare, isPumpCoin, pumpExcluded, slotActivity, type BundleResult, type SlotTransaction } from "../market/bundle.js";
 import { decodeMintSafety, SAFETY_UNKNOWN, safeMintAccount, type MintAccountBytes, type MintSafety } from "../market/mint-safety.js";
@@ -297,7 +298,7 @@ export class Desk {
   /** v13.10 live price / volume / change for every Tape coin (killed ones too). Live feed only. */
   tape: TapeQuoter | null = null;
   private tapeTimer: NodeJS.Timeout | null = null;
-  private lastClientCrash: { at: number; version: string; brief: string } | null = null;
+  private lastClientCrash: ClientCrash | null = null;
   /** v13.11 limit / take-profit / stop orders (paper and live), saved in the desk store. */
   private orders = new OrderList();
   private orderTimer: NodeJS.Timeout | null = null;
@@ -554,9 +555,16 @@ export class Desk {
     this.bootAt = Date.now();
     for (const [mint, at] of this.book.lastMarkAt) this.bootMarks.set(`paper:${mint}`, at);
     for (const [mint, at] of this.liveBook?.lastMarkAt ?? []) this.bootMarks.set(`live:${mint}`, at);
-    const crash = this.store.readJson("lastClientCrash") as { at?: unknown; version?: unknown; brief?: unknown } | null;
+    const crash = this.store.readJson("lastClientCrash") as { at?: unknown; version?: unknown; brief?: unknown; text?: unknown; dismissed?: unknown } | null;
     if (crash && typeof crash.at === "number" && typeof crash.brief === "string") {
-      this.lastClientCrash = { at: crash.at, version: typeof crash.version === "string" ? crash.version : "unknown", brief: crash.brief };
+      const brief = crash.brief;
+      this.lastClientCrash = {
+        at: crash.at,
+        version: typeof crash.version === "string" ? crash.version : "unknown",
+        brief,
+        text: typeof crash.text === "string" && crash.text.trim() ? crash.text : brief,
+        dismissed: crash.dismissed === true
+      };
     }
     this.scout = new Scout({
       bus: this.bus,
@@ -831,7 +839,7 @@ export class Desk {
     const full = stack.slice(0, 20_000);
     const brief = full.replace(/\s+/g, " ").slice(0, 500);
     const label = version.trim().slice(0, 40) || "unknown";
-    this.lastClientCrash = { at: Date.now(), version: label, brief };
+    this.lastClientCrash = { at: Date.now(), version: label, brief, text: full, dismissed: false };
     this.store.writeJson("lastClientCrash", this.lastClientCrash);
     this.log(
       {
@@ -842,6 +850,17 @@ export class Desk {
       },
       { version: label, stack: full }
     );
+    this.bus.emit("desk.changed", { reason: "client-crash", at: Date.now() });
+  }
+
+  /** Hide the Home card. The crash record stays in the store. */
+  dismissClientCrash(): { ok: true } {
+    if (this.lastClientCrash && !this.lastClientCrash.dismissed) {
+      this.lastClientCrash = { ...this.lastClientCrash, dismissed: true };
+      this.store.writeJson("lastClientCrash", this.lastClientCrash);
+    }
+    this.bus.emit("desk.changed", { reason: "crash-dismiss", at: Date.now() });
+    return { ok: true };
   }
 
   recap(sinceArg?: string | null): RecapReport {
@@ -2169,6 +2188,7 @@ export class Desk {
       exposureUsd: roundUsd(this.exposureUsd()),
       manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
       capWhy: this.capWhy(riskEquityUsd),
+      appVersion: APP_VERSION,
       lastClientCrash: this.lastClientCrash,
       markLoop: this.markLoopView(),
       safetyChips: this.safetyChipList()
