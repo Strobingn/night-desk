@@ -94,8 +94,37 @@ export const BUCKETS: BucketSpec[] = [
     burst: 2,
     cacheMs: 0,
     note: "Same Helius host, separate lane for swap preparation, simulation, and broadcast. 8/min is a hard sliding-minute ceiling, burst 2 only inside that minute. A full read-lane queue cannot delay these. Together with the read lane the two reqLastMin counts never pass 18. Nothing here is cached."
+  },
+  {
+    id: "enrich",
+    source: "solana",
+    limitPerMin: 57,
+    budgetPerMin: 45,
+    burst: 8,
+    cacheMs: 0,
+    note: "Scout enrich reads on whatever host SOLANA_RPC_URL names, when that host is not Helius and not the public RPC. Default 45/min (about 15 coins). ENRICH_RPC_CALLS_PER_MIN moves the budget. A hard ceiling of 20 requests/second still applies. 429 and 5xx pause this lane only. The sighting stays pending. Nothing here is sent to a Helius lane."
   }
 ];
+
+/** Default enrich budget. About three reads per coin, so ~15 coins/min. */
+export const ENRICH_CALLS_PER_MIN_DEFAULT = 45;
+/** Hard ceiling for the enrich lane. Not a Helius cap. */
+export const ENRICH_RPS_CAP = 20;
+/** Consecutive 429s or 5xxs before the enrich host is paused. */
+export const ENRICH_CIRCUIT_FAILS = 3;
+/** How long a tripped enrich host stays paused. */
+export const ENRICH_CIRCUIT_MS = 15_000;
+
+const ENRICH_BUCKET_ID = "enrich";
+
+/** Budget for the enrich lane. Never above 20 requests/second on average, and burst stays inside that. */
+export function enrichLaneBudget(callsPerMin: number): { limitPerMin: number; budgetPerMin: number; burst: number } {
+  const raw = Number.isFinite(callsPerMin) ? Math.floor(callsPerMin) : ENRICH_CALLS_PER_MIN_DEFAULT;
+  const budgetPerMin = Math.min(ENRICH_RPS_CAP * 60, Math.max(1, raw));
+  const limitPerMin = Math.max(budgetPerMin + 1, Math.ceil(budgetPerMin / 0.8));
+  const burst = Math.min(8, ENRICH_RPS_CAP, limitPerMin - budgetPerMin);
+  return { limitPerMin, budgetPerMin, burst: Math.max(1, burst) };
+}
 
 const BY_ID = new Map(BUCKETS.map((b) => [b.id, b]));
 
@@ -129,6 +158,21 @@ export function bucketFor(url: string): BucketSpec | null {
   return null;
 }
 
+/** Host of SOLANA_RPC_URL when enrich should use its own lane. Helius and the public RPC stay on their lanes. */
+export function dedicatedEnrichHost(url: string | undefined | null): string | null {
+  if (!url?.trim()) return null;
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (host === PUBLIC_SOLANA_RPC_HOST) return null;
+  if (host === "helius-rpc.com" || host.endsWith(".helius-rpc.com") || host.endsWith(".helius.xyz")) return null;
+  if (host === "sender.helius-rpc.com" || host.endsWith("-sender.helius-rpc.com")) return null;
+  return host;
+}
+
 /** Read-lane hosts split polls from swap/simulate traffic. Null when this spec is not split. */
 function execLaneId(id: string): string | null {
   if (id === "solana:public") return "solana:public:exec";
@@ -138,9 +182,9 @@ function execLaneId(id: string): string | null {
 
 export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown): BucketSpec | null {
   if (!spec) return null;
+  const pri = priority ?? 1;
   const execId = execLaneId(spec.id);
   if (!execId) return spec;
-  const pri = priority ?? 1;
   // Safety and bundle reads share the existing read budget at the lowest priority.
   if (pri === 2 && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
   // Wallet balance (-1) and mark polls (0) stay on the read lane. Higher priorities are the exec lane.
@@ -218,6 +262,10 @@ export interface BucketStats {
   reqLastMin: number;
   cacheHitsLastMin: number;
   count429: number;
+  /** HTTP 5xx on an enrich host. Other buckets stay at 0. */
+  count5xx: number;
+  /** Enrich host paused after repeated 429s or 5xxs. Helius lanes never set this. */
+  circuitOpen: boolean;
   sent: number;
   rateFactor: number;
   pausedUntil: number | null;
@@ -235,6 +283,9 @@ class Bucket {
   sentTimes: number[] = [];
   hitTimes: number[] = [];
   count429 = 0;
+  count5xx = 0;
+  consecutiveFail = 0;
+  circuitUntil = 0;
   sent = 0;
   timer = false;
 
@@ -268,13 +319,39 @@ export class NetLimiter {
   private readonly inflight = new Map<string, Promise<CachedResponse>>();
   private readonly cache = new Map<string, { at: number; res: CachedResponse }>();
   private seq = 0;
+  private enrichHost: string | null = null;
   private readonly clock: NetClock;
   private readonly baseFetch: typeof fetch;
 
-  constructor(opts: { fetchImpl?: typeof fetch; clock?: Partial<NetClock>; specs?: BucketSpec[] } = {}) {
+  constructor(opts: { fetchImpl?: typeof fetch; clock?: Partial<NetClock>; specs?: BucketSpec[]; enrichRpcUrl?: string; enrichCallsPerMin?: number } = {}) {
     this.baseFetch = opts.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
     this.clock = { ...realClock, ...(opts.clock ?? {}) };
     for (const spec of opts.specs ?? BUCKETS) this.buckets.set(spec.id, new Bucket(spec, this.clock.now()));
+    if (opts.enrichRpcUrl || opts.enrichCallsPerMin != null) this.useEnrichRpc(opts.enrichRpcUrl, opts.enrichCallsPerMin);
+  }
+
+  /**
+   * Point the enrich lane at SOLANA_RPC_URL. Helius and the public RPC keep their own lanes.
+   * The host is stored as a hostname only. The key in the URL is not kept on the spec.
+   */
+  useEnrichRpc(url: string | undefined, callsPerMin = ENRICH_CALLS_PER_MIN_DEFAULT): void {
+    this.enrichHost = dedicatedEnrichHost(url);
+    const base = this.buckets.get(ENRICH_BUCKET_ID)?.spec ?? BY_ID.get(ENRICH_BUCKET_ID);
+    if (!base) return;
+    const budget = enrichLaneBudget(callsPerMin);
+    this.buckets.set(ENRICH_BUCKET_ID, new Bucket({ ...base, ...budget }, this.clock.now()));
+  }
+
+  private specFor(url: string): BucketSpec | null {
+    const known = bucketFor(url);
+    if (known) return known;
+    if (!this.enrichHost) return null;
+    try {
+      if (new URL(url).hostname.toLowerCase() !== this.enrichHost) return null;
+    } catch {
+      return null;
+    }
+    return this.buckets.get(ENRICH_BUCKET_ID)?.spec ?? null;
   }
 
   private bucket(spec: BucketSpec): Bucket {
@@ -324,11 +401,26 @@ export class NetLimiter {
     return Math.max(1, oldest + 60_000 + 1 - now);
   }
 
+  /** Enrich lane only. At most ENRICH_RPS_CAP sends in any one second. Helius lanes do not use this. */
+  private enrichRpsWait(b: Bucket, now: number): number {
+    if (b.spec.id !== ENRICH_BUCKET_ID) return 0;
+    let count = 0;
+    let oldest = now;
+    for (let i = b.sentTimes.length - 1; i >= 0; i -= 1) {
+      const t = b.sentTimes[i]!;
+      if (t <= now - 1000) break;
+      count += 1;
+      oldest = t;
+    }
+    if (count < ENRICH_RPS_CAP) return 0;
+    return Math.max(1, oldest + 1000 - now);
+  }
+
   private pump(b: Bucket): void {
     if (b.timer) return;
     const now = this.clock.now();
     b.refill(now);
-    while (b.queue.length && now >= b.pauseUntil && b.tokens >= 1 && this.heliusWait(b, now) === 0) {
+    while (b.queue.length && now >= b.pauseUntil && b.tokens >= 1 && this.heliusWait(b, now) === 0 && this.enrichRpsWait(b, now) === 0) {
       b.tokens -= 1;
       b.sent += 1;
       b.sentTimes.push(now);
@@ -337,7 +429,7 @@ export class NetLimiter {
     if (!b.queue.length) return;
     const perMs = (b.spec.budgetPerMin * b.rateFactor) / 60_000;
     const waitToken = b.tokens >= 1 ? 0 : Math.ceil((1 - b.tokens) / perMs);
-    const wait = Math.max(waitToken, this.heliusWait(b, now), b.pauseUntil - now, 1);
+    const wait = Math.max(waitToken, this.heliusWait(b, now), this.enrichRpsWait(b, now), b.pauseUntil - now, 1);
     b.timer = true;
     this.clock.setTimeout(() => {
       b.timer = false;
@@ -362,13 +454,44 @@ export class NetLimiter {
     }
     b.backoffStep = Math.min(b.backoffStep + 1, 10);
     b.pauseUntil = Math.max(b.pauseUntil, now + wait);
-    return wait;
+    b.consecutiveFail += 1;
+    this.armCircuit(b, now);
+    return b.circuitUntil > now ? Math.max(wait, b.circuitUntil - now) : wait;
+  }
+
+  /** HTTP 5xx on an enrich host. Same pause ladder as a 429, without counting it as a 429. */
+  note5xx(spec: BucketSpec): number {
+    if (spec.id !== ENRICH_BUCKET_ID) return 0;
+    const b = this.bucket(spec);
+    const now = this.clock.now();
+    b.count5xx += 1;
+    b.rateFactor = Math.max(MIN_RATE_FACTOR, b.rateFactor * 0.5);
+    b.tokens = Math.min(b.tokens, 0);
+    const raw = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** b.backoffStep);
+    const jitter = 0.75 + this.clock.random() * 0.5;
+    const wait = Math.min(BACKOFF_CAP_MS, Math.round(raw * jitter));
+    b.backoffStep = Math.min(b.backoffStep + 1, 10);
+    b.pauseUntil = Math.max(b.pauseUntil, now + wait);
+    b.consecutiveFail += 1;
+    this.armCircuit(b, now);
+    return b.circuitUntil > now ? b.circuitUntil - now : wait;
+  }
+
+  /** Repeated enrich-host failures pause that host. Helius lanes are not armed. */
+  private armCircuit(b: Bucket, now: number): void {
+    if (b.spec.id !== ENRICH_BUCKET_ID) return;
+    if (b.consecutiveFail < ENRICH_CIRCUIT_FAILS) return;
+    const until = Math.max(b.pauseUntil, now + ENRICH_CIRCUIT_MS);
+    b.pauseUntil = until;
+    b.circuitUntil = until;
   }
 
   /** A good answer: clear the backoff ladder and step the rate back toward full budget. */
   noteOk(spec: BucketSpec): void {
     const b = this.bucket(spec);
     b.backoffStep = 0;
+    b.consecutiveFail = 0;
+    b.circuitUntil = 0;
     if (b.rateFactor < 1) {
       b.refill(this.clock.now());
       b.rateFactor = Math.min(1, b.rateFactor + RATE_STEP_UP);
@@ -388,6 +511,15 @@ export class NetLimiter {
     return b.pauseUntil > this.clock.now() ? b.pauseUntil : null;
   }
 
+  /** True when this enrich host is in its circuit pause. Wallet and Helius URLs are never open. */
+  circuitOpenFor(url: string): boolean {
+    const spec = this.specFor(url);
+    const lane = rpcLane(spec, 1, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [] }));
+    if (!lane || lane.id !== ENRICH_BUCKET_ID) return false;
+    const b = this.buckets.get(lane.id);
+    return b != null && b.circuitUntil > this.clock.now();
+  }
+
   stats(): BucketStats[] {
     const now = this.clock.now();
     return [...this.buckets.values()].map((b) => {
@@ -400,6 +532,8 @@ export class NetLimiter {
         reqLastMin: b.windowCount(now),
         cacheHitsLastMin: b.hitTimes.length,
         count429: b.count429,
+        count5xx: b.count5xx,
+        circuitOpen: b.circuitUntil > now,
         sent: b.sent,
         rateFactor: Math.round(b.rateFactor * 100) / 100,
         pausedUntil: b.pauseUntil > now ? b.pauseUntil : null,
@@ -416,7 +550,7 @@ export class NetLimiter {
    */
   fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number }): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const spec = bucketFor(url);
+    const spec = this.specFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
     const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
     const lane = rpcLane(spec, priority, rest.body);
@@ -464,6 +598,17 @@ export class NetLimiter {
 
   private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number): Promise<CachedResponse> {
     for (let attempt = 0; ; attempt += 1) {
+      // A paused enrich host returns at once so the sighting stays pending.
+      // This lane is not Helius, so a wallet or mark read is not held here.
+      if (spec.id === ENRICH_BUCKET_ID && this.pausedUntil(spec)) {
+        const circuit = (this.buckets.get(spec.id)?.circuitUntil ?? 0) > this.clock.now();
+        return {
+          status: 429,
+          statusText: circuit ? "enrich circuit" : "enrich backing off",
+          headers: [["x-nd-local", "1"], ["x-nd-circuit", circuit ? "1" : "0"]],
+          body: ""
+        };
+      }
       // Held marks and Add coin never sit out a backoff: they get a local 429 at once,
       // so the held-price book switches to its other source instead of freezing.
       if (priority === 0 && this.pausedUntil(spec)) {
@@ -484,7 +629,11 @@ export class NetLimiter {
         if (retry && attempt === 0 && priority !== 0) continue;
         return cached;
       }
-      if (res.status < 500) this.noteOk(spec);
+      if (res.status >= 500) {
+        if (spec.id === ENRICH_BUCKET_ID) this.note5xx(spec);
+        return cached;
+      }
+      this.noteOk(spec);
       return cached;
     }
   }

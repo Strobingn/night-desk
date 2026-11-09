@@ -72,15 +72,15 @@ describe("scout enrich drain", () => {
       onStatus: () => {}
     });
 
-    for (const mint of ["a", "b", "c", "d"]) {
-      scout.ingest({ mint, source: "pumpfun", observedAt: Date.now() });
+    for (const [n, mint] of ["a", "b", "c", "d"].entries()) {
+      scout.ingest({ mint, source: "pumpfun", observedAt: 1_000 + n });
     }
     expect(scout.status.sightings).toBe(4);
     expect(scout.status.dropped).toBe(1);
 
     gate.resolve();
     await waitFor(() => published.length === 3);
-    expect(published).toEqual(["a", "c", "d"]);
+    expect(published).toEqual(["a", "d", "c"]);
     scout.stop();
   });
 

@@ -2,6 +2,7 @@ import { isReserveHolder, pumpReserveAddresses } from "./exclusions.js";
 
 export interface ParsedMint {
   mintAuthorityRevoked: boolean | null;
+  freezeAuthorityRevoked: boolean | null;
   supplyUi: number | null;
   decimals: number | null;
 }
@@ -13,7 +14,7 @@ export function parseMintAccount(result: unknown): ParsedMint {
       value?: { data?: { parsed?: { info?: { mintAuthority?: string | null; supply?: string; decimals?: number } } } };
     }
   )?.value?.data?.parsed?.info;
-  if (!info) return { mintAuthorityRevoked: null, supplyUi: null, decimals: null };
+  if (!info) return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
   const decimals = typeof info.decimals === "number" ? info.decimals : null;
   let supplyUi: number | null = null;
   if (info.supply != null && decimals != null) {
@@ -21,7 +22,58 @@ export function parseMintAccount(result: unknown): ParsedMint {
     supplyUi = Number.isFinite(raw) ? raw / 10 ** decimals : null;
   }
   const revoked = info.mintAuthority == null;
-  return { mintAuthorityRevoked: revoked, supplyUi, decimals };
+  const freeze = (info as { freezeAuthority?: string | null }).freezeAuthority;
+  return { mintAuthorityRevoked: revoked, freezeAuthorityRevoked: freeze == null, supplyUi, decimals };
+}
+
+export interface AuthorityHints {
+  mintAuthorityRevoked: boolean | null;
+  freezeAuthorityRevoked: boolean | null;
+  supplyUi: number | null;
+  decimals: number | null;
+}
+
+/** Explicit mint/freeze fields only. A missing field stays null so Filter still fails closed. */
+export function authorityHints(source: unknown): AuthorityHints {
+  const empty: AuthorityHints = { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
+  if (!source || typeof source !== "object") return empty;
+  const root = source as Record<string, unknown>;
+  const bags = [root, record(root.token), record(root.tokenMeta), record(root.baseToken), record(root.info), record(root.audit)].filter(
+    (bag): bag is Record<string, unknown> => bag != null
+  );
+  let mint: boolean | null = null;
+  let freeze: boolean | null = null;
+  let decimals: number | null = null;
+  for (const bag of bags) {
+    if (mint == null) mint = revokedField(bag, "mintAuthority", "mintAuthorityDisabled");
+    if (freeze == null) freeze = revokedField(bag, "freezeAuthority", "freezeAuthorityDisabled");
+    if (decimals == null && typeof bag.decimals === "number" && Number.isFinite(bag.decimals)) decimals = bag.decimals;
+  }
+  let supplyUi: number | null = null;
+  for (const bag of bags) {
+    if (supplyUi == null) supplyUi = supplyField(bag, decimals);
+  }
+  return { mintAuthorityRevoked: mint, freezeAuthorityRevoked: freeze, supplyUi, decimals };
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function revokedField(bag: Record<string, unknown>, key: string, disabledKey: string): boolean | null {
+  if (disabledKey in bag && typeof bag[disabledKey] === "boolean") return bag[disabledKey] === true;
+  if (!(key in bag)) return null;
+  const value = bag[key];
+  if (value == null || value === "") return true;
+  if (typeof value === "string") return false;
+  return null;
+}
+
+function supplyField(bag: Record<string, unknown>, decimals: number | null): number | null {
+  const raw = bag.supply;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return null;
+  if (decimals != null && Number.isInteger(raw)) return raw / 10 ** decimals;
+  return raw > 0 ? raw : null;
 }
 
 export interface LargestHolderRow {
@@ -163,9 +215,10 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
   };
   const risks = Array.isArray(data.risks) ? data.risks : [];
   const names = risks.map((r) => `${r.name ?? ""} ${r.description ?? ""}`.toLowerCase());
-  let mintAuthorityRevoked: boolean | null = null;
+  const hinted = authorityHints(data);
+  let mintAuthorityRevoked: boolean | null = hinted.mintAuthorityRevoked;
   // A report that never mentions mint authority says nothing. Null fails closed as still active.
-  if (names.some((n) => /mint authority/.test(n) && /enabled|not revoked|still/.test(n))) {
+  if (mintAuthorityRevoked == null && names.some((n) => /mint authority/.test(n) && /enabled|not revoked|still/.test(n))) {
     mintAuthorityRevoked = false;
   }
 

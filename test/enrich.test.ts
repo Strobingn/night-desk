@@ -36,9 +36,8 @@ describe("enrich overlap", () => {
       { rpcUrl: "http://rpc.test/solana", rugcheckUrl: "http://rug.test", fetchImpl }
     );
 
-    const firstStart = Math.min(starts.dex, starts.rug, starts.getAccountInfo);
-    const firstWave = Math.max(ends.dex, ends.rug, ends.getAccountInfo) - firstStart;
-    expect(firstWave).toBeLessThan(delay.dex + delay.rug + delay.getAccountInfo - 40);
+    expect(Math.abs(starts.dex - starts.rug)).toBeLessThan(40);
+    expect(starts.getAccountInfo).toBeGreaterThanOrEqual(Math.max(ends.dex, ends.rug) - 5);
     expect(starts.getTokenLargestAccounts).toBeGreaterThanOrEqual(ends.getAccountInfo - 5);
     expect(starts.getMultipleAccounts).toBeGreaterThanOrEqual(ends.getTokenLargestAccounts - 5);
     expect(counts).toEqual({
@@ -57,6 +56,11 @@ describe("enrich overlap", () => {
   it("clamps enrich concurrency and queue from the environment", () => {
     expect(loadConfig({}).enrichConcurrency).toBe(8);
     expect(loadConfig({}).enrichQueueCap).toBe(160);
+    expect(loadConfig({}).holderPagesMax).toBe(0);
+    expect(loadConfig({}).enrichCallsPerMin).toBe(45);
+    expect(loadConfig({ ENRICH_RPC_CALLS_PER_MIN: "10" }).enrichCallsPerMin).toBe(10);
+    expect(loadConfig({ ENRICH_RPC_CALLS_PER_MIN: "99999" }).enrichCallsPerMin).toBe(1200);
+    expect(loadConfig({ HOLDER_PAGES_MAX: "3" }).holderPagesMax).toBe(3);
     expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "8" }).enrichConcurrency).toBe(8);
     expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "0" }).enrichConcurrency).toBe(1);
     expect(loadConfig({ SCOUT_ENRICH_CONCURRENCY: "99" }).enrichConcurrency).toBe(16);

@@ -713,6 +713,11 @@ export interface DeskSnapshot {
     /** v13.8 per held coin: the pool kind read on-chain, or why it cannot be. */
     chain?: Array<{ mint: string; symbol: string; pool: string | null; kind: string | null; reason: string | null }>;
   };
+  /**
+   * v13.28 enrich RPC. `host` is the hostname of SOLANA_RPC_URL only.
+   * `callsPerMin` is enrich reads in the last minute. No URL and no key.
+   */
+  enrich?: { host: string | null; callsPerMin: number };
   /** v13.24 installed release. The Home crash card compares a report to this. */
   appVersion?: string;
   /** v12. Last crash the phone reported (POST /api/client-crash). Kept after Dismiss. */
