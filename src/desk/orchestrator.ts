@@ -27,7 +27,7 @@ import { ReplayFeed } from "../demo/replay.js";
 import { advise, AdvisorBook, noteEntry, noteKill, noteNearMissSurface, noteNearMissTaken, noteOutcome, notePass, type Advice, type FeatureSample, type WeakSurvivor } from "./advisor.js";
 import { classifyNearMiss } from "./near-miss.js";
 import { phraseAdvice } from "./commentary.js";
-import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump, markUnusable, needsShockConfirm, outlierReason, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
+import { ABSURD_RISE, LOG_THROTTLE_MS, LIVE_FRESH_MS, QUOTE_CONFIRM_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, entryAnchor, isJump, markUnusable, needsShockConfirm, outlierReason, quoteConfirms, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
 import { visibleEquity } from "./equity-series.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
@@ -342,6 +342,8 @@ export class Desk {
   private shocks = new Map<string, { feed: string; price?: number }>();
   /** v13.2 calibrated on-chain marks. Display and stop confirmation only. */
   private liveMarks = new Map<string, { price: number; at: number; feed: string }>();
+  /** Recent Dex and Jupiter prints. A chain mark and a large rise need the other feed, not a copy of themselves. */
+  private quotePrints = new Map<string, { dex?: { price: number; at: number }; jup?: { price: number; at: number } }>();
   /** v13.2 a >30% live jump waiting for a second read. */
   private livePending = new Map<string, { price: number; at: number }>();
   private lastConfirmAt = new Map<string, number>();
@@ -489,7 +491,11 @@ export class Desk {
         this.liveBook.positions.set(pos.mint, pos);
         this.liveBook.mark(pos.mint, pos.entryPrice);
       }
-      for (const [mint, priceUsd] of liveSaved?.lastPrices ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.mark(mint, priceUsd);
+      for (const [mint, priceUsd] of liveSaved?.lastPrices ?? []) {
+        const pos = this.liveBook.positions.get(mint);
+        if (!pos || (pos.entryPrice > 0 && priceUsd / pos.entryPrice >= ABSURD_RISE)) continue;
+        this.liveBook.mark(mint, priceUsd);
+      }
       for (const [mint, points] of liveSaved?.markSeries ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.restoreSeries(mint, points);
       for (const [mint, until] of liveSaved?.cooldowns ?? []) {
         if (this.config.rules.revengeCooldownMs > 0 && until > Date.now()) this.cooldowns.set(bookKey("live", mint), until);
@@ -502,12 +508,22 @@ export class Desk {
         this.book.positions.set(pos.mint, pos);
         this.book.mark(pos.mint, pos.entryPrice);
       }
-      for (const [mint, priceUsd] of restored.lastPrices ?? []) this.book.mark(mint, priceUsd);
-      for (const [mint, points] of restored.markSeries ?? []) if (this.book.positions.has(mint)) this.book.restoreSeries(mint, points);
+      for (const [mint, priceUsd] of restored.lastPrices ?? []) {
+        const pos = this.book.positions.get(mint);
+        if (pos && pos.entryPrice > 0 && priceUsd / pos.entryPrice >= ABSURD_RISE) continue;
+        this.book.mark(mint, priceUsd);
+      }
+      for (const [mint, points] of restored.markSeries ?? []) {
+        const pos = this.book.positions.get(mint);
+        if (!pos) continue;
+        const kept = pos.entryPrice > 0 ? points.filter((point) => !(point.priceUsd / pos.entryPrice >= ABSURD_RISE)) : points;
+        this.book.restoreSeries(mint, kept);
+      }
       for (const [mint, until] of restored.cooldowns) {
         if (this.config.rules.revengeCooldownMs > 0 && until > Date.now() && !mint.startsWith(LIVE_KEY)) this.cooldowns.set(mint, until);
       }
     }
+    this.healAbsurdMarks();
     this.resetAt = this.ensureResetAt();
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
     this.unconfirmedLive = loadUnconfirmed(this.store.readJson("liveUnconfirmed"));
@@ -565,9 +581,13 @@ export class Desk {
     });
     this.scout.setPumpFrameHook((text) => this.pump.onPumpFrame(text));
     this.pricer = new PositionPricer({
-      heldMints: () => [
-        ...new Set([...this.book.positions.values(), ...(this.liveBook?.positions.values() ?? [])].filter((pos) => pos.source !== "replay").map((pos) => pos.mint))
-      ],
+      heldMints: () => {
+        const held = [
+          ...new Set([...this.book.positions.values(), ...(this.liveBook?.positions.values() ?? [])].filter((pos) => pos.source !== "replay").map((pos) => pos.mint))
+        ];
+        this.pump.feed.setHeldMints(held);
+        return held;
+      },
       tick: (mint, priceUsd, quote) =>
         this.scout.tick(mint, priceUsd, {
           feed: quote?.feed,
@@ -2044,6 +2064,7 @@ export class Desk {
   }
 
   snapshot(): DeskSnapshot {
+    this.healAbsurdMarks();
     const riskEquityUsd = this.book.equity();
     const equityUsd = this.displayEquity();
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
@@ -2210,10 +2231,12 @@ export class Desk {
       const held = this.book.positions.get(tick.mint) ?? this.liveBook?.positions.get(tick.mint);
       const heldBook = this.book.positions.has(tick.mint) ? this.book : this.liveBook;
       const lastGood = held && heldBook ? heldBook.price(tick.mint, held.entryPrice) : undefined;
+      const anchor = held ? entryAnchor(held.entryPrice, lastGood ?? held.entryPrice) : undefined;
       // A rejected outlier must not become the crash-guard high and block the next buy.
-      if (!markUnusable(tick.priceUsd) && !(lastGood != null && outlierReason(lastGood, tick.priceUsd))) {
+      if (!markUnusable(tick.priceUsd) && !(anchor != null && outlierReason(anchor, tick.priceUsd))) {
         this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
       }
+      this.noteFeedQuote(tick.mint, tick.feed, tick.priceUsd, tick.at);
       this.applyMark(tick.mint, tick.priceUsd, {
         feed: tick.feed,
         pairAddress: tick.pairAddress,
@@ -3100,8 +3123,12 @@ export class Desk {
     }
     if (pos && !pos.closing) {
       const lastGood = book.price(mint, pos.entryPrice);
-      const why = outlierReason(lastGood, priceUsd);
-      if (why) {
+      const anchor = entryAnchor(pos.entryPrice, lastGood);
+      const why = outlierReason(anchor, priceUsd);
+      // A Dex or Jupiter print this far above the entry is never equity. Only a chain mark
+      // can pass, and only when an independent quote sits near it.
+      const confirmed = origin?.feed === "chain" && quoteConfirms(priceUsd, this.otherQuotes(mint, "chain", Date.now()));
+      if (why && !confirmed) {
         if (!this.quiet("PRICE_OUTLIER", key)) {
           const kindLabel = why === "unit" ? "a decimals or SOL/USD mix-up" : "an implausible jump";
           this.log({
@@ -3110,7 +3137,7 @@ export class Desk {
             mint,
             symbol: pos.symbol,
             code: "PRICE_OUTLIER",
-            message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${originLabel(origin)} (${kindLabel} versus the last good mark ${price(lastGood)}). Equity, the stop and the card stay on that mark, which goes stale until a sane print arrives.`
+            message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${originLabel(origin)} (${kindLabel} versus ${price(anchor)}). Equity, the stop and the card stay on the last mark that agrees with the entry, which goes stale until a sane print arrives.`
           });
         }
         return;
@@ -3174,7 +3201,13 @@ export class Desk {
     const pos = book.positions.get(mint);
     if (!pos || pos.closing || markUnusable(priceUsd)) return;
     const lastGood = book.price(mint, pos.entryPrice);
-    if (outlierReason(lastGood, priceUsd)) return;
+    const anchor = entryAnchor(pos.entryPrice, lastGood);
+    const quotes = [
+      ...this.otherQuotes(mint, "chain", Date.now()),
+      origin.dexUsd,
+      origin.jupUsd
+    ];
+    if (outlierReason(anchor, priceUsd) && !quoteConfirms(priceUsd, quotes)) return;
     // v13.8: a migrated pool's successor is shown only while it agrees with the risk mark (±25%).
     // A drained successor pool (PEPPER: 0.0001 SOL left) can print any price.
     if (origin.pairAddress && pos.pairAddress && origin.pairAddress !== pos.pairAddress) {
@@ -3251,6 +3284,7 @@ export class Desk {
 
   /** v13.2 small WS payload: only what a position card needs. */
   marksDelta(): MarksDelta {
+    this.healAbsurdMarks();
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
     const livePositions = this.liveBook ? [...this.liveBook.positions.values()].map((pos) => this.view(pos, "live")) : [];
     const slim = (p: PositionView) => ({
@@ -3348,7 +3382,57 @@ export class Desk {
     return !markUnusable(last) ? last : pos.entryPrice;
   }
 
+  private noteFeedQuote(mint: string, feed: string | undefined, priceUsd: number, at: number): void {
+    if (!(priceUsd > 0) || (feed !== "dexscreener" && feed !== "jupiter")) return;
+    const row = this.quotePrints.get(mint) ?? {};
+    if (feed === "dexscreener") row.dex = { price: priceUsd, at };
+    else row.jup = { price: priceUsd, at };
+    this.quotePrints.set(mint, row);
+  }
+
+  private otherQuotes(mint: string, feed: string | undefined, now: number): number[] {
+    const row = this.quotePrints.get(mint);
+    const out: number[] = [];
+    const take = (slot: "dex" | "jup", src: string) => {
+      if (feed === src) return;
+      const q = row?.[slot];
+      if (q && now - q.at <= QUOTE_CONFIRM_MS && q.price > 0) out.push(q.price);
+    };
+    take("dex", "dexscreener");
+    take("jup", "jupiter");
+    return out;
+  }
+
+  /**
+   * A saved or streamed mark dozens of times the entry, with no other feed near it,
+   * is not part of equity, PnL, or the sparkline. The entry price stays in its place.
+   */
+  private healAbsurdMarks(): void {
+    const now = Date.now();
+    for (const kind of ["paper", "live"] as const) {
+      const book = kind === "live" ? this.liveBook : this.book;
+      if (!book) continue;
+      for (const pos of book.positions.values()) {
+        const key = bookKey(kind, pos.mint);
+        const live = this.liveMarks.get(key);
+        if (live && outlierReason(entryAnchor(pos.entryPrice, live.price), live.price) && !quoteConfirms(live.price, [...this.otherQuotes(pos.mint, "chain", now)])) {
+          this.liveMarks.delete(key);
+        }
+        const px = book.lastPrice.get(pos.mint);
+        if (px != null && pos.entryPrice > 0 && px / pos.entryPrice >= ABSURD_RISE && !quoteConfirms(px, this.otherQuotes(pos.mint, undefined, now))) {
+          book.lastPrice.set(pos.mint, pos.entryPrice);
+        }
+        const series = book.series.get(pos.mint);
+        if (series && pos.entryPrice > 0) {
+          const kept = series.filter((point) => !(point.priceUsd / pos.entryPrice >= ABSURD_RISE) || quoteConfirms(point.priceUsd, this.otherQuotes(pos.mint, undefined, now)));
+          if (kept.length !== series.length) book.series.set(pos.mint, kept);
+        }
+      }
+    }
+  }
+
   private markEquity(force = false): void {
+    this.healAbsurdMarks();
     const now = Date.now();
     if (!force && now - this.lastEquityAt < 1_800) return;
     this.lastEquityAt = now;

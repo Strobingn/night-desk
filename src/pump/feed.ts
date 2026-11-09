@@ -18,6 +18,8 @@ const WATCH_CAP = 40;
 
 export class PumpFeed {
   private readonly accounts = new Map<string, string>();
+  /** Mints with an open position. Scouted coins stay decoded locally but are not subscribed. */
+  private held = new Set<string>();
   /** Opened sockets. Stays 0: the feed does not dial PumpPortal or RPC. */
   readonly socketsOpened = 0;
 
@@ -55,7 +57,21 @@ export class PumpFeed {
     this.accounts.set(bondingCurvePda(key).toBase58(), mint);
     this.accounts.set(canonicalPumpPoolPda(key).toBase58(), mint);
     this.trim();
-    this.opts.stream?.setExtraKeys(this.accounts.keys());
+    this.pushStream();
+  }
+
+  /** Curve and pool accounts for open positions only. Scout traffic must not fill the socket. */
+  setHeldMints(mints: Iterable<string>): void {
+    const next = new Set(mints);
+    const same = next.size === this.held.size && [...next].every((mint) => this.held.has(mint));
+    this.held = next;
+    if (!same) this.pushStream();
+  }
+
+  private pushStream(): void {
+    const keys: string[] = [];
+    for (const [key, mint] of this.accounts) if (this.held.has(mint)) keys.push(key);
+    this.opts.stream?.setExtraKeys(keys);
   }
 
   /** ChainStream account notification. Ignored unless the mint was watched. */

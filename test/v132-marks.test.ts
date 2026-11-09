@@ -325,7 +325,7 @@ describe("v13.2 on-chain pool marks", () => {
     expect(calls[calls.length - 1]).toEqual([BASE_VAULT, QUOTE_VAULT]);
   });
 
-  it("does not show a PumpSwap mark until two agreeing samples calibrate it, and refuses a disagreeing set", async () => {
+  it("prices a PumpSwap pool as vault ratio times SOL/USD once a quote agrees, and stops when the quote disagrees", async () => {
     let now = 0;
     let jup = 2.1e-4;
     const lives: number[] = [];
@@ -345,12 +345,10 @@ describe("v13.2 on-chain pool marks", () => {
     });
     await pricer.poll();
     expect(CAL_MIN).toBe(2);
-    expect(lives).toHaveLength(0);
-    now = 6_000;
-    await pricer.poll();
+    // 125 SOL / 1e8 coins = 1.25e-6 SOL, times $150. The Jupiter print is the cross-check, not the mark.
     expect(lives).toHaveLength(1);
-    expect(lives[0]).toBeCloseTo(2.1e-4, 10);
-    // Jupiter disagreeing by 20% makes the calibration spread too wide: no live mark.
+    expect(lives[0]).toBeCloseTo(1.25e-6 * 150, 10);
+    // Jupiter 20% off SOL/USD fails the cross-check: the chain mark does not follow it.
     jup = 2.52e-4;
     now = 12_000;
     await pricer.poll();
