@@ -27,7 +27,8 @@ import { ReplayFeed } from "../demo/replay.js";
 import { advise, AdvisorBook, noteEntry, noteKill, noteNearMissSurface, noteNearMissTaken, noteOutcome, notePass, type Advice, type FeatureSample, type WeakSurvivor } from "./advisor.js";
 import { classifyNearMiss } from "./near-miss.js";
 import { phraseAdvice } from "./commentary.js";
-import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump, markUnusable, needsShockConfirm, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
+import { LOG_THROTTLE_MS, LIVE_FRESH_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, isJump, markUnusable, needsShockConfirm, outlierReason, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
+import { visibleEquity } from "./equity-series.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
@@ -130,6 +131,8 @@ interface DeskSettings {
   maxTradesPerHour?: number;
   dailyMaxLossUsd?: number;
   cooldownHours?: number;
+  /** v13.20 set once the stored 6h ban has been retired. Absent means "force off". */
+  cooldownRetired?: boolean;
   stopLossPct?: number;
   trailTakeProfit?: boolean;
   trailArmPct?: number;
@@ -361,6 +364,8 @@ export class Desk {
   private commentTimer: NodeJS.Timeout | null = null;
   private lastNotes = new Set<string>();
   private lastEquityAt = 0;
+  /** Last equity sample actually written. A bogus jump is not stored and does not move this. */
+  private lastEquitySample: { equity: number; cash: number } | null = null;
   private pipeline: PipelineCounts = {
     scouted: 0,
     filteredPass: 0,
@@ -486,7 +491,9 @@ export class Desk {
       }
       for (const [mint, priceUsd] of liveSaved?.lastPrices ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.mark(mint, priceUsd);
       for (const [mint, points] of liveSaved?.markSeries ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.restoreSeries(mint, points);
-      for (const [mint, until] of liveSaved?.cooldowns ?? []) if (until > Date.now()) this.cooldowns.set(bookKey("live", mint), until);
+      for (const [mint, until] of liveSaved?.cooldowns ?? []) {
+        if (this.config.rules.revengeCooldownMs > 0 && until > Date.now()) this.cooldowns.set(bookKey("live", mint), until);
+      }
     }
     if (restored) {
       this.startedAt = restored.startedAt;
@@ -497,7 +504,9 @@ export class Desk {
       }
       for (const [mint, priceUsd] of restored.lastPrices ?? []) this.book.mark(mint, priceUsd);
       for (const [mint, points] of restored.markSeries ?? []) if (this.book.positions.has(mint)) this.book.restoreSeries(mint, points);
-      for (const [mint, until] of restored.cooldowns) if (until > Date.now() && !mint.startsWith(LIVE_KEY)) this.cooldowns.set(mint, until);
+      for (const [mint, until] of restored.cooldowns) {
+        if (this.config.rules.revengeCooldownMs > 0 && until > Date.now() && !mint.startsWith(LIVE_KEY)) this.cooldowns.set(mint, until);
+      }
     }
     this.resetAt = this.ensureResetAt();
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
@@ -740,7 +749,7 @@ export class Desk {
         openedAt: pos.openedAt
       })),
       closed: this.store.closedSince(this.resetAt),
-      equity: this.store.equitySince(this.resetAt),
+      equity: visibleEquity(this.store.equitySince(this.resetAt)),
       pipeline: { ...this.pipeline },
       settings: this.readSettings(),
       nextStartingUsd: starting
@@ -801,7 +810,7 @@ export class Desk {
         since,
         until: now,
         events: this.store.eventsSince(since),
-        equity: this.store.equitySince(since),
+        equity: visibleEquity(this.store.equitySince(since)),
         closed: this.store.closedSince(since),
         open: snap.positions,
         startingBalanceUsd: snap.startingBalanceUsd
@@ -2075,7 +2084,7 @@ export class Desk {
         .recentClosed(40)
         .filter((trade) => trade.closedAt >= this.startedAt)
         .slice(-20),
-      equity: downsample(this.store.equitySince(this.startedAt), 240),
+      equity: downsample(visibleEquity(this.store.equitySince(this.startedAt)), 240),
       events: this.store.recentEvents(180),
       advice: this.advice,
       watchlist: this.watchlist.map((item) => ({ ...item })),
@@ -2198,7 +2207,13 @@ export class Desk {
 
     this.bus.on("market.tick", (tick) => {
       this.pricer.noteTick(tick.mint);
-      if (!markUnusable(tick.priceUsd)) this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
+      const held = this.book.positions.get(tick.mint) ?? this.liveBook?.positions.get(tick.mint);
+      const heldBook = this.book.positions.has(tick.mint) ? this.book : this.liveBook;
+      const lastGood = held && heldBook ? heldBook.price(tick.mint, held.entryPrice) : undefined;
+      // A rejected outlier must not become the crash-guard high and block the next buy.
+      if (!markUnusable(tick.priceUsd) && !(lastGood != null && outlierReason(lastGood, tick.priceUsd))) {
+        this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
+      }
       this.applyMark(tick.mint, tick.priceUsd, {
         feed: tick.feed,
         pairAddress: tick.pairAddress,
@@ -2860,7 +2875,7 @@ export class Desk {
       return;
     }
     pos.closing = true;
-    if (view.code === "STOP_LOSS") {
+    if (view.code === "STOP_LOSS" && this.config.rules.revengeCooldownMs > 0) {
       this.cooldowns.set(bookKey(kind, mint), Date.now() + this.config.rules.revengeCooldownMs);
       this.persist();
     }
@@ -3083,6 +3098,24 @@ export class Desk {
     } else if (pos) {
       this.reanchors.delete(key);
     }
+    if (pos && !pos.closing) {
+      const lastGood = book.price(mint, pos.entryPrice);
+      const why = outlierReason(lastGood, priceUsd);
+      if (why) {
+        if (!this.quiet("PRICE_OUTLIER", key)) {
+          const kindLabel = why === "unit" ? "a decimals or SOL/USD mix-up" : "an implausible jump";
+          this.log({
+            stage: "risk",
+            kind: "reject",
+            mint,
+            symbol: pos.symbol,
+            code: "PRICE_OUTLIER",
+            message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${originLabel(origin)} (${kindLabel} versus the last good mark ${price(lastGood)}). Equity, the stop and the card stay on that mark, which goes stale until a sane print arrives.`
+          });
+        }
+        return;
+      }
+    }
     const shock = !!pos && !pos.closing && needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now());
     // Operator and replay marks carry no feed and are trusted as before; feed prints must repeat a >30% jump.
     const jump = !!pos && !pos.closing && !reanchored && !!origin?.feed && isJump(book.lastPrice.get(mint), priceUsd);
@@ -3140,6 +3173,8 @@ export class Desk {
     const key = bookKey(kind, mint);
     const pos = book.positions.get(mint);
     if (!pos || pos.closing || markUnusable(priceUsd)) return;
+    const lastGood = book.price(mint, pos.entryPrice);
+    if (outlierReason(lastGood, priceUsd)) return;
     // v13.8: a migrated pool's successor is shown only while it agrees with the risk mark (±25%).
     // A drained successor pool (PEPPER: 0.0001 SOL left) can print any price.
     if (origin.pairAddress && pos.pairAddress && origin.pairAddress !== pos.pairAddress) {
@@ -3317,7 +3352,15 @@ export class Desk {
     const now = Date.now();
     if (!force && now - this.lastEquityAt < 1_800) return;
     this.lastEquityAt = now;
-    this.store.insertEquity({ t: now, equity: roundUsd(this.book.equity()), cash: roundUsd(this.book.cashUsd) });
+    const equity = roundUsd(this.book.equity());
+    const cash = roundUsd(this.book.cashUsd);
+    const prev = this.lastEquitySample;
+    const prevMv = prev ? Math.max(0, prev.equity - prev.cash) : 0;
+    const mv = Math.max(0, equity - cash);
+    const cashUp = prev != null && cash > prev.cash + 500;
+    if (prev && !cashUp && equity > prev.equity * 1.02 && prevMv > 1 && mv > prevMv * 25 && mv - prevMv > 500) return;
+    this.lastEquitySample = { equity, cash };
+    this.store.insertEquity({ t: now, equity, cash });
   }
 
   private remember(token: CandidateToken): void {
@@ -3510,8 +3553,9 @@ export class Desk {
     }
     if ("cooldownHours" in patch) {
       const raw = num("cooldownHours");
-      if (!Number.isFinite(raw) || raw < 6) return { ok: false, error: "Per-mint cooldown cannot be under 6 hours." };
+      if (!Number.isFinite(raw) || raw < 0) return { ok: false, error: "Cooldown hours must be 0 (off) through 72." };
       next.cooldownHours = clampCooldownHours(raw);
+      next.cooldownRetired = true;
     }
     if ("stopLossPct" in patch) {
       const raw = num("stopLossPct");
@@ -3621,6 +3665,21 @@ export class Desk {
     return null;
   }
 
+  /**
+   * v13.20 the stored 6h ban is retired once. A later save of 0 stays off.
+   * A later save above 0 is the operator turning the slider back on, and is the only way it blocks.
+   */
+  private applyCooldown(saved: DeskSettings): void {
+    if (saved.cooldownRetired === true) {
+      const hours = typeof saved.cooldownHours === "number" ? clampCooldownHours(saved.cooldownHours) : 0;
+      this.config.rules.revengeCooldownMs = hours * 3_600_000;
+    } else {
+      this.config.rules.revengeCooldownMs = 0;
+      this.store.writeJson("settings", { ...saved, cooldownHours: 0, cooldownRetired: true });
+    }
+    if (this.config.rules.revengeCooldownMs <= 0) this.cooldowns.clear();
+  }
+
   private absorbGates(saved: DeskSettings): void {
     if (typeof saved.minLiquidityUsd === "number") this.minLiquidityUsd = clampLiquidityUsd(saved.minLiquidityUsd);
     if (typeof saved.minTokenAgeMin === "number") this.minTokenAgeMin = clampAgeMinutes(saved.minTokenAgeMin);
@@ -3629,9 +3688,7 @@ export class Desk {
     if (typeof saved.maxDevHoldingPct === "number") this.maxDevHoldingPct = clampDevHoldingPct(saved.maxDevHoldingPct);
     if (typeof saved.maxTradesPerHour === "number") this.maxTradesPerHour = clampTradesPerHour(saved.maxTradesPerHour);
     if (typeof saved.dailyMaxLossUsd === "number") this.dailyMaxLossUsd = clampDailyLossUsd(saved.dailyMaxLossUsd);
-    if (typeof saved.cooldownHours === "number" && saved.cooldownHours >= 6) {
-      this.config.rules.revengeCooldownMs = clampCooldownHours(saved.cooldownHours) * 3_600_000;
-    }
+    this.applyCooldown(saved);
     if (typeof saved.stopLossPct === "number" && saved.stopLossPct > 0 && saved.stopLossPct <= HARD_RULES.stopLossPct + 1e-9) {
       this.config.rules.stopLossPct = clampStopLossPct(saved.stopLossPct);
     }

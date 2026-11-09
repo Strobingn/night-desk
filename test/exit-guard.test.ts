@@ -97,7 +97,7 @@ describe("exit impact gate", () => {
     }
   });
 
-  it("keeps the hard-stop ban on auto buys and lets a confirmed manual buy through", async () => {
+  it("does not ban a mint after a hard stop while cooldown is off", async () => {
     const desk = testDesk();
     const mint = "BanMint111111111111111111111111111111111";
     const server = startServer(desk, "127.0.0.1", 0);
@@ -107,23 +107,8 @@ describe("exit impact gate", () => {
       await desk.submitCandidate(makeToken({ mint, symbol: "BAN", priceUsd: 1, liquidityUsd: 180_000 }));
       await desk.markPrice(mint, 0.9);
       expect(desk.book.positions.has(mint)).toBe(false);
-      const row = desk.snapshot().cooldowns.find((item) => item.mint === mint);
-      expect(row?.minutesLeft).toBeGreaterThanOrEqual(359);
-
-      await desk.submitCandidate(makeToken({ mint, symbol: "BAN", priceUsd: 1, liquidityUsd: 180_000 }));
-      expect(desk.book.positions.has(mint)).toBe(false);
-      expect(desk.snapshot().events.some((event) => event.code === "REVENGE_COOLDOWN")).toBe(true);
-
-      const blocked = await fetch(`http://127.0.0.1:${port}/api/positions/buy`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mint, sizeUsd: 10, ignoreCooldown: "true" })
-      });
-      expect(blocked.status).toBe(400);
-      const blockedBody = (await blocked.json()) as { code?: string; error?: string };
-      expect(blockedBody.code).toBe("REVENGE_COOLDOWN");
-      expect(blockedBody.error).toContain("minute");
-      expect(desk.book.positions.has(mint)).toBe(false);
+      expect(desk.snapshot().cooldowns.some((item) => item.mint === mint)).toBe(false);
+      expect(desk.snapshot().rules.revengeCooldownMs).toBe(0);
 
       const allowed = await fetch(`http://127.0.0.1:${port}/api/positions/buy`, {
         method: "POST",

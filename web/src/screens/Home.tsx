@@ -158,7 +158,7 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
           Volume ≥ {usd(snap.rules.minVolume1hUsd, 0)} / hour. No known rug deployer. Analyst ≥ {snap.rules.analystMinScore.toFixed(2)}.
           Position ≤ {(snap.rules.maxPositionPct * 100).toFixed(0)}%. Hard stop −{(snap.rules.stopLossPct * 100).toFixed(0)}% from the fill.
           Winners are not auto-sold unless the trail is on. Sell them from the book. Peak is a hint.
-          No adds. {Math.round(snap.rules.revengeCooldownMs / 3_600_000)}h ban after a hard stop.
+          No adds. {snap.rules.revengeCooldownMs > 0 ? `${Math.round(snap.rules.revengeCooldownMs / 3_600_000)}h ban after a hard stop.` : "No ban after a hard stop."}
         </p>
       </section>
 

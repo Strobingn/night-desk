@@ -429,7 +429,7 @@ describe("v12 web settings cover every server key", () => {
       expect(before.maxPositionPct).toBe(8);
       expect(before.maxEntrySlippage).toBe(3);
       expect(before.stopLossPct).toBe(6);
-      expect(before.cooldownHours).toBe(6);
+      expect(before.cooldownHours).toBe(0);
       expect(before.scoutPump).toBe(true);
       expect(changedPatch(before, { ...before })).toEqual({});
       const patch = changedPatch(before, { ...before, maxPositionPct: 25, autoBuy: false, maxEntrySlippage: 1.5 });

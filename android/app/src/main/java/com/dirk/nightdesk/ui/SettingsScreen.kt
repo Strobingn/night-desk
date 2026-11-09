@@ -113,7 +113,7 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         dev = ((snap?.maxDevHoldingPct ?: 0.0) * 100.0).toFloat(),
         rate = (snap?.maxTradesPerHour ?: 0.0).toFloat(),
         dailyLoss = (snap?.dailyMaxLossUsd ?: 0.0).toFloat(),
-        cooldown = (snap?.cooldownHours ?: 6.0).toFloat().coerceAtLeast(6f),
+        cooldown = (snap?.cooldownHours ?: 0.0).toFloat().coerceIn(0f, 72f),
         stop = ((snap?.stopLossPct ?: 0.06) * 100.0).toFloat().coerceIn(1f, 6f),
         arm = ((snap?.trailArmPct ?: 0.12) * 100.0).toFloat().coerceAtLeast(12f),
         gap = ((snap?.trailGapPct ?: 0.04) * 100.0).toFloat().coerceIn(0.5f, 4f),
@@ -232,7 +232,8 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
         Group("Risk / Exits") {
             ExactSlider("Hard stop %", draft.stop, 1f..6f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(stop = it.coerceAtMost(6f)) }
             Text("Locked at 6% or tighter. The desk refuses a looser stop.", color = Dim, fontSize = 12.sp)
-            ExactSlider("Cooldown hours", draft.cooldown, 6f..72f, 1f, { "%.0f".format(it) }) { draft = draft.copy(cooldown = it.coerceAtLeast(6f)) }
+            ExactSlider("Cooldown hours", draft.cooldown, 0f..72f, 1f, { if (it < 0.5f) "off" else "%.0f".format(it) }) { draft = draft.copy(cooldown = it.coerceIn(0f, 72f)) }
+            Text(if (draft.cooldown < 0.5f) "Off. A hard stop does not ban the mint." else "Hours before that mint can be bought again after a hard stop.", color = Dim, fontSize = 12.sp)
             ExactSlider("Daily max loss $", draft.dailyLoss, 0f..1000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(dailyLoss = it) }
             ExactSlider("Trail arm %", draft.arm, 12f..600f, 1f, { "%.0f".format(it) }) { draft = draft.copy(arm = it.coerceAtLeast(12f)) }
             ExactSlider("Trail gap %", draft.gap, 0.5f..4f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(gap = it.coerceAtMost(4f)) }

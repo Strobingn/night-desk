@@ -76,7 +76,7 @@ export const SETTINGS_FIELDS: SettingField[] = [
   { key: "allowUnlockedLp", label: "Allow unlocked LP", group: "Filter / Analyst gates", kind: "toggle", hint: "Mint authority and dev rugs stay hard kills." },
   // Exits / stops
   { key: "stopLossPct", label: "Hard stop %", group: "Exits / stops", kind: "slider", min: 1, max: 6, step: 0.5, unit: "%", ...pct, hint: "Locked at 6% or tighter. The desk refuses a looser stop." },
-  { key: "cooldownHours", label: "Cooldown after a stop", group: "Exits / stops", kind: "slider", min: 6, max: 72, step: 1, unit: "h", toWire: same, fromState: same },
+  { key: "cooldownHours", label: "Cooldown after a stop", group: "Exits / stops", kind: "slider", min: 0, max: 72, step: 1, unit: "h", toWire: same, fromState: same, hint: "0 = off. A hard stop does not ban the mint." },
   { key: "trailTakeProfit", label: "Trailing take profit", group: "Exits / stops", kind: "toggle", hint: "Off by default. Winners stay until you sell." },
   { key: "trailArmPct", label: "Trail arm %", group: "Exits / stops", kind: "slider", min: 12, max: 600, step: 1, unit: "%", toWire: (d: number) => Math.round(d), fromState: pct.fromState, hint: "Profit the trail waits for before it locks in gains (12–600%)." },
   { key: "trailGapPct", label: "Trail gap %", group: "Exits / stops", kind: "slider", min: 0.5, max: 4, step: 0.5, unit: "%", ...pct },
@@ -107,7 +107,7 @@ export function readSetting(snap: StateLike, key: string): number | boolean | nu
     const fromPrefs = snap.prefs.cooldownHours;
     if (typeof fromPrefs === "number") return fromPrefs;
     const ms = snap.rules.revengeCooldownMs;
-    return typeof ms === "number" ? Math.round(ms / 3_600_000) : 6;
+    return typeof ms === "number" ? Math.round(ms / 3_600_000) : 0;
   }
   if (key === "scoutPump") return true;
   const raw = key in snap.rules ? snap.rules[key] : snap.prefs[key];
