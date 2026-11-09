@@ -5,7 +5,7 @@ import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { DeskStore } from "../src/store/db.js";
 import { ChainMarkReader, PUMPSWAP_PROGRAM, pumpSwapNative, tokenAmount } from "../src/market/chain-marks.js";
-import { NetLimiter, bucketFor } from "../src/market/net.js";
+import { BUCKETS, NetLimiter, bucketFor } from "../src/market/net.js";
 import { PositionPricer } from "../src/market/position-pricer.js";
 import { PumpFeed } from "../src/pump/feed.js";
 import { testConfig, testDesk } from "./helpers.js";
@@ -165,13 +165,17 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
     }
   });
 
-  it("caps Helius polls at 25/min with burst 8 and keeps swap calls on a separate lane", async () => {
+  it("caps Helius polls at 10/min with burst 3 and keeps swap calls on a separate lane", async () => {
     const read = bucketFor("https://mainnet.helius-rpc.com/?api-key=test");
     const exec = bucketFor("https://beta.helius-rpc.com/?api-key=test");
     expect(read?.id).toBe("helius");
     expect(exec?.id).toBe("helius");
-    expect(read!.budgetPerMin).toBe(25);
-    expect(read!.burst).toBeLessThanOrEqual(8);
+    expect(read!.budgetPerMin).toBe(10);
+    expect(read!.burst).toBe(3);
+    const execLane = BUCKETS.find((b) => b.id === "helius:exec");
+    expect(execLane?.budgetPerMin).toBe(8);
+    expect(execLane?.burst).toBe(2);
+    expect(read!.budgetPerMin + (execLane?.budgetPerMin ?? 0)).toBe(18);
     expect(read!.budgetPerMin + read!.burst).toBeLessThanOrEqual(read!.limitPerMin);
     expect(bucketFor("https://api.mainnet-beta.solana.com")?.budgetPerMin).toBe(9);
     const lane = bucketFor("https://helius-rpc.com/")!;
@@ -197,20 +201,20 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
       }) as typeof fetch
     });
     const url = "https://mainnet.helius-rpc.com/?api-key=test";
-    for (let i = 0; i < 8; i += 1) {
+    for (let i = 0; i < 3; i += 1) {
       const body = JSON.stringify({ jsonrpc: "2.0", id: i, method: "getBalance", params: [String(i)] });
       await net.fetchAt(0)(url, { method: "POST", body });
     }
-    expect(calls).toBe(8);
+    expect(calls).toBe(3);
     const sim = JSON.stringify({ jsonrpc: "2.0", id: 99, method: "simulateTransaction", params: ["raw"] });
     await net.fetchAt(1)(url, { method: "POST", body: sim });
-    expect(calls).toBe(9);
-    expect(net.stats().find((row) => row.id === "helius")?.sent).toBe(8);
+    expect(calls).toBe(4);
+    expect(net.stats().find((row) => row.id === "helius")?.sent).toBe(3);
     expect(net.stats().find((row) => row.id === "helius:exec")?.sent).toBe(1);
     const ninth = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "getMultipleAccounts", params: [["a"]] });
     await net.fetchAt(0)(url, { method: "POST", body: ninth });
     expect(waits.length).toBeGreaterThan(0);
-    expect(calls).toBe(10);
+    expect(calls).toBe(5);
   });
 
   it("subscribes the stream to a held mint's pool accounts and not every scouted coin", () => {

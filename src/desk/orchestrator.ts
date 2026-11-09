@@ -28,6 +28,9 @@ import { advise, AdvisorBook, noteEntry, noteKill, noteNearMissSurface, noteNear
 import { classifyNearMiss } from "./near-miss.js";
 import { phraseAdvice } from "./commentary.js";
 import { ABSURD_RISE, LOG_THROTTLE_MS, LIVE_FRESH_MS, QUOTE_CONFIRM_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, entryAnchor, isJump, markUnusable, needsShockConfirm, outlierReason, quoteConfirms, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
+
+/** Shown when a sell would fill on a mark dozens of times entry that no other feed confirms. */
+const UNVERIFIED_SELL = "Price unverified - sell refused, retry";
 import { visibleEquity } from "./equity-series.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
@@ -951,6 +954,10 @@ export class Desk {
     const kind: BookKind = bookArg === "live" ? "live" : "paper";
     if (kind === "live" && !this.liveBook) return { ok: false, error: `No live position to sell. ${this.liveNotArmedMessage()}` };
     const book = this.bk(kind);
+    // Read before heal. healAbsurdMarks puts entry back on the card, and selling at that
+    // entry would hide a poisoned mark instead of refusing it.
+    const prior = book.lastPrice.get(mint);
+    this.healAbsurdMarks();
     const pos = book.positions.get(mint);
     if (!pos) {
       const elsewhere = kind === "paper" && this.liveBook?.positions.has(mint);
@@ -959,6 +966,9 @@ export class Desk {
     if (pos.closing) return { ok: false, error: "Close already in progress." };
     if (typeof fraction !== "number" || !Number.isFinite(fraction) || !(fraction > 0) || fraction > 1) {
       return { ok: false, error: "Sell fraction must be 25%, 50% or 100% (a number above 0 and at most 1)." };
+    }
+    if ((prior != null && this.sellUnverified(pos, prior)) || this.sellUnverified(pos, book.price(mint, pos.entryPrice))) {
+      return { ok: false, error: UNVERIFIED_SELL };
     }
     const mark = book.price(mint, pos.entryPrice);
     if (!(mark > 0)) return { ok: false, error: "No mark to close against." };
@@ -1316,10 +1326,14 @@ export class Desk {
     mark: number,
     split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number }
   ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string } {
+    if (this.sellUnverified(pos, mark)) return { ok: false, error: UNVERIFIED_SELL };
     const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
+    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity);
+    if (impact) return { ok: false, error: impact };
     const quote = quotePaperSell(mark, split.sellQty, liquidity);
     const proceedsUsd = roundUsd(quote.proceedsUsd ?? 0);
     assertNonNegativeFinite("proceedsUsd", proceedsUsd);
+    if (this.paperProceedsUnverified(pos, proceedsUsd, quote.fillPrice, split.soldCostUsd)) return { ok: false, error: UNVERIFIED_SELL };
     const now = Date.now();
     const id = randomUUID();
     const pnlUsd = roundUsd(proceedsUsd - split.soldCostUsd);
@@ -2720,6 +2734,7 @@ export class Desk {
         if (!read || read.error != null || read.sol == null) {
           throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
         }
+        if (this.sellUnverified(pos, order.markPrice)) throw new Error(UNVERIFIED_SELL);
         const live = await this.runLiveSwap({
           side: "sell",
           mint: order.mint,
@@ -2751,8 +2766,12 @@ export class Desk {
         }, order);
         return;
       }
-      const mark = this.exitMark(pos, order.markPrice);
-      const quote = quotePaperSell(mark, pos.qty, pos.liquidityUsd);
+      const mark = this.exitMark(pos, order.markPrice, kind);
+      if (!(mark > 0) || this.sellUnverified(pos, mark) || this.sellUnverified(pos, order.markPrice)) throw new Error(UNVERIFIED_SELL);
+      const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
+      const impact = this.paperExitImpact(pos, mark, pos.qty, liquidity);
+      if (impact) throw new Error(impact);
+      const quote = quotePaperSell(mark, pos.qty, liquidity);
       this.applySell(
         pos,
         {
@@ -2799,6 +2818,9 @@ export class Desk {
     if (!book.positions.has(pos.mint)) return;
     const rawProceeds = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     const proceedsUsd = typeof rawProceeds === "number" && Number.isFinite(rawProceeds) && rawProceeds > 0 ? roundUsd(rawProceeds) : 0;
+    if (fill.mode === "paper" && this.paperProceedsUnverified(pos, proceedsUsd, fill.priceUsd, pos.costUsd)) {
+      throw new Error(UNVERIFIED_SELL);
+    }
     const fillPrice = typeof fill.priceUsd === "number" && Number.isFinite(fill.priceUsd) && fill.priceUsd > 0 ? fill.priceUsd : 0;
     assertNonNegativeFinite("proceedsUsd", proceedsUsd);
     assertNonNegativeFinite("fillPrice", fillPrice);
@@ -2887,6 +2909,8 @@ export class Desk {
   private review(mint: string, mark: number, kind: BookKind = "paper"): void {
     const pos = kind === "live" ? this.liveBook?.positions.get(mint) : this.book.positions.get(mint);
     if (!pos || pos.closing) return;
+    // A spike that no other feed confirms is not a trail or a stop. A drop still is.
+    if (this.sellUnverified(pos, mark)) return;
     const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit, liveTrailPct: this.liveTrailFor(pos) });
     const peakRose = view.peakPrice > pos.peakPrice || (view.markPeak != null && view.markPeak > (pos.markPeak ?? 0));
     const armChanged = view.trailArmed !== pos.trailArmed;
@@ -3375,11 +3399,35 @@ export class Desk {
     return this.pricer.stats();
   }
 
-  /** Paper exits price off the last accepted mark when the trigger itself is unusable. */
-  private exitMark(pos: Position, trigger: number): number {
+  /** Paper exits price off the last accepted mark when the trigger itself is unusable. An unverified spike is not a fill. */
+  private exitMark(pos: Position, trigger: number, kind: BookKind = "paper"): number {
+    if (this.sellUnverified(pos, trigger)) return Number.NaN;
     if (!markUnusable(trigger)) return trigger;
-    const last = this.book.price(pos.mint, pos.entryPrice);
+    const last = this.bk(kind).price(pos.mint, pos.entryPrice);
+    if (this.sellUnverified(pos, last)) return Number.NaN;
     return !markUnusable(last) ? last : pos.entryPrice;
+  }
+
+  /** Mark is dozens of times entry and no fresh Dex or Jupiter print sits near it. Drops are never this. */
+  private sellUnverified(pos: Position, mark: number): boolean {
+    if (!(pos.entryPrice > 0) || !(mark > 0) || !Number.isFinite(mark)) return false;
+    if (mark / pos.entryPrice < ABSURD_RISE) return false;
+    return !quoteConfirms(mark, this.otherQuotes(pos.mint, undefined, Date.now()));
+  }
+
+  /** Flat or rising paper sells still have to fit the exit-impact cap. A falling mark is a rug and must be able to leave. */
+  private paperExitImpact(pos: Position, mark: number, qty: number, liquidityUsd: number): string | null {
+    if (pos.entryPrice > 0 && mark < pos.entryPrice) return null;
+    const notional = mark * qty;
+    const gate = exitImpactAllowed(notional, liquidityUsd, this.config.rules.maxEntrySlippage, this.maxExitSlippage);
+    if (gate.ok) return null;
+    return gate.message.replace(/Buy refused/g, "Sell refused");
+  }
+
+  private paperProceedsUnverified(pos: Position, proceedsUsd: number, fillPrice: number, costUsd: number): boolean {
+    if (!(costUsd > 0) || !(proceedsUsd > 0)) return false;
+    if (proceedsUsd / costUsd < ABSURD_RISE) return false;
+    return !quoteConfirms(fillPrice, this.otherQuotes(pos.mint, undefined, Date.now()));
   }
 
   private noteFeedQuote(mint: string, feed: string | undefined, priceUsd: number, at: number): void {

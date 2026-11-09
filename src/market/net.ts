@@ -80,20 +80,20 @@ export const BUCKETS: BucketSpec[] = [
   {
     id: "helius",
     source: "solana",
-    limitPerMin: 33,
-    budgetPerMin: 25,
-    burst: 8,
+    limitPerMin: 13,
+    budgetPerMin: 10,
+    burst: 3,
     cacheMs: 0,
-    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. 25/min average, at most 8 back-to-back. The URL is not logged; it may carry an API key. Nothing is cached: a held mark must not look newer than the account read."
+    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. 10/min average, at most 3 back-to-back. Together with the exec lane this is 18/min. The URL is not logged; it may carry an API key. Nothing is cached."
   },
   {
     id: "helius:exec",
     source: "solana",
-    limitPerMin: 32,
-    budgetPerMin: 24,
-    burst: 8,
+    limitPerMin: 10,
+    budgetPerMin: 8,
+    burst: 2,
     cacheMs: 0,
-    note: "Same Helius host, separate lane for swap preparation, simulation, and broadcast. A full read-lane queue cannot delay these. Burst 8 covers one transaction. Nothing here is cached."
+    note: "Same Helius host, separate lane for swap preparation, simulation, and broadcast. 8/min, burst 2. A full read-lane queue cannot delay these. Nothing here is cached."
   }
 ];
 
