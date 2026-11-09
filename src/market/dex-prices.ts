@@ -144,18 +144,40 @@ export class HeldQuoteBook {
     dexscreener: new SourceGate(SOURCE_MIN_MS.dexscreener),
     jupiter: new SourceGate(SOURCE_MIN_MS.jupiter)
   };
-  /** Last SOL/USD seen from Jupiter (SOL rides in the same batch). */
-  solUsd: { value: number; at: number } | null = null;
+  /**
+   * Last SOL/USD already on a quote the desk fetched.
+   * Jupiter's wrapped-SOL price wins. A Dex pool quoted in SOL (priceUsd / priceNative) fills in when Jupiter has not.
+   */
+  solUsd: { value: number; at: number; source?: "jupiter" | "dex" } | null = null;
+
+  /** A print outside this band is not a SOL/USD mark (display only; trading still fail-closes). */
+  private noteSol(value: number, at: number, source: "jupiter" | "dex"): void {
+    if (!(value >= 5) || value > 5_000 || !Number.isFinite(value)) return;
+    const cur = this.solUsd;
+    if (cur?.source === "jupiter" && source === "dex" && at - cur.at <= 120_000) return;
+    this.solUsd = { value, at, source };
+  }
+
+  private noteDexSol(quotes: Map<string, DexQuote>, now: number): void {
+    for (const quote of quotes.values()) {
+      if (quote.priceNative && quote.priceNative > 0 && quote.priceUsd > 0) {
+        this.noteSol(quote.priceUsd / quote.priceNative, now, "dex");
+        return;
+      }
+    }
+  }
 
   private async one(source: QuoteSource, mints: string[], fetchImpl: FetchLike, now: number, bust?: number): Promise<Map<string, DexQuote>> {
     this.gates[source].started(now);
-    if (source === "dexscreener") return fetchDexQuotes(mints, fetchImpl, bust ? { bust } : {});
+    if (source === "dexscreener") {
+      const quotes = await fetchDexQuotes(mints, fetchImpl, bust ? { bust } : {});
+      this.noteDexSol(quotes, now);
+      return quotes;
+    }
     const quotes = await fetchJupiterQuotes([...mints, WSOL], fetchImpl);
     const sol = quotes.get(WSOL);
-    if (sol && !mints.includes(WSOL)) {
-      this.solUsd = { value: sol.priceUsd, at: now };
-      quotes.delete(WSOL);
-    }
+    if (sol && sol.priceUsd > 0) this.noteSol(sol.priceUsd, now, "jupiter");
+    if (sol && !mints.includes(WSOL)) quotes.delete(WSOL);
     return quotes;
   }
 

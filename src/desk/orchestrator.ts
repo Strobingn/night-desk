@@ -302,7 +302,9 @@ export class Desk {
   private watchlist: WatchItem[] = [];
   /** v13.6 ticker search (own spacing, cache and 429 backoff). */
   private dexSearch: DexSearchClient | null = null;
+  /** Display SOL/USD. Persisted so the wallet line survives a restart. Trading still requires a fresh print. */
   private solUsdCache: { value: number; at: number } | null = null;
+  private solTimer: NodeJS.Timeout | null = null;
   /** Absurd post-fill marks already held once. The next agreeing print may stop. */
   private readonly absurdHeld = new Set<string>();
   /** Last sell refusal, so a manual close can show the gate text instead of a generic miss. */
@@ -471,6 +473,10 @@ export class Desk {
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
+    const savedSol = this.store.readJson("solUsd") as { value?: unknown; at?: unknown } | null;
+    if (savedSol && typeof savedSol.value === "number" && savedSol.value > 0 && Number.isFinite(savedSol.value) && typeof savedSol.at === "number") {
+      this.solUsdCache = { value: savedSol.value, at: savedSol.at };
+    }
     this.advisor = new AdvisorBook(config.advisorPath);
     const saved = this.readSettings();
     if (typeof saved.minVolume1hUsd === "number") {
@@ -742,6 +748,12 @@ export class Desk {
       this.walletTimer = setInterval(() => void this.refreshWallet(), walletEvery);
       setTimeout(() => void this.refreshWallet(), 2_000);
     }
+    // One Jupiter wrapped-SOL price per minute when the held-mark loop has not already printed one.
+    // Same keyless price API the pricer uses. No Helius call.
+    if (this.config.feedMode !== "replay" && !this.config.demoFeed) {
+      this.solTimer = setInterval(() => void this.refreshDisplaySol(), 60_000);
+      setTimeout(() => void this.refreshDisplaySol(), 2_000);
+    }
     this.commentTimer = setInterval(() => void this.commentOnce(), 60_000);
     setTimeout(() => void this.commentOnce(), 8_000);
     this.heartbeat = setInterval(() => {
@@ -768,6 +780,7 @@ export class Desk {
     if (this.tapeTimer) clearInterval(this.tapeTimer);
     if (this.orderTimer) clearInterval(this.orderTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
+    if (this.solTimer) clearInterval(this.solTimer);
     this.persist();
     this.advisor.save();
     this.store.close();
@@ -1510,12 +1523,43 @@ export class Desk {
     return { ok: true, priceUsd, liquidityUsd, curve: q.curve };
   }
 
+  /** Remember a SOL/USD print for the wallet line. Does not fetch. */
+  private rememberSolUsd(value: number, at: number): void {
+    if (!(value > 0) || !Number.isFinite(value) || value < 5 || value > 5_000 || !Number.isFinite(at)) return;
+    const prev = this.solUsdCache;
+    if (prev && prev.at === at && prev.value === value) return;
+    if (prev && at < prev.at) return;
+    this.solUsdCache = { value, at };
+    this.store.writeJson("solUsd", { value, at });
+  }
+
   /** Last SOL/USD already on the desk, for the wallet line. Does not fetch. */
-  private displaySolUsd(): number | null {
+  private displaySolUsd(): { value: number; at: number } | null {
     const held = this.pricer?.quotes.solUsd;
-    if (held && held.value > 0 && Number.isFinite(held.value)) return held.value;
-    if (this.solUsdCache && this.solUsdCache.value > 0 && Number.isFinite(this.solUsdCache.value)) return this.solUsdCache.value;
+    if (held && held.value > 0 && Number.isFinite(held.value)) this.rememberSolUsd(held.value, held.at);
+    if (this.solUsdCache && this.solUsdCache.value > 0 && Number.isFinite(this.solUsdCache.value)) return this.solUsdCache;
     return null;
+  }
+
+  /**
+   * Fill the wallet SOL/USD from Jupiter's wrapped-SOL price when the held-mark loop has not.
+   * Uses the existing keyless Jupiter price call. Never a Helius read.
+   */
+  async refreshDisplaySol(): Promise<void> {
+    const now = Date.now();
+    const held = this.pricer?.quotes.solUsd;
+    if (held && held.value > 0 && now - held.at <= 60_000) {
+      this.rememberSolUsd(held.value, held.at);
+      return;
+    }
+    if (this.solUsdCache && now - this.solUsdCache.at <= 60_000) return;
+    try {
+      const quotes = await fetchJupiterQuotes([SOL_MINT_ADDR], this.lookupFetch);
+      const v = quotes.get(SOL_MINT_ADDR)?.priceUsd;
+      if (v && v > 0 && Number.isFinite(v)) this.rememberSolUsd(v, Date.now());
+    } catch {
+      /* the wallet line keeps the last print */
+    }
   }
 
   /** SOL/USD no older than 2 minutes: the held-mark loop's, else one Jupiter call. */
@@ -1527,7 +1571,8 @@ export class Desk {
       const quotes = await fetchJupiterQuotes([SOL_MINT_ADDR], this.lookupFetch);
       const v = quotes.get(SOL_MINT_ADDR)?.priceUsd;
       if (v && v > 0 && Number.isFinite(v)) {
-        this.solUsdCache = { value: v, at: Date.now() };
+        const at = Date.now();
+        this.rememberSolUsd(v, at);
         return v;
       }
     } catch {
@@ -4330,6 +4375,7 @@ export class Desk {
   /** v13.5 wallet card. Public address and balances only. */
   walletView(): WalletView {
     const bal = this.walletBalances;
+    const sol = this.displaySolUsd();
     return {
       keyLoaded: this.walletStatus.keypairPresent,
       keySource: this.walletStatus.keySource,
@@ -4337,8 +4383,9 @@ export class Desk {
       publicKey: this.walletStatus.walletPublicKey,
       solBalance: bal?.sol ?? null,
       usdcBalance: bal?.usdc ?? null,
-      // Display only. The desk's existing SOL/USD print (Jupiter, cached on the held-mark loop). No extra feed.
-      solPriceUsd: this.displaySolUsd(),
+      // Display only. Jupiter wrapped SOL, or a Dex SOL-quoted pool, cached with solPriceAt. No extra Helius read.
+      solPriceUsd: sol?.value ?? null,
+      solPriceAt: sol?.at ?? null,
       balanceAt: bal?.at ?? null,
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",
