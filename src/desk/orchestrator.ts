@@ -20,6 +20,7 @@ import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, tick
 import { enrichSighting } from "../market/enrich.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
+import { RawTape, draftFromRaw, rawCandidate } from "./raw-tape.js";
 import { EventBus } from "../bus.js";
 import type { MarksDelta } from "../types.js";
 import type { DeskConfig } from "../config.js";
@@ -78,6 +79,7 @@ import type {
   Position,
   CapWhy,
   PositionView,
+  RawSighting,
   WatchItem,
   WalletView,
   CoinLookup,
@@ -256,6 +258,8 @@ export class Desk {
   readonly pump: PumpCore;
   readonly config: DeskConfig;
   private readonly scout: Scout;
+  /** v13.27 raw Tape rows. Not candidates, not positions, not marks. */
+  private readonly rawTape: RawTape;
   private readonly replay: ReplayFeed;
   private readonly pricer: PositionPricer;
   /** v13.6 on-chain pool/curve reader on the desk's private RPC (SOLANA_RPC_URL), shared by held marks and curve pricing. */
@@ -587,6 +591,9 @@ export class Desk {
         dismissed: crash.dismissed === true
       };
     }
+    this.rawTape = new RawTape({
+      onFlush: () => this.bus.emit("desk.changed", { reason: "raw-tape", at: Date.now() })
+    });
     this.scout = new Scout({
       bus: this.bus,
       feedMode: config.feedMode,
@@ -599,6 +606,7 @@ export class Desk {
       queueCap: config.enrichQueueCap,
       holderPagesMax: config.holderPagesMax,
       net: this.net,
+      onTape: (row) => this.rawTape.observe(row),
       onStatus: (patch) => {
         this.feed = { ...this.feed, ...patch };
       },
@@ -771,6 +779,7 @@ export class Desk {
   stop(): void {
     this.replay.stop();
     this.scout.stop();
+    this.rawTape.stop();
     this.pricer.stop();
     this.stream?.stop();
     if (this.equityTimer) clearInterval(this.equityTimer);
@@ -795,6 +804,15 @@ export class Desk {
   async submitCandidate(token: CandidateToken): Promise<void> {
     this.scout.publish(token);
     await this.drain();
+  }
+
+  /**
+   * v13.27 put a raw sighting on the Tape immediately. No enrich, no quote, no buy.
+   * The gate seeds one of these so the phone can show the unenriched marker.
+   */
+  noteRawSighting(raw: RawSighting): void {
+    this.rawTape.observe(draftFromRaw(raw, "pending"));
+    this.rawTape.flush();
   }
 
   /**
@@ -2018,7 +2036,12 @@ export class Desk {
     }
     const looked = this.lookups.get(cleaned);
     if (looked && !this.sightings.has(cleaned)) this.remember(looked.token);
-    const seen = this.sightings.get(cleaned);
+    let seen = this.sightings.get(cleaned);
+    if (!seen) {
+      const raw = this.rawTape.get(cleaned);
+      // A row still waiting on enrich has no scouted mark. Quote it; do not fill at the listing hint.
+      if (raw && raw.enrich !== "enriched") seen = rawCandidate(raw);
+    }
     if (!seen) {
       this.log({
         stage: "executor",
@@ -2235,6 +2258,7 @@ export class Desk {
       liveBook: this.liveBookView(),
       liveNotArmed: this.liveNotArmedReason(),
       tapeQuotes: this.tape?.view() ?? {},
+      rawTape: this.rawTape.view(),
       orders: this.orderViews(),
       wallet: this.walletView(),
       mode: this.config.mode,
@@ -2282,6 +2306,7 @@ export class Desk {
 
   private wire(): void {
     this.bus.on("scout.candidate", (token) => {
+      this.rawTape.markEnriched(token);
       const seen = this.sightings.get(token.mint);
       const prior = seen ? { priceUsd: seen.priceUsd, volume1hUsd: seen.volume1hUsd } : null;
       this.remember(token);

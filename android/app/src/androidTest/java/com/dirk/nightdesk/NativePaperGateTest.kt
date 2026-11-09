@@ -58,8 +58,12 @@ class NativePaperGateTest {
 
         openTab("Tape")
         // The first connect waits out the blocked beacon before the local snapshot arrives.
+        scrollUntil("FRESH", 60_000)
+        waitFor("not enriched")
+        shot("tape")
         scrollUntil("GATE", 60_000)
-        tapContains("⚡ Buy")
+        // FRESH is also a Tape card. The buy has to be the one on GATE.
+        tapBelow("GATE", "⚡ Buy", substring = true)
         waitFor("· paper")
         dismissNotice()
         openTab("Home")
@@ -226,11 +230,11 @@ class NativePaperGateTest {
     }
 
     /** Clicks the label on the card that owns the anchor, not the same label on another coin. */
-    private fun tapBelow(anchor: String, label: String) {
+    private fun tapBelow(anchor: String, label: String, substring: Boolean = false) {
         val deadline = System.currentTimeMillis() + 20_000
         while (System.currentTimeMillis() < deadline) {
             val anchors = rule.onAllNodes(hasText(anchor, substring = true)).fetchSemanticsNodes()
-            val buttons = rule.onAllNodes(hasText(label) and hasClickAction())
+            val buttons = rule.onAllNodes((if (substring) hasText(label, substring = true) else hasText(label)) and hasClickAction())
             val found = buttons.fetchSemanticsNodes()
             if (anchors.isNotEmpty() && found.isNotEmpty()) {
                 val anchorTop = anchors.minOf { it.boundsInRoot.top }

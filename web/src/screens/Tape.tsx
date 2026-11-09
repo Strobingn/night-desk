@@ -34,7 +34,7 @@ export function TapeScreen({
 }) {
   const [view, setView] = useState<"coins" | "log">("coins");
   const [coinFilter, setCoinFilter] = useState<(typeof COIN_FILTERS)[number]>("all");
-  // v13.1: per-device sort, Volume by default. Saved in this browser only, never sent to the desk.
+  // v13.27: per-device sort, Newest by default. Volume and Score stay in the menu. Saved on this browser only.
   const [sort, setSortState] = useState<TapeSort>(() => {
     try {
       return parseTapeSort(localStorage.getItem(TAPE_SORT_KEY));
@@ -221,7 +221,7 @@ export function TapeScreen({
   }
 
   const openMints = new Set(snap.positions.map((pos) => pos.mint));
-  const coins = view === "coins" ? sortCoins(coinCards(history, openMints, 60, snap.tapeQuotes).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")), sort) : [];
+  const coins = view === "coins" ? sortCoins(coinCards(history, openMints, 150, snap.tapeQuotes, snap.rawTape).filter((c) => coinFilter === "all" || c.verdict === coinFilter || (coinFilter === "trade" && c.verdict === "bought")), sort) : [];
 
   return (
     <div className="tape-screen">
@@ -411,6 +411,7 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
             <b>{coin.symbol}</b>
             <span className="cc-chips">
               <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
+              {coin.unenriched ? <span className="chip">not enriched</span> : null}
               {hot ? <span className="vol-badge hot" title={`#${rank} by 1h volume`}>HOT #{rank}</span> : top ? <span className="vol-badge" title={`#${rank} by 1h volume`}>VOL #{rank}</span> : null}
               {(() => {
                 const chip = snap?.safetyChips?.find((row) => row.mint === coin.mint);

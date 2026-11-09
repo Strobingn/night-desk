@@ -60,6 +60,7 @@ export function parseGeckoPools(payload: unknown, now = Date.now()): RawSighting
     const volume = num((attrs.volume_usd as { h1?: unknown } | undefined)?.h1);
     const price = num(attrs.base_token_price_usd);
     const liquidity = num(attrs.reserve_in_usd);
+    const mcap = num(attrs.market_cap_usd) || num(attrs.fdv_usd);
     const dex = text(rec.relationships?.dex?.data?.id);
     out.push({
       mint,
@@ -70,6 +71,7 @@ export function parseGeckoPools(payload: unknown, now = Date.now()): RawSighting
       volume1hUsd: volume > 0 ? volume : undefined,
       priceUsd: price > 0 ? price : undefined,
       liquidityUsd: liquidity > 0 ? liquidity : undefined,
+      marketCapUsd: mcap > 0 ? mcap : undefined,
       priceFeed: price > 0 ? "gecko" : undefined
     });
   }
@@ -90,6 +92,8 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
       launchpad?: unknown;
       usdPrice?: unknown;
       liquidity?: unknown;
+      mcap?: unknown;
+      fdv?: unknown;
       stats1h?: { buyVolume?: unknown; sellVolume?: unknown };
     };
     const mint = text(rec.id);
@@ -97,6 +101,7 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
     const volume = num(rec.stats1h?.buyVolume) + num(rec.stats1h?.sellVolume);
     const price = num(rec.usdPrice);
     const liquidity = num(rec.liquidity);
+    const mcap = num(rec.mcap) || num(rec.fdv);
     out.push({
       mint,
       symbol: text(rec.symbol)?.slice(0, 16),
@@ -107,6 +112,7 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
       volume1hUsd: volume > 0 ? volume : undefined,
       priceUsd: price > 0 ? price : undefined,
       liquidityUsd: liquidity > 0 ? liquidity : undefined,
+      marketCapUsd: mcap > 0 ? mcap : undefined,
       priceFeed: price > 0 ? "jupiter" : undefined
     });
   }

@@ -149,6 +149,17 @@ beforeAll(async () => {
   if (!strip.includes("0.2951 SOL · ~$25.45") || !strip.includes("USDC $25.00")) {
     throw new Error(`gate wallet strip is missing the SOL dollar estimate: ${strip}`);
   }
+  // A raw sighting with no enrich RPC. The Tape shows it as not enriched and does not buy it.
+  desk.noteRawSighting({
+    mint: "FreshMint11111111111111111111111111111111",
+    symbol: "FRESH",
+    name: "Fresh Coin",
+    source: "pumpfun",
+    observedAt: Date.now(),
+    volume1hUsd: 1_250,
+    priceUsd: 0.00021,
+    liquidityUsd: 4_400
+  });
   const server = startServer(desk, "127.0.0.1", 8791);
   await once(server, "listening");
   const port = (server.address() as AddressInfo).port;

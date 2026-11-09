@@ -1,4 +1,5 @@
 import type { DeskSnapshot, FeedEvent } from "./types";
+import { TAPE_CARD_CAP, unenrichedLabel, type RawTapeRow } from "../../src/desk/raw-tape";
 
 type TapeQuotes = NonNullable<DeskSnapshot["tapeQuotes"]>;
 
@@ -23,9 +24,12 @@ export interface CoinRow {
   /** v13.10 short reason a live value is missing ("no pool yet"); where the price came from. */
   why?: string;
   quoteSource?: string;
+  /** v13.27 set while the sighting has not been enriched. Cleared when the scout line lands. */
+  unenriched?: string;
   /** Internal while folding. */
   changeSeen?: number;
   firstMark?: number;
+  sawScout?: boolean;
 }
 
 const RANK: Record<Verdict, number> = { seen: 0, killed: 1, near: 2, trade: 3, bought: 4, open: 5 };
@@ -52,7 +56,7 @@ export function parsePxText(raw: string | undefined | null): number | undefined 
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 60, quotes?: TapeQuotes): CoinRow[] {
+export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = TAPE_CARD_CAP, quotes?: TapeQuotes, raw?: RawTapeRow[]): CoinRow[] {
   const map = new Map<string, CoinRow>();
   for (const e of events) {
     if (!e.mint) continue;
@@ -90,6 +94,7 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
         if (Number.isFinite(n)) row.change1h = n;
       }
       if (e.detail) row.source = e.detail;
+      row.sawScout = true;
     } else if (e.stage === "filter" && e.kind === "reject") {
       row.verdict = row.verdict === "open" || row.verdict === "bought" ? row.verdict : "killed";
       row.codes = (e.detail ?? e.code ?? "").split(/,\s*/).filter(Boolean);
@@ -105,6 +110,20 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
     } else if (e.stage === "executor" && e.kind === "fill") {
       bump("bought");
     }
+  }
+  for (const rawRow of raw ?? []) {
+    let row = map.get(rawRow.mint);
+    if (!row) {
+      row = { mint: rawRow.mint, symbol: rawRow.symbol || rawRow.mint.slice(0, 4), lastTs: rawRow.seenAt, verdict: "seen", codes: [], source: rawRow.source };
+      map.set(rawRow.mint, row);
+    }
+    if (!row.source) row.source = rawRow.source;
+    if (row.mark == null && rawRow.priceUsd != null && rawRow.priceUsd > 0) row.mark = rawRow.priceUsd;
+    if (row.vol1h == null && rawRow.volume1hUsd != null && rawRow.volume1hUsd > 0) row.vol1h = rawRow.volume1hUsd;
+    if (!(row.lastTs > 0)) row.lastTs = rawRow.seenAt;
+    const decided = row.sawScout || row.verdict !== "seen" || row.score != null || row.codes.length > 0 || rawRow.enrich === "enriched";
+    row.unenriched = decided ? undefined : unenrichedLabel(rawRow.enrich) ?? undefined;
+    if (row.unenriched && !row.reason) row.reason = row.unenriched;
   }
   for (const row of map.values()) if (openMints.has(row.mint)) row.verdict = "open";
   const rows = [...map.values()]
@@ -130,6 +149,7 @@ export function coinCards(events: FeedEvent[], openMints: Set<string>, limit = 6
     if (row.change1h == null && row.changeSeen != null && Number.isFinite(row.changeSeen)) row.change1h = row.changeSeen;
     delete row.changeSeen;
     delete row.firstMark;
+    delete row.sawScout;
   }
   rankByVolume(rows);
   return rows;
@@ -146,8 +166,8 @@ export function rankByVolume(rows: CoinRow[]): void {
 
 export type TapeSort = "volume" | "newest" | "score";
 export const TAPE_SORTS: { id: TapeSort; label: string }[] = [
-  { id: "volume", label: "Volume" },
   { id: "newest", label: "Newest" },
+  { id: "volume", label: "Volume" },
   { id: "score", label: "Score" }
 ];
 export const TAPE_SORT_KEY = "nightdesk.tapeSort";
@@ -156,10 +176,10 @@ export const TOP_VOLUME = 10;
 export const HOT_RANK = 3;
 
 export function parseTapeSort(raw: string | null | undefined): TapeSort {
-  return raw === "newest" || raw === "score" || raw === "volume" ? raw : "volume";
+  return raw === "newest" || raw === "score" || raw === "volume" ? raw : "newest";
 }
 
-/** Volume (default): 1h volume high→low, unknown last. Score: high→low, unknown last. Newest: latest line first. */
+/** Newest (default): latest line first. Volume: 1h volume high→low, unknown last. Score: high→low, unknown last. */
 export function sortCoins(rows: CoinRow[], mode: TapeSort): CoinRow[] {
   const vol = (r: CoinRow) => (r.vol1h != null && Number.isFinite(r.vol1h) ? r.vol1h : -1);
   const sc = (r: CoinRow) => (r.score != null && Number.isFinite(r.score) ? r.score : -1);
