@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.CrashLog
 import com.dirk.nightdesk.DeskSnapshot
 
 private data class Draft(
@@ -172,6 +173,7 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
             )
         }
         AppearanceGroup()
+        CrashLogGroup(snap)
         if (oneTap != null) {
             Group("One tap") {
                 Text(
@@ -376,6 +378,21 @@ private val GROUP_META = mapOf(
     Pair("Scout sources", Pair("radar", "Which feeds the Scout listens to for new pairs.")),
     Pair("Alerts", Pair("bell", "When the phone should ping you."))
 )
+
+@Composable
+private fun CrashLogGroup(snap: DeskSnapshot?) {
+    val context = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+    Group("Crash log") {
+        TextButton(onClick = { open = !open }) { Text(if (open) "Hide" else "Show", color = P.accent) }
+        if (open) {
+            val desk = snap?.lastClientCrashText?.ifBlank { snap.lastClientCrash }.orEmpty()
+            val phone = CrashLog.read(context).orEmpty()
+            val text = listOf(desk, phone).filter { it.isNotBlank() }.joinToString("\n\n").ifBlank { "No crash recorded." }
+            Text(text, color = P.ink, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        }
+    }
+}
 
 @Composable
 private fun Group(title: String, body: @Composable () -> Unit) {

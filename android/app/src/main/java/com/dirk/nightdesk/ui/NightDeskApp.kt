@@ -97,7 +97,10 @@ import com.dirk.nightdesk.AdviceNote
 import com.dirk.nightdesk.FeedSource
 import com.dirk.nightdesk.feedSourceRateText
 import com.dirk.nightdesk.feedSourceStateText
+import com.dirk.nightdesk.BuildConfig
 import com.dirk.nightdesk.CrashLog
+import com.dirk.nightdesk.showDeskCrash
+import com.dirk.nightdesk.showPhoneCrash
 import com.dirk.nightdesk.DeskRepository
 import com.dirk.nightdesk.formatUsd
 import com.dirk.nightdesk.DeskSnapshot
@@ -492,7 +495,8 @@ fun NightDeskApp(desk: DeskRepository) {
                         addPrefill = mint to ((addPrefill?.second ?: 0) + 1)
                         tab = 2
                     },
-                    orders = orderActions
+                    orders = orderActions,
+                    onDismissCrash = { scope.launch { desk.dismissClientCrash() } }
                 )
                 1 -> TapeScreen(
                     snap?.events.orEmpty(),
@@ -623,17 +627,19 @@ private fun BookScreen(
     /** v13.7 close a live-book position (real sell). */
     onCloseLive: (String) -> Unit = {},
     /** v13.11 limit / take-profit / stop orders. */
-    orders: OrderActions? = null
+    orders: OrderActions? = null,
+    onDismissCrash: () -> Unit = {}
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     val liveBook = snap?.liveBook
     LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { LastCrashCard() }
-        if (!snap?.lastClientCrash.isNullOrBlank()) {
+        if (showDeskCrash(snap?.lastClientCrashVersion.orEmpty(), snap?.lastClientCrashDismissed == true, BuildConfig.VERSION_NAME) && !snap?.lastClientCrash.isNullOrBlank()) {
             item {
                 Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
                     Text("LAST CRASH ON THE DESK", color = Coral, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                     Text(snap?.lastClientCrash.orEmpty().take(400), color = Dim, fontSize = 12.sp)
+                    TextButton(onClick = onDismissCrash) { Text("Dismiss", color = Dim) }
                 }
             }
         }
@@ -1827,9 +1833,9 @@ private fun LastCrashCard() {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scroll = rememberScrollState()
-    var text by remember { mutableStateOf(CrashLog.read(context)) }
-    val crash = text
-    if (crash.isNullOrBlank()) return
+    var hidden by remember { mutableStateOf(CrashLog.isHidden(context)) }
+    val crash = CrashLog.read(context)
+    if (!showPhoneCrash(crash, hidden, BuildConfig.VERSION_NAME) || crash.isNullOrBlank()) return
     Column(Modifier.fillMaxWidth().background(P.down.copy(alpha = 0.12f), RoundedCornerShape(18.dp)).padding(16.dp)) {
         Text("LAST CRASH", color = Coral, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.4.sp)
         Text("Saved on this phone. Copy it, then send it with the next report.", color = Dim, fontSize = 12.sp)
@@ -1844,8 +1850,8 @@ private fun LastCrashCard() {
         Row {
             TextButton(onClick = { clipboard.setText(AnnotatedString(crash)) }) { Text("Copy", color = Lime) }
             TextButton(onClick = {
-                CrashLog.clear(context)
-                text = null
+                CrashLog.hide(context)
+                hidden = true
             }) { Text("Dismiss", color = Dim) }
         }
     }

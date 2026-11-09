@@ -8,6 +8,7 @@ import java.io.File
 object CrashLog {
     private const val FILE = "last-crash.txt"
     private const val UPLOADED = "last-crash.uploaded"
+    private const val HIDDEN = "last-crash.hidden"
 
     fun write(context: Context, thread: Thread, error: Throwable) {
         val app = context.applicationContext
@@ -19,6 +20,7 @@ object CrashLog {
         runCatching {
             app.openFileOutput(FILE, Context.MODE_PRIVATE).use { it.write(text.toByteArray()) }
             app.deleteFile(UPLOADED)
+            app.deleteFile(HIDDEN)
         }
     }
 
@@ -27,6 +29,15 @@ object CrashLog {
         if (!file.exists() || file.length() == 0L) return null
         return runCatching { file.readText() }.getOrNull()?.takeIf { it.isNotBlank() }
     }
+
+    /** Home dismiss. The crash file stays so Settings can still show it. */
+    fun hide(context: Context) {
+        runCatching {
+            context.applicationContext.openFileOutput(HIDDEN, Context.MODE_PRIVATE).use { it.write(byteArrayOf(1)) }
+        }
+    }
+
+    fun isHidden(context: Context): Boolean = File(context.applicationContext.filesDir, HIDDEN).exists()
 
     fun clear(context: Context) {
         val app = context.applicationContext

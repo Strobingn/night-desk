@@ -264,6 +264,10 @@ export function startServer(
         const result = await desk.pump.handle(req.method ?? "GET", url, body);
         return json(res, result.status, result.body);
       }
+      if (url.pathname === "/api/client-crash/dismiss" && req.method === "POST") {
+        await readJson(req);
+        return json(res, 200, desk.dismissClientCrash());
+      }
       if (url.pathname === "/api/client-crash" && req.method === "POST") {
         const body = await readJson(req, 64_000);
         const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
