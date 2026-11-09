@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { quotePaperSell } from "../src/agents/execution-math.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { parseJupiterPrices } from "../src/market/dex-prices.js";
-import { markUnusable, needsShockConfirm, sameMarkSource } from "../src/market/mark-guard.js";
+import { markUnusable, needsShockConfirm, quoteConfirms, sameMarkSource } from "../src/market/mark-guard.js";
 import { testDesk } from "./helpers.js";
 
 const mint = "CmoMint11111111111111111111111111111111111";
@@ -22,6 +22,14 @@ describe("marks that cannot stop a position", () => {
     expect(sameMarkSource({ priceFeed: "dexscreener", pairAddress: "PAIR" }, { feed: "dexscreener", pairAddress: "DUST" })).toBe(false);
     expect(sameMarkSource({ priceFeed: "dexscreener", pairAddress: "PAIR" }, { feed: "dexscreener", pairAddress: "PAIR" })).toBe(true);
     expect(sameMarkSource({ source: "pumpfun" }, { feed: "jupiter" })).toBe(false);
+  });
+
+  it("does not let a Raydium or CPMM quote confirm a chain print it was copied into", () => {
+    expect(quoteConfirms(0.5319, [0.5319], "raydium")).toBe(false);
+    expect(quoteConfirms(0.5319, [0.5319], "cpmm")).toBe(false);
+    expect(quoteConfirms(0.5319, [0.5319], "pumpswap")).toBe(true);
+    expect(quoteConfirms(0.5319, [0.5319], "curve")).toBe(true);
+    expect(quoteConfirms(0.5319, [0.00001], "pumpswap")).toBe(false);
   });
 
   it("asks for a second tick only on a >30% gap inside 10 seconds", () => {

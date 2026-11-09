@@ -48,14 +48,7 @@ export class PumpFeed {
   }
 
   watchMint(mint: string): void {
-    let key: PublicKey;
-    try {
-      key = new PublicKey(mint);
-    } catch {
-      return;
-    }
-    this.accounts.set(bondingCurvePda(key).toBase58(), mint);
-    this.accounts.set(canonicalPumpPoolPda(key).toBase58(), mint);
+    if (this.track(mint) === "invalid") return;
     this.trim();
     this.pushStream();
   }
@@ -65,7 +58,27 @@ export class PumpFeed {
     const next = new Set(mints);
     const same = next.size === this.held.size && [...next].every((mint) => this.held.has(mint));
     this.held = next;
-    if (!same) this.pushStream();
+    // A hold can be older than the scout cap, or evicted before it was marked held.
+    let added = false;
+    for (const mint of next) if (this.track(mint) === "added") added = true;
+    if (added) this.trim();
+    if (!same || added) this.pushStream();
+  }
+
+  /** Curve and pool PDAs. "added" when either key was missing (trim may have dropped them). */
+  private track(mint: string): "invalid" | "added" | "present" {
+    let key: PublicKey;
+    try {
+      key = new PublicKey(mint);
+    } catch {
+      return "invalid";
+    }
+    const curve = bondingCurvePda(key).toBase58();
+    const pool = canonicalPumpPoolPda(key).toBase58();
+    const present = this.accounts.has(curve) && this.accounts.has(pool);
+    this.accounts.set(curve, mint);
+    this.accounts.set(pool, mint);
+    return present ? "present" : "added";
   }
 
   private pushStream(): void {
@@ -113,9 +126,14 @@ export class PumpFeed {
 
   private trim(): void {
     while (this.accounts.size > WATCH_CAP) {
-      const first = this.accounts.keys().next().value;
-      if (!first) return;
-      this.accounts.delete(first);
+      let victim: string | undefined;
+      for (const [key, mint] of this.accounts) {
+        if (this.held.has(mint)) continue;
+        victim = key;
+        break;
+      }
+      if (!victim) return;
+      this.accounts.delete(victim);
     }
   }
 }

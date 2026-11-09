@@ -3126,8 +3126,9 @@ export class Desk {
       const anchor = entryAnchor(pos.entryPrice, lastGood);
       const why = outlierReason(anchor, priceUsd);
       // A Dex or Jupiter print this far above the entry is never equity. Only a chain mark
-      // can pass, and only when an independent quote sits near it.
-      const confirmed = origin?.feed === "chain" && quoteConfirms(priceUsd, this.otherQuotes(mint, "chain", Date.now()));
+      // priced as native × SOL/USD can pass, and only when a quote that is not that
+      // formula's input sits near it. Raydium and CPMM republish the quote.
+      const confirmed = origin?.feed === "chain" && quoteConfirms(priceUsd, this.otherQuotes(mint, "chain", Date.now()), origin.dex);
       if (why && !confirmed) {
         if (!this.quiet("PRICE_OUTLIER", key)) {
           const kindLabel = why === "unit" ? "a decimals or SOL/USD mix-up" : "an implausible jump";
@@ -3207,7 +3208,7 @@ export class Desk {
       origin.dexUsd,
       origin.jupUsd
     ];
-    if (outlierReason(anchor, priceUsd) && !quoteConfirms(priceUsd, quotes)) return;
+    if (outlierReason(anchor, priceUsd) && !quoteConfirms(priceUsd, quotes, origin.kind)) return;
     // v13.8: a migrated pool's successor is shown only while it agrees with the risk mark (±25%).
     // A drained successor pool (PEPPER: 0.0001 SOL left) can print any price.
     if (origin.pairAddress && pos.pairAddress && origin.pairAddress !== pos.pairAddress) {
@@ -3427,7 +3428,23 @@ export class Desk {
           const kept = series.filter((point) => !(point.priceUsd / pos.entryPrice >= ABSURD_RISE) || quoteConfirms(point.priceUsd, this.otherQuotes(pos.mint, undefined, now)));
           if (kept.length !== series.length) book.series.set(pos.mint, kept);
         }
+        this.calmAbsurdPeak(pos, book.lastPrice.get(pos.mint) ?? pos.entryPrice);
       }
+    }
+  }
+
+  /**
+   * A peak dozens of times the healed mark is the discarded print. A real run that
+   * is still the mark, or a pullback from it, stays: the trail line needs that high.
+   */
+  private calmAbsurdPeak(pos: Position, mark: number): void {
+    if (!(pos.entryPrice > 0) || !(mark > 0)) return;
+    const poisoned = (peak: number) => peak / mark >= ABSURD_RISE;
+    if (poisoned(pos.peakPrice)) pos.peakPrice = Math.max(pos.entryPrice, mark);
+    if (pos.markPeak != null && poisoned(pos.markPeak)) {
+      const base = pos.entryMark;
+      const floor = base != null && base > 0 && base / pos.entryPrice < ABSURD_RISE ? base : pos.entryPrice;
+      pos.markPeak = Math.max(floor, mark);
     }
   }
 

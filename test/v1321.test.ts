@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { DeskStore } from "../src/store/db.js";
-import { ChainMarkReader, PUMPSWAP_PROGRAM, pumpSwapNative, tokenAmount } from "../src/market/chain-marks.js";
-import { NetLimiter, bucketFor } from "../src/market/net.js";
+import { ChainMarkReader, PUMPSWAP_PROGRAM, RAYDIUM_AMM_V4, WSOL_MINT, pumpSwapNative, tokenAmount } from "../src/market/chain-marks.js";
 import { PositionPricer } from "../src/market/position-pricer.js";
+import { NetLimiter, bucketFor } from "../src/market/net.js";
 import { PumpFeed } from "../src/pump/feed.js";
 import { testConfig, testDesk } from "./helpers.js";
 
@@ -137,6 +137,10 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
     expect(saved).toBeTruthy();
     saved!.lastPrices = [[mint, BAD]];
     saved!.markSeries = [[mint, [{ t: Date.now(), priceUsd: BAD }]]];
+    const open = saved!.positions.find((p) => p.mint === mint)!;
+    open.peakPrice = BAD;
+    open.markPeak = BAD;
+    open.entryMark = entry;
     store.saveBook(saved!, "book");
     store.close();
 
@@ -144,8 +148,13 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
     try {
       expect(again.book.positions.has(mint)).toBe(true);
       expect(again.book.price(mint)).toBeLessThan(entry * 2);
+      const healed = again.book.positions.get(mint)!;
+      expect(healed.peakPrice).toBeLessThan(entry * 2);
+      expect(healed.markPeak ?? 0).toBeLessThan(entry * 2);
       expect(again.snapshot().equityUsd).toBeLessThan(20_000);
-      expect(again.snapshot().positions.find((p) => p.mint === mint)?.markPrice ?? 0).toBeLessThan(entry * 2);
+      const card = again.snapshot().positions.find((p) => p.mint === mint);
+      expect(card?.markPrice ?? 0).toBeLessThan(entry * 2);
+      expect(card?.peakPrice ?? 0).toBeLessThan(entry * 2);
       const before = again.snapshot().equityUsd;
       dex = BAD;
       jup = ENTRY;
@@ -162,6 +171,82 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
       expect(again.snapshot().events.some((event) => event.code === "STOP_LOSS" || event.code === "GAP_RUG")).toBe(true);
     } finally {
       again.stop();
+    }
+  });
+
+  it("does not treat a Raydium quote as proof of the chain mark copied from it", async () => {
+    const mintKey = Keypair.generate().publicKey;
+    const pairKey = Keypair.generate().publicKey;
+    const tokenVault = Keypair.generate().publicKey;
+    const solVault = Keypair.generate().publicKey;
+    const mint = mintKey.toBase58();
+    const pair = pairKey.toBase58();
+    const pool = Buffer.alloc(752);
+    pool.set(tokenVault.toBytes(), 336);
+    pool.set(solVault.toBytes(), 368);
+    pool.set(mintKey.toBytes(), 400);
+    pool.set(new PublicKey(WSOL_MINT).toBytes(), 432);
+    const mintAcc = Buffer.alloc(82);
+    mintAcc[44] = 6;
+    const tokenAcc = (amount: bigint) => {
+      const data = Buffer.alloc(165);
+      data.writeBigUInt64LE(amount, 64);
+      return data;
+    };
+    const rows: Record<string, { owner: string; data: string }> = {
+      [pair]: { owner: RAYDIUM_AMM_V4, data: pool.toString("base64") },
+      [mint]: { owner: RAYDIUM_AMM_V4, data: mintAcc.toString("base64") },
+      [tokenVault.toBase58()]: { owner: RAYDIUM_AMM_V4, data: tokenAcc(1_000_000_000n).toString("base64") },
+      [solVault.toBase58()]: { owner: RAYDIUM_AMM_V4, data: tokenAcc(1_000_000_000n).toString("base64") }
+    };
+    const chainFetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { id: number; params: [string[]] };
+      const value = body.params[0].map((key) => {
+        const row = rows[key];
+        return row ? { owner: row.owner, data: [row.data, "base64"] } : null;
+      });
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 1 }, value } });
+    }) as typeof fetch;
+    const priceFetch = (async (url: string) => {
+      if (String(url).includes("dexscreener")) {
+        return Response.json([
+          {
+            baseToken: { address: mint },
+            priceUsd: String(BAD),
+            liquidity: { usd: 180_000 },
+            pairAddress: pair,
+            dexId: "raydium"
+          }
+        ]);
+      }
+      return Response.json({ [mint]: { usdPrice: BAD, liquidity: 180_000 } });
+    }) as typeof fetch;
+    const desk = new Desk(testConfig({}), { priceFetch, chainFetch });
+    try {
+      await desk.submitCandidate(
+        makeToken({
+          mint,
+          symbol: "RAY",
+          priceUsd: ENTRY,
+          liquidityUsd: 180_000,
+          source: "raydium",
+          priceFeed: "dexscreener",
+          pairAddress: pair,
+          dex: "raydium"
+        })
+      );
+      const entry = desk.book.positions.get(mint)!.entryPrice;
+      await desk.repricePositions();
+      await desk.repricePositions();
+      const factor = (desk as unknown as { pricer: PositionPricer }).pricer.factor(mint, "raydium", Date.now());
+      expect(factor).not.toBeNull();
+      expect(desk.snapshot().markLoop?.chain.find((row) => row.mint === mint)?.kind).toBe("raydium");
+      const card = desk.snapshot().positions.find((p) => p.mint === mint);
+      expect(card?.markPrice ?? 0).toBeLessThan(entry * 2);
+      expect(desk.snapshot().equityUsd).toBeLessThan(20_000);
+      expect(desk.book.positions.has(mint)).toBe(true);
+    } finally {
+      desk.stop();
     }
   });
 
@@ -222,11 +307,17 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
       onCurve: () => {}
     });
     const held = Keypair.generate().publicKey.toBase58();
-    for (let i = 0; i < 20; i += 1) feed.watchMint(Keypair.generate().publicKey.toBase58());
     feed.watchMint(held);
     feed.setHeldMints([held]);
-    expect(seen.at(-1)).toHaveLength(2);
+    const heldKeys = seen.at(-1);
+    expect(heldKeys).toHaveLength(2);
+    for (let i = 0; i < 30; i += 1) feed.watchMint(Keypair.generate().publicKey.toBase58());
+    expect(seen.at(-1)).toEqual(heldKeys);
     feed.setHeldMints([]);
     expect(seen.at(-1)).toEqual([]);
+    feed.watchMint(held);
+    for (let i = 0; i < 30; i += 1) feed.watchMint(Keypair.generate().publicKey.toBase58());
+    feed.setHeldMints([held]);
+    expect(seen.at(-1)).toEqual(heldKeys);
   });
 });

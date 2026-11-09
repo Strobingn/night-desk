@@ -1,3 +1,5 @@
+import { EXACT_KINDS, type PoolKind } from "./chain-marks.js";
+
 /** A print this far through the entry, inside the entry window, has to be seen twice. */
 export const SHOCK_WINDOW_MS = 10_000;
 export const SHOCK_MOVE = 0.3;
@@ -89,8 +91,14 @@ export function entryAnchor(entry: number, lastGood: number): number {
   return lastGood;
 }
 
-/** True when some other feed's price is within ABSURD_RISE of this print. */
-export function quoteConfirms(next: number, quotes: Array<number | undefined>): boolean {
+/**
+ * True when some other feed's price is within ABSURD_RISE of this print.
+ * `kind`, when set, is the chain pool. Raydium AMM v4 and CPMM USD is
+ * native × (quote / native), so that quote is the same print and cannot confirm it.
+ * Curve and exact SOL-ratio pools are native × SOL/USD and may.
+ */
+export function quoteConfirms(next: number, quotes: Array<number | undefined>, kind?: string): boolean {
+  if (kind != null && kind !== "curve" && !EXACT_KINDS.has(kind as PoolKind)) return false;
   if (!(next > 0) || !Number.isFinite(next)) return false;
   return quotes.some((q) => q != null && q > 0 && Number.isFinite(q) && next / q < ABSURD_RISE && q / next < ABSURD_RISE);
 }
