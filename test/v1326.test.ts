@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Desk } from "../src/desk/orchestrator.js";
 import { BUCKETS, NetLimiter } from "../src/market/net.js";
-import { liveCashLabel } from "../web/src/format.js";
+import { formatBalanceUsd, liveCashLabel } from "../web/src/format.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { testConfig } from "./helpers.js";
 
@@ -49,6 +49,10 @@ describe("v13.26 SOL/USD on the wallet snapshot", () => {
       });
       expect(strip).toContain("0.2951 SOL · ~$25.45");
       expect(strip).toContain("USDC $0.0010");
+      const funded = liveCashLabel({ sol: 0.2951, solUsd: 86.24, usdc: 25, cashKnown: true });
+      expect(funded).toContain("0.2951 SOL · ~$25.45");
+      expect(funded).toContain("USDC $25.00");
+      expect(formatBalanceUsd(0.001008)).toBe("$0.0010");
     } finally {
       desk.stop();
     }

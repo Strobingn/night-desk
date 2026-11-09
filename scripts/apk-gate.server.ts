@@ -66,7 +66,8 @@ vi.mock("../src/market/pump-live.js", () => ({
   }
 }));
 
-const rich = async (): Promise<WalletBalances> => ({ sol: 0.2951, usdc: 0.001008, at: Date.now(), error: null });
+// USDC must cover the $5 live tap. Dust display stays in the unit tests; this mock is the hung-swap path.
+const rich = async (): Promise<WalletBalances> => ({ sol: 0.2951, usdc: 25, at: Date.now(), error: null });
 
 beforeAll(async () => {
   mkdirSync(DIR, { recursive: true });
@@ -145,7 +146,7 @@ beforeAll(async () => {
     usdc: wallet?.usdcBalance,
     cashKnown: true
   });
-  if (!strip.includes("0.2951 SOL") || !strip.includes("~$25.45") || !strip.includes("USDC $0.0010")) {
+  if (!strip.includes("0.2951 SOL · ~$25.45") || !strip.includes("USDC $25.00")) {
     throw new Error(`gate wallet strip is missing the SOL dollar estimate: ${strip}`);
   }
   const server = startServer(desk, "127.0.0.1", 8791);
