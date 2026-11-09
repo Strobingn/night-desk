@@ -173,9 +173,10 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
     expect(read!.budgetPerMin).toBe(10);
     expect(read!.burst).toBe(3);
     const execLane = BUCKETS.find((b) => b.id === "helius:exec");
-    expect(execLane?.budgetPerMin).toBe(8);
-    expect(execLane?.burst).toBe(2);
-    expect(read!.budgetPerMin + (execLane?.budgetPerMin ?? 0)).toBe(18);
+    expect(execLane?.budgetPerMin).toBe(24);
+    expect(execLane?.burst).toBe(8);
+    expect(execLane!.budgetPerMin + execLane!.burst).toBeLessThanOrEqual(execLane!.limitPerMin);
+    expect(read!.budgetPerMin + (execLane?.budgetPerMin ?? 0)).toBe(34);
     expect(read!.budgetPerMin + read!.burst).toBeLessThanOrEqual(read!.limitPerMin);
     expect(bucketFor("https://api.mainnet-beta.solana.com")?.budgetPerMin).toBe(9);
     const lane = bucketFor("https://helius-rpc.com/")!;
@@ -215,6 +216,17 @@ describe("v13.21 Pepetide chain marks and Helius budget", () => {
     await net.fetchAt(0)(url, { method: "POST", body: ninth });
     expect(waits.length).toBeGreaterThan(0);
     expect(calls).toBe(5);
+    const afterRead = waits.length;
+    for (let i = 0; i < 8; i += 1) {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: 100 + i, method: "simulateTransaction", params: ["raw", i] });
+      await net.fetchAt(1)(url, { method: "POST", body });
+    }
+    expect(calls).toBe(13);
+    expect(waits.length).toBe(afterRead);
+    const pastBurst = JSON.stringify({ jsonrpc: "2.0", id: 108, method: "simulateTransaction", params: ["past"] });
+    await net.fetchAt(1)(url, { method: "POST", body: pastBurst });
+    expect(waits.length).toBe(afterRead + 1);
+    expect(calls).toBe(14);
   });
 
   it("subscribes the stream to a held mint's pool accounts and not every scouted coin", () => {

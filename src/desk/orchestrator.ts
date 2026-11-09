@@ -347,6 +347,11 @@ export class Desk {
   private liveMarks = new Map<string, { price: number; at: number; feed: string }>();
   /** Recent Dex and Jupiter prints. A chain mark and a large rise need the other feed, not a copy of themselves. */
   private quotePrints = new Map<string, { dex?: { price: number; at: number }; jup?: { price: number; at: number } }>();
+  /**
+   * An unverified rise that healAbsurdMarks took off the card. Entry is only the
+   * equity stand-in. A retry must not fill there until a sane mark or a quote replaces it.
+   */
+  private unverifiedMarks = new Map<string, { price: number; at: number }>();
   /** v13.2 a >30% live jump waiting for a second read. */
   private livePending = new Map<string, { price: number; at: number }>();
   private lastConfirmAt = new Map<string, number>();
@@ -782,6 +787,7 @@ export class Desk {
     this.book.positions.clear();
     this.book.lastPrice.clear();
     this.book.cashUsd = starting;
+    for (const key of [...this.unverifiedMarks.keys()]) if (!key.startsWith(LIVE_KEY)) this.unverifiedMarks.delete(key);
     this.cooldowns.clear();
     this.shocks.clear();
     this.markLiquidity.clear();
@@ -2679,6 +2685,7 @@ export class Desk {
       ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {})
     };
     book.positions.set(token.mint, position);
+    this.unverifiedMarks.delete(bookKey(kind, token.mint));
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
@@ -2827,6 +2834,7 @@ export class Desk {
     const booked: Fill = { ...fill, priceUsd: fillPrice };
     book.cashUsd = roundUsd(book.cashUsd + proceedsUsd);
     book.positions.delete(pos.mint);
+    this.unverifiedMarks.delete(bookKey(order.book === "live" ? "live" : "paper", pos.mint));
     book.dropSeries(pos.mint);
     const pnlUsd = roundUsd(proceedsUsd - pos.costUsd);
     const pnlPct = pos.costUsd > 0 ? pnlUsd / pos.costUsd : order.pnlPct;
@@ -3411,8 +3419,50 @@ export class Desk {
   /** Mark is dozens of times entry and no fresh Dex or Jupiter print sits near it. Drops are never this. */
   private sellUnverified(pos: Position, mark: number): boolean {
     if (!(pos.entryPrice > 0) || !(mark > 0) || !Number.isFinite(mark)) return false;
-    if (mark / pos.entryPrice < ABSURD_RISE) return false;
-    return !quoteConfirms(mark, this.otherQuotes(pos.mint, undefined, Date.now()));
+    const quotes = this.otherQuotes(pos.mint, undefined, Date.now());
+    if (mark / pos.entryPrice >= ABSURD_RISE) return !quoteConfirms(mark, quotes);
+    return this.healedSpikeBlocks(pos, mark, quotes);
+  }
+
+  /** The book that actually holds this position object. */
+  private positionBook(pos: Position): { kind: BookKind; book: PaperBook } | null {
+    if (this.liveBook?.positions.get(pos.mint) === pos) return { kind: "live", book: this.liveBook };
+    if (this.book.positions.get(pos.mint) === pos) return { kind: "paper", book: this.book };
+    return null;
+  }
+
+  /** A newer print, or any sane price other than the entry stand-in, replaced the spike. */
+  private spikeReplaced(book: PaperBook, pos: Position, heldAt: number): boolean {
+    if ((book.markedAt(pos.mint) ?? 0) > heldAt) return true;
+    const px = book.lastPrice.get(pos.mint);
+    return px != null && px !== pos.entryPrice && px / pos.entryPrice < ABSURD_RISE;
+  }
+
+  /**
+   * True when the card shows entry only because an unverified spike was healed away.
+   * A real drop, or a quote near the spike, is not this.
+   */
+  private healedSpikeBlocks(pos: Position, mark: number, quotes: number[]): boolean {
+    const located = this.positionBook(pos);
+    if (!located) return false;
+    const held = this.unverifiedMarks.get(bookKey(located.kind, pos.mint));
+    if (!held || this.spikeReplaced(located.book, pos, held.at) || quoteConfirms(held.price, quotes)) return false;
+    return mark === pos.entryPrice || !(mark / pos.entryPrice < ABSURD_RISE);
+  }
+
+  /** Drop the remembered spike once a sane mark replaced it, or put it back once a quote agrees. */
+  private settleHeldSpike(kind: BookKind, book: PaperBook, pos: Position, now: number): void {
+    const key = bookKey(kind, pos.mint);
+    const held = this.unverifiedMarks.get(key);
+    if (!held) return;
+    if (this.spikeReplaced(book, pos, held.at)) {
+      this.unverifiedMarks.delete(key);
+      return;
+    }
+    if (quoteConfirms(held.price, this.otherQuotes(pos.mint, undefined, now))) {
+      book.lastPrice.set(pos.mint, held.price);
+      this.unverifiedMarks.delete(key);
+    }
   }
 
   /** Flat or rising paper sells still have to fit the exit-impact cap. A falling mark is a rug and must be able to leave. */
@@ -3467,8 +3517,15 @@ export class Desk {
           this.liveMarks.delete(key);
         }
         const px = book.lastPrice.get(pos.mint);
-        if (px != null && pos.entryPrice > 0 && px / pos.entryPrice >= ABSURD_RISE && !quoteConfirms(px, this.otherQuotes(pos.mint, undefined, now))) {
-          book.lastPrice.set(pos.mint, pos.entryPrice);
+        if (px != null && pos.entryPrice > 0 && px / pos.entryPrice >= ABSURD_RISE) {
+          if (!quoteConfirms(px, this.otherQuotes(pos.mint, undefined, now))) {
+            this.unverifiedMarks.set(key, { price: px, at: book.markedAt(pos.mint) ?? now });
+            book.lastPrice.set(pos.mint, pos.entryPrice);
+          } else {
+            this.unverifiedMarks.delete(key);
+          }
+        } else {
+          this.settleHeldSpike(kind, book, pos, now);
         }
         const series = book.series.get(pos.mint);
         if (series && pos.entryPrice > 0) {

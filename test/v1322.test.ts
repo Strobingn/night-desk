@@ -91,6 +91,11 @@ describe("v13.22 poisoned marks cannot fill a sell", () => {
       expect(refused).toMatchObject({ ok: false, error: "Price unverified - sell refused, retry" });
       expect(desk.book.positions.has(MINT)).toBe(true);
       expect(desk.book.cashUsd).toBe(cash);
+      desk.snapshot();
+      const retried = await desk.closePosition(MINT, 1);
+      expect(retried).toMatchObject({ ok: false, error: "Price unverified - sell refused, retry" });
+      expect(desk.book.positions.has(MINT)).toBe(true);
+      expect(desk.book.cashUsd).toBe(cash);
 
       desk.book.mark(MINT, entry * 0.5);
       const sold = await desk.closePosition(MINT, 1);
@@ -152,6 +157,11 @@ describe("v13.22 poisoned marks cannot fill a sell", () => {
       const sellsBefore = swaps.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell").length;
       const refused = await desk.closePosition(MINT, 1, "live");
       expect(refused).toMatchObject({ ok: false, error: "Price unverified - sell refused, retry" });
+      expect(desk.liveBook!.positions.has(MINT)).toBe(true);
+      expect(swaps.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell")).toHaveLength(sellsBefore);
+      desk.snapshot();
+      const retried = await desk.closePosition(MINT, 1, "live");
+      expect(retried).toMatchObject({ ok: false, error: "Price unverified - sell refused, retry" });
       expect(desk.liveBook!.positions.has(MINT)).toBe(true);
       expect(swaps.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell")).toHaveLength(sellsBefore);
     } finally {
