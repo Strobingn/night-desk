@@ -206,6 +206,8 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
           <p className="sub">
             {live ? <span className="live-badge live">LIVE</span> : snap ? <span className="book-tag paper">PAPER</span> : null} {tag ? <span className="chip tag">{tag}</span> : <span className="chip">{pos.source}</span>} score {pos.score.toFixed(2)}
             {pos.lpUnlocked ? " · LP unlocked" : ""}
+            {pos.safetyChip ? <span className="chip">{pos.safetyChip}</span> : null}
+            {pos.bundleChip ? <span className="chip">{pos.bundleChip}</span> : null}
           </p>
         </div>
         <div className="pnl">

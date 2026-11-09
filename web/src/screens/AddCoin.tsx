@@ -180,6 +180,12 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
               </dd>
             </div>
           </dl>
+          {(result.safetyChip || result.bundleChip) ? (
+            <p className="sub">
+              {result.safetyChip ? <span className="chip">{result.safetyChip}</span> : null}
+              {result.bundleChip ? <span className="chip">{result.bundleChip}</span> : null}
+            </p>
+          ) : null}
           <div className={`verdict ${result.filterPass && result.analyst.pass ? "pass" : result.hardKills.length ? "kill" : "fail"}`}>
             {result.filterPass && result.analyst.pass
               ? "Clears every Filter gate and the Analyst line."

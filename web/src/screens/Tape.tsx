@@ -412,6 +412,16 @@ function CoinCard({ coin, selected, busy, actions, onSelect, onBuy, snap }: { co
             <span className="cc-chips">
               <span className={`verdict-chip v-${coin.verdict}`}>{VERDICT_LABEL[coin.verdict]}</span>
               {hot ? <span className="vol-badge hot" title={`#${rank} by 1h volume`}>HOT #{rank}</span> : top ? <span className="vol-badge" title={`#${rank} by 1h volume`}>VOL #{rank}</span> : null}
+              {(() => {
+                const chip = snap?.safetyChips?.find((row) => row.mint === coin.mint);
+                if (!chip) return null;
+                return (
+                  <>
+                    <span className="chip">{chip.safety}</span>
+                    {chip.bundle ? <span className="chip">{chip.bundle}</span> : null}
+                  </>
+                );
+              })()}
             </span>
           </div>
           <span className="cc-meta">

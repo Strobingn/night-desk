@@ -26,6 +26,10 @@ export interface LiveSwapRequest {
   maxExitSlippage?: number;
   /** Exec-lane fetch. Blockhash, simulate, and send do not wait on the 9/min poll budget. */
   rpcFetch?: typeof fetch;
+  /** v13.23 Helius Sender tip. Default 0.000005 SOL. Paper never reaches this. */
+  senderTipLamports?: number;
+  /** Same key must not broadcast twice. A new order uses a new key. */
+  idemKey?: string;
 }
 
 export interface LiveSwapResult {
@@ -137,11 +141,23 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   if (!swap.swapTransaction) throw new Error(`LIVE_SWAP_FAILED: ${swap.error ?? "no swap transaction"}`);
 
   const tx = web3.VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, "base64"));
-  tx.sign([keypair]);
-  // maxRetries resubmits this same signed transaction. It is not a second order.
+  const { sendLiveTransaction, versionedWithTip, tipLamports } = await import("./helius-sender.js");
+  const tipped = await versionedWithTip(tx, keypair.publicKey, tipLamports(req.senderTipLamports == null ? undefined : req.senderTipLamports / 1_000_000_000), async (address) => {
+    const table = await connection.getAddressLookupTable(address);
+    return table.value;
+  }).catch(() => tx);
+  tipped.sign([keypair]);
+  const raw = tipped.serialize();
+  // maxRetries on the fallback resubmits this same signed transaction. It is not a second order.
   let signature: string;
   try {
-    signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 2 });
+    signature = await sendLiveTransaction({
+      idemKey: req.idemKey ?? Buffer.from(raw).toString("base64").slice(0, 44),
+      raw,
+      side: req.side,
+      fetchImpl: fetch,
+      fallback: () => connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 })
+    });
   } catch (err) {
     if (isAmbiguousSendError(err)) throw unconfirmedSend(null, req.side);
     const message = err instanceof Error ? err.message : String(err);

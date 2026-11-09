@@ -122,7 +122,9 @@ function mergeRows(rows: PositionView[], delta: MarksDelta["positions"], receive
       netPnlUsd: row.netPnlUsd === null || usable(row.netPnlUsd) ? row.netPnlUsd : pos.netPnlUsd,
       netPnlPct: row.netPnlPct === null || usable(row.netPnlPct) ? row.netPnlPct : pos.netPnlPct,
       exitSlippage: row.exitSlippage === null || usable(row.exitSlippage) ? row.exitSlippage : pos.exitSlippage,
-      marks: Array.isArray(row.marks) ? row.marks : pos.marks
+      marks: Array.isArray(row.marks) ? row.marks : pos.marks,
+      safetyChip: row.safetyChip || pos.safetyChip,
+      bundleChip: row.bundleChip === undefined ? pos.bundleChip : row.bundleChip
     };
   });
   return { positions, touched };

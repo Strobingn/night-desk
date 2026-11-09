@@ -224,6 +224,8 @@ function fmt(field: SliderField, n: number): string {
       return `${n} h`;
     case "s":
       return `${n} s`;
+    case "SOL":
+      return `${n} SOL`;
     case "score":
       return n.toFixed(2);
     default:

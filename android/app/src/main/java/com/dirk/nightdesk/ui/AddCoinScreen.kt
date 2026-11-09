@@ -187,6 +187,13 @@ fun AddCoinScreen(desk: DeskRepository, snap: DeskSnapshot?, prefill: Pair<Strin
                         Text(found.name, color = Dim, fontSize = 12.sp)
                         Text(found.mint, color = Ink, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         Text(found.tag.uppercase() + (if (found.held) " · HELD" else ""), color = Amber, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        if (found.safetyChip.isNotBlank() || found.bundleChip.isNotBlank()) {
+                            Text(
+                                listOf(found.safetyChip, found.bundleChip).filter { it.isNotBlank() }.joinToString(" · "),
+                                color = if (found.safetyChip.startsWith("Blocked")) Coral else Dim,
+                                fontSize = 12.sp
+                            )
+                        }
                         found.matchedBy?.let { Text("Matched " + it, color = Dim, fontSize = 11.sp) }
                         found.providerNote?.let { Text(it, color = Amber, fontSize = 12.sp) }
                     }

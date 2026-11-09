@@ -22,7 +22,7 @@ export interface SliderField extends Base {
   max: number;
   step: number;
   /** Shown next to the number. */
-  unit: "$" | "%" | "min" | "h" | "" | "score" | "s";
+  unit: "$" | "%" | "min" | "h" | "" | "score" | "s" | "SOL";
   /** Display value → value sent to POST /api/settings. */
   toWire: (display: number) => number;
   /** Value read from /api/state → display value. */
@@ -50,6 +50,7 @@ export const SETTINGS_FIELDS: SettingField[] = [
   { key: "liveTradeUsd", label: "Live $ per trade", group: "Live wallet", kind: "slider", min: 1, max: 100, step: 1, unit: "$", toWire: same, fromState: same, hint: "Up to $100. Every live buy you place spends exactly this much USDC ($5 default). Paper sizes are never used live. AI auto-buys cannot use this size." },
   { key: "liveDailyCapUsd", label: "Live daily cap $", group: "Live wallet", kind: "slider", min: 5, max: 1_000, step: 5, unit: "$", toWire: same, fromState: same, nullable: "No daily cap (default)", nullDefault: 50, hint: "Total USDC live buys may spend per day. Off by default." },
   { key: "liveTrailPct", label: "Live trailing stop %", group: "Live wallet", kind: "slider", min: 0.5, max: 20, step: 0.5, unit: "%", toWire: same, fromState: (raw: number) => Math.round(raw * 10_000) / 100, hint: "Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first." },
+  { key: "senderTipSol", label: "Sender tip", group: "Live wallet", kind: "slider", min: 0.000005, max: 0.01, step: 0.000001, unit: "SOL", toWire: (d: number) => Math.round(d * 1e9) / 1e9, fromState: same, hint: "Helius Sender tip on a live swap. Minimum 0.000005 SOL. Paper trades do not tip." },
   // Sizing / risk
   { key: "maxPositionPct", label: "Position size % of book", group: "Sizing / risk", kind: "slider", min: 1, max: 50, step: 0.5, unit: "%", ...pct, hint: "Per-position cap for auto buys and unconfirmed manual buys. A confirmed manual buy may go to 100%." },
   { key: "positionSizeUsd", label: "Position size $", group: "Sizing / risk", kind: "slider", min: 1, max: 10_000, step: 1, unit: "$", toWire: same, fromState: same, nullable: "Size from the % cap", hint: "Fixed dollars per auto buy, still cut to the % cap, cash and exposure room." },
