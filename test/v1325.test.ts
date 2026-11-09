@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { quotePaperSell } from "../src/agents/execution-math.js";
 import { makeToken } from "../src/demo/tokens.js";
+import { Desk } from "../src/desk/orchestrator.js";
+import { DeskStore } from "../src/store/db.js";
 import { hardKillFollowUp, buyToast } from "../web/src/onetap.js";
 import { formatBalanceUsd, formatSolHolding, liveCashLabel } from "../web/src/format.js";
 import { BUCKETS, NetLimiter, bucketFor, rpcLane } from "../src/market/net.js";
-import { testDesk } from "./helpers.js";
+import { testConfig, testDesk } from "./helpers.js";
 
 const PAYDAY = "9LihG7BkcLSTN2Ytt9q2CePBBqMmd8SgvbGn9UWinqCf";
 
@@ -171,6 +173,117 @@ describe("v13.25 gap rugs stay visible and a bogus first mark does not fire one"
       expect(typeof gap?.pnlUsd).toBe("number");
     } finally {
       repeated.desk.stop();
+    }
+  });
+
+  it("restores a crash off the book, resumes on a sane mark, and rugs the next agreeing print", async () => {
+    const cfg = testConfig({ resetPaper: false });
+    const mint = "CrashMint1111111111111111111111111111111";
+    const first = new Desk(cfg);
+    await first.submitCandidate(makeToken({ mint, symbol: "RUG", priceUsd: 1, liquidityUsd: 180_000 }));
+    const entry = first.book.positions.get(mint)!.entryPrice;
+    first.stop();
+    const store = new DeskStore(cfg.dbPath, cfg.jsonlPath, cfg.logPath);
+    const saved = store.loadBook("book");
+    expect(saved).toBeTruthy();
+    saved!.lastPrices = [[mint, entry / 1000]];
+    saved!.markSeries = [[mint, [{ t: Date.now(), priceUsd: entry / 1000 }]]];
+    store.saveBook(saved!, "book");
+    store.close();
+
+    const resumed = new Desk(cfg);
+    try {
+      expect(resumed.book.positions.has(mint)).toBe(true);
+      expect(resumed.book.price(mint)).toBeGreaterThan(entry / 2);
+      expect(resumed.book.price(mint)).toBeLessThan(entry * 2);
+      expect(resumed.snapshot().equityUsd).toBeGreaterThan(5_000);
+      expect(resumed.snapshot().positions.find((p) => p.mint === mint)?.marks.some((point) => point.priceUsd < entry / 25)).toBe(false);
+      await resumed.markPrice(mint, entry * 1.02);
+      expect(resumed.snapshot().events.some((event) => event.code === "PRICE_OUTLIER")).toBe(false);
+      expect(resumed.book.positions.has(mint)).toBe(true);
+      expect(resumed.book.price(mint)).toBeCloseTo(entry * 1.02, 8);
+    } finally {
+      resumed.stop();
+    }
+
+    saved!.lastPrices = [[mint, entry / 1000]];
+    const againStore = new DeskStore(cfg.dbPath, cfg.jsonlPath, cfg.logPath);
+    const booked = againStore.loadBook("book")!;
+    booked.lastPrices = [[mint, entry / 1000]];
+    againStore.saveBook(booked, "book");
+    againStore.close();
+    const rugged = new Desk(cfg);
+    try {
+      expect(rugged.book.positions.has(mint)).toBe(true);
+      await rugged.markPrice(mint, entry / 1000);
+      expect(rugged.book.positions.has(mint)).toBe(false);
+      expect(rugged.snapshot().closed.some((trade) => trade.mint === mint && trade.exitCode === "GAP_RUG")).toBe(true);
+    } finally {
+      rugged.stop();
+    }
+  });
+
+  it("does not rug on one absurd print after a sane mark or a re-buy", async () => {
+    const { desk, pos } = await openPaper("HELD", "HeldMint11111111111111111111111111111111", 1);
+    try {
+      const entry = pos.entryPrice;
+      await desk.markPrice(pos.mint, entry / 1000);
+      expect(desk.book.positions.has(pos.mint)).toBe(true);
+      await desk.markPrice(pos.mint, entry);
+      pos.openedAt = Date.now() - 20_000;
+      await desk.markPrice(pos.mint, entry / 800);
+      expect(desk.book.positions.has(pos.mint)).toBe(true);
+      expect(desk.snapshot().closed.some((trade) => trade.exitCode === "GAP_RUG")).toBe(false);
+      await desk.markPrice(pos.mint, entry / 800);
+      expect(desk.book.positions.has(pos.mint)).toBe(false);
+    } finally {
+      desk.stop();
+    }
+
+    const again = await openPaper("REBUY", "RebuyMint1111111111111111111111111111111", 1);
+    try {
+      const entry = again.pos.entryPrice;
+      await again.desk.markPrice(again.pos.mint, entry / 1000);
+      await again.desk.markPrice(again.pos.mint, entry / 1000);
+      expect(again.desk.book.positions.has(again.pos.mint)).toBe(false);
+      await again.desk.submitCandidate(makeToken({ mint: again.pos.mint, symbol: "REBUY", priceUsd: 1, liquidityUsd: 180_000 }));
+      const reopened = again.desk.book.positions.get(again.pos.mint);
+      expect(reopened).toBeTruthy();
+      reopened!.openedAt = Date.now() - 20_000;
+      const next = reopened!.entryPrice;
+      await again.desk.markPrice(again.pos.mint, next / 1000);
+      expect(again.desk.book.positions.has(again.pos.mint)).toBe(true);
+    } finally {
+      again.desk.stop();
+    }
+  });
+});
+
+describe("v13.25 order fills keep the exit-impact gate", () => {
+  it("refuses a thin-pool take profit instead of booking the modeled haircut", async () => {
+    const { desk, pos } = await openPaper("PAYDAY", PAYDAY, 1);
+    try {
+      const entry = pos.entryPrice;
+      await desk.markPrice(PAYDAY, entry * 1.1);
+      pos.liquidityUsd = 15;
+      const full = desk.placeOrder({ side: "take_profit", mint: PAYDAY, basis: "price", value: entry * 1.3, percent: 100 });
+      expect(full.ok).toBe(true);
+      await desk.markPrice(PAYDAY, entry * 1.3);
+      await desk.ordersSettled();
+      expect(desk.book.positions.has(PAYDAY)).toBe(true);
+      expect(desk.snapshot().closed.some((trade) => trade.exitCode === "MANUAL_CLOSE")).toBe(false);
+      expect(desk.snapshot().events.some((event) => event.code === "EXIT_IMPACT" && event.symbol === "PAYDAY")).toBe(true);
+
+      const open = desk.book.positions.get(PAYDAY)!;
+      open.liquidityUsd = 15;
+      const part = desk.placeOrder({ side: "take_profit", mint: PAYDAY, basis: "price", value: entry * 1.4, percent: 50 });
+      expect(part.ok).toBe(true);
+      await desk.markPrice(PAYDAY, entry * 1.4);
+      await desk.ordersSettled();
+      expect(desk.book.positions.has(PAYDAY)).toBe(true);
+      expect(desk.snapshot().closed.some((trade) => trade.exitCode === "PARTIAL_SELL")).toBe(false);
+    } finally {
+      desk.stop();
     }
   });
 });

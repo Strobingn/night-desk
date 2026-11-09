@@ -80,12 +80,12 @@ export const ABSURD_RISE = 25;
 export const QUOTE_CONFIRM_MS = 60_000;
 
 /**
- * The anchor for an upward sanity check. A saved mark already dozens of times entry
- * is not "last good" — the first chain read can poison it and then agree with itself.
+ * The anchor for an upward sanity check. A saved mark dozens of times away from entry
+ * — a spike or a crash — is not "last good". Either one poisons the next print.
  */
 export function entryAnchor(entry: number, lastGood: number): number {
   if (!(entry > 0) || !Number.isFinite(entry)) return lastGood;
-  if (!(lastGood > 0) || !Number.isFinite(lastGood) || lastGood / entry >= ABSURD_RISE) return entry;
+  if (!(lastGood > 0) || !Number.isFinite(lastGood) || absurdScale(entry, lastGood) >= ABSURD_RISE) return entry;
   return lastGood;
 }
 

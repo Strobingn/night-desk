@@ -303,8 +303,10 @@ export class Desk {
   /** v13.6 ticker search (own spacing, cache and 429 backoff). */
   private dexSearch: DexSearchClient | null = null;
   private solUsdCache: { value: number; at: number } | null = null;
-  /** Absurd post-fill marks already held once. The next agreeing print may stop. */
+  /** Absurd post-fill marks already held once. The next agreeing print may stop. Cleared on a sane mark, a close, or a re-entry. */
   private readonly absurdHeld = new Set<string>();
+  /** Take-profit and stop orders sell through closePosition. They keep the exit-impact gate. */
+  private readonly impactOrders = new Set<string>();
   /** Last sell refusal, so a manual close can show the gate text instead of a generic miss. */
   private readonly closeRefusals = new Map<string, { code: string; error: string }>();
   private readonly curveQueue = new Set<string>();
@@ -532,10 +534,19 @@ export class Desk {
       }
       for (const [mint, priceUsd] of liveSaved?.lastPrices ?? []) {
         const pos = this.liveBook.positions.get(mint);
-        if (!pos || (pos.entryPrice > 0 && priceUsd / pos.entryPrice >= ABSURD_RISE)) continue;
+        if (!pos) continue;
+        if (pos.entryPrice > 0 && absurdScale(pos.entryPrice, priceUsd) >= ABSURD_RISE) {
+          this.noteRestoredCrash("live", pos, priceUsd);
+          continue;
+        }
         this.liveBook.mark(mint, priceUsd);
       }
-      for (const [mint, points] of liveSaved?.markSeries ?? []) if (this.liveBook.positions.has(mint)) this.liveBook.restoreSeries(mint, points);
+      for (const [mint, points] of liveSaved?.markSeries ?? []) {
+        const pos = this.liveBook.positions.get(mint);
+        if (!pos) continue;
+        const kept = pos.entryPrice > 0 ? points.filter((point) => absurdScale(pos.entryPrice, point.priceUsd) < ABSURD_RISE) : points;
+        this.liveBook.restoreSeries(mint, kept);
+      }
       for (const [mint, until] of liveSaved?.cooldowns ?? []) {
         if (this.config.rules.revengeCooldownMs > 0 && until > Date.now()) this.cooldowns.set(bookKey("live", mint), until);
       }
@@ -549,13 +560,16 @@ export class Desk {
       }
       for (const [mint, priceUsd] of restored.lastPrices ?? []) {
         const pos = this.book.positions.get(mint);
-        if (pos && pos.entryPrice > 0 && priceUsd / pos.entryPrice >= ABSURD_RISE) continue;
+        if (pos && pos.entryPrice > 0 && absurdScale(pos.entryPrice, priceUsd) >= ABSURD_RISE) {
+          this.noteRestoredCrash("paper", pos, priceUsd);
+          continue;
+        }
         this.book.mark(mint, priceUsd);
       }
       for (const [mint, points] of restored.markSeries ?? []) {
         const pos = this.book.positions.get(mint);
         if (!pos) continue;
-        const kept = pos.entryPrice > 0 ? points.filter((point) => !(point.priceUsd / pos.entryPrice >= ABSURD_RISE)) : points;
+        const kept = pos.entryPrice > 0 ? points.filter((point) => absurdScale(pos.entryPrice, point.priceUsd) < ABSURD_RISE) : points;
         this.book.restoreSeries(mint, kept);
       }
       for (const [mint, until] of restored.cooldowns) {
@@ -834,6 +848,7 @@ export class Desk {
     this.book.cashUsd = starting;
     this.cooldowns.clear();
     this.shocks.clear();
+    for (const key of [...this.absurdHeld]) if (!key.startsWith(LIVE_KEY)) this.absurdHeld.delete(key);
     this.markLiquidity.clear();
     this.startedAt = Date.now();
     this.resetAt = this.startedAt;
@@ -1006,7 +1021,8 @@ export class Desk {
   async closePosition(
     mint: string,
     fraction = 1,
-    bookArg?: BookKind
+    bookArg?: BookKind,
+    operator = true
   ): Promise<
     | { ok: true; soldFraction?: number; proceedsUsd?: number; symbol?: string; pnlUsd?: number; pnlPct?: number; exitPrice?: number; exitCode?: string }
     | { ok: false; error: string; code?: string }
@@ -1038,7 +1054,7 @@ export class Desk {
     if (fraction < 1) {
       const split = splitPosition(pos.qty, pos.costUsd, fraction);
       // A remainder worth under a cent is closed in full instead of leaving dust.
-      if (split.ok && split.remainQty * mark >= 0.01) return this.partialSell(pos, mark, split);
+      if (split.ok && split.remainQty * mark >= 0.01) return this.partialSell(pos, mark, split, operator);
     }
     pos.closing = true;
     const order: ExitOrder = {
@@ -1063,8 +1079,14 @@ export class Desk {
       code: "MANUAL_CLOSE",
       message: `Manual ${kind === "live" ? "live " : ""}close requested for ${pos.symbol} at mark ${price(mark)}.`
     });
-    this.bus.emit("risk.exit", order);
-    await this.drain();
+    const impactKey = bookKey(kind, mint);
+    if (!operator) this.impactOrders.add(impactKey);
+    try {
+      this.bus.emit("risk.exit", order);
+      await this.drain();
+    } finally {
+      this.impactOrders.delete(impactKey);
+    }
     if (book.positions.has(mint)) {
       const refused = this.closeRefusals.get(bookKey(kind, mint));
       this.closeRefusals.delete(bookKey(kind, mint));
@@ -1308,7 +1330,7 @@ export class Desk {
           code = res.code;
         }
       } else {
-        const res = await this.closePosition(o.mint, o.fraction ?? 1, o.book);
+        const res = await this.closePosition(o.mint, o.fraction ?? 1, o.book, false);
         ok = res.ok;
         if (res.ok) fill = res.exitPrice;
         else error = res.error;
@@ -1394,12 +1416,13 @@ export class Desk {
   private partialSell(
     pos: Position,
     mark: number,
-    split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number }
+    split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number },
+    operator = true
   ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string; code?: string } {
     if (this.sellUnverified(pos, mark)) return { ok: false, error: UNVERIFIED_SELL, code: "UNVERIFIED_SELL" };
     const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
-    // Sell 25/50/100 is a manual paper close. The exit-impact gate stays on automatic exits only.
-    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity, true);
+    // A hand sell of 25/50/100 skips the exit-impact gate. An order fill does not.
+    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity, operator);
     if (impact) return { ok: false, error: impact, code: "EXIT_IMPACT" };
     const quote = quotePaperSell(mark, split.sellQty, liquidity);
     const proceedsUsd = roundUsd(quote.proceedsUsd ?? 0);
@@ -1442,6 +1465,8 @@ export class Desk {
       },
       { fraction: split.fraction, qty: split.sellQty, proceedsUsd, pnlUsd }
     );
+    this.absurdHeld.delete(pos.mint);
+    this.shocks.delete(pos.mint);
     this.persist();
     this.markEquity(true);
     this.publishAdvice(this.buildAdvice());
@@ -2783,6 +2808,8 @@ export class Desk {
       ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {})
     };
     book.positions.set(token.mint, position);
+    this.absurdHeld.delete(bookKey(kind, token.mint));
+    this.shocks.delete(bookKey(kind, token.mint));
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
@@ -2873,7 +2900,7 @@ export class Desk {
       const mark = this.exitMark(pos, order.markPrice, kind);
       if (!(mark > 0) || this.sellUnverified(pos, mark) || this.sellUnverified(pos, order.markPrice)) throw new GateError(UNVERIFIED_SELL, "UNVERIFIED_SELL");
       const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
-      const manual = order.reason.code === "MANUAL_CLOSE";
+      const manual = order.reason.code === "MANUAL_CLOSE" && !this.impactOrders.has(bookKey(kind, order.mint));
       const impact = this.paperExitImpact(pos, mark, pos.qty, liquidity, manual);
       if (impact) throw new GateError(impact, "EXIT_IMPACT");
       const quote = quotePaperSell(mark, pos.qty, liquidity);
@@ -2934,6 +2961,9 @@ export class Desk {
     book.cashUsd = roundUsd(book.cashUsd + proceedsUsd);
     book.positions.delete(pos.mint);
     book.dropSeries(pos.mint);
+    const soldKind: BookKind = order.book === "live" ? "live" : "paper";
+    this.absurdHeld.delete(bookKey(soldKind, pos.mint));
+    this.shocks.delete(bookKey(soldKind, pos.mint));
     const pnlUsd = roundUsd(proceedsUsd - pos.costUsd);
     const pnlPct = pos.costUsd > 0 ? pnlUsd / pos.costUsd : order.pnlPct;
     const label = classifyStopExit({
@@ -3215,7 +3245,7 @@ export class Desk {
       const now = Date.now();
       const lastGoodAt = book.markedAt(mint) ?? pos.openedAt;
       if (!pos.closing && origin && now - lastGoodAt >= REANCHOR_SILENT_MS) {
-        const step = reanchorCandidate(this.reanchors.get(key), origin, priceUsd, book.price(mint, pos.entryPrice), now);
+        const step = reanchorCandidate(this.reanchors.get(key), origin, priceUsd, entryAnchor(pos.entryPrice, book.price(mint, pos.entryPrice)), now);
         if (step.verdict === "adopt") {
           const was = `${pos.priceFeed ?? pos.source}${pos.pairAddress ? ` pair ${pos.pairAddress.slice(0, 4)}` : ""}`;
           pos.priceFeed = origin.feed as Position["priceFeed"];
@@ -3289,6 +3319,7 @@ export class Desk {
       if (!pending || pending.feed !== feed || !agrees) {
         this.shocks.set(key, { feed, price: priceUsd });
         if (absurdDown) this.absurdHeld.add(key);
+        else this.absurdHeld.delete(key);
         const base = shock ? pos.entryPrice : book.price(mint, pos.entryPrice);
         const move = ((priceUsd - base) / base) * 100;
         const heldAbsurd = firstAbsurd && !needsShockConfirm(pos.entryPrice, priceUsd, pos.openedAt, Date.now());
@@ -3307,9 +3338,11 @@ export class Desk {
         return;
       }
       this.shocks.delete(key);
+      if (!absurdDown) this.absurdHeld.delete(key);
       shockConfirmed = true;
     } else if (pos) {
       this.shocks.delete(key);
+      if (!absurdDown) this.absurdHeld.delete(key);
     }
     const seen = kind === "paper" ? this.sightings.get(mint) : undefined;
     if (seen) this.sightings.set(mint, { ...seen, priceUsd });
@@ -3525,6 +3558,17 @@ export class Desk {
     const last = this.bk(kind).price(pos.mint, pos.entryPrice);
     if (this.sellUnverified(pos, last)) return Number.NaN;
     return !markUnusable(last) ? last : pos.entryPrice;
+  }
+
+  /**
+   * A crash saved on disk is one unconfirmed print, not the book price.
+   * Equity stays on entry so a sane mark can resume. The next agreeing print may rug.
+   */
+  private noteRestoredCrash(kind: BookKind, pos: Position, priceUsd: number): void {
+    if (!(priceUsd > 0) || !(pos.entryPrice > 0) || priceUsd >= pos.entryPrice || !this.absurdUnverified(pos, priceUsd)) return;
+    const key = bookKey(kind, pos.mint);
+    this.absurdHeld.add(key);
+    this.shocks.set(key, { feed: pos.priceFeed ?? "mark", price: priceUsd });
   }
 
   /** Absurd versus entry and not confirmed by another feed. */
