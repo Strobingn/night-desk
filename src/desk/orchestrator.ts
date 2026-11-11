@@ -50,6 +50,7 @@ class GateError extends Error {
   }
 }
 import { visibleEquity } from "./equity-series.js";
+import { Cached, EquityWindow } from "./snapshot-cache.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
@@ -426,6 +427,10 @@ export class Desk {
   private commentTimer: NodeJS.Timeout | null = null;
   private lastNotes = new Set<string>();
   private lastEquityAt = 0;
+  /** v13.32 snapshot pieces that used to be re-read from SQLite on every push. */
+  private readonly equityWindow = new EquityWindow();
+  private readonly recentEventsCache = new Cached(() => this.store.recentEvents(180));
+  private readonly recentClosedCache = new Cached(() => this.store.recentClosed(40).filter((trade) => trade.closedAt >= this.startedAt).slice(-20));
   /** Last equity sample actually written. A bogus jump is not stored and does not move this. */
   private lastEquitySample: { equity: number; cash: number } | null = null;
   private pipeline: PipelineCounts = {
@@ -596,6 +601,7 @@ export class Desk {
     }
     this.healAbsurdMarks();
     this.resetAt = this.ensureResetAt();
+    this.equityWindow.load(this.store.equitySince(this.startedAt));
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
     this.unconfirmedLive = loadUnconfirmed(this.store.readJson("liveUnconfirmed"));
     this.orders = new OrderList(this.store.readJson("orders"));
@@ -904,6 +910,8 @@ export class Desk {
     this.startedAt = Date.now();
     this.resetAt = this.startedAt;
     this.store.writeJson("resetAt", this.resetAt);
+    this.equityWindow.clear();
+    this.recentClosedCache.invalidate();
     for (const key of Object.keys(this.pipeline) as Array<keyof PipelineCounts>) this.pipeline[key] = 0;
     this.killReasons = {};
     this.weakSurvivor = null;
@@ -1672,6 +1680,7 @@ export class Desk {
       entryPrice: pos.entryPrice,
       exitPrice: quote.fillPrice
     });
+    this.recentClosedCache.invalidate();
     this.pipeline.fills += 1;
     const pct = Math.round(split.fraction * 100);
     this.log(
@@ -2504,12 +2513,9 @@ export class Desk {
       pipeline: { ...this.pipeline },
       killReasons: { ...this.killReasons },
       positions,
-      closed: this.store
-        .recentClosed(40)
-        .filter((trade) => trade.closedAt >= this.startedAt)
-        .slice(-20),
-      equity: downsample(visibleEquity(this.store.equitySince(this.startedAt)), 240),
-      events: this.store.recentEvents(180),
+      closed: this.recentClosedCache.get(),
+      equity: this.equityWindow.view(),
+      events: this.recentEventsCache.get(),
       advice: this.advice,
       watchlist: this.watchlist.map((item) => ({ ...item })),
       exposureUsd: roundUsd(this.exposureUsd()),
@@ -3323,6 +3329,7 @@ export class Desk {
         ? `Gap/${label.rug ? "rug" : "gap"}: stop line ${price(stopPrice)} (−${(this.config.rules.stopLossPct * 100).toFixed(0)}%), trigger mark ${price(order.markPrice)}${vsEntry(order.markPrice)}, true fill ${price(fillPrice)}${vsEntry(fillPrice)}. The price moved past the stop between marks; a stop cannot fill better than the market.`
         : `Stop trigger ${price(stopPrice)} vs fill ${price(fillPrice)}.`;
     this.store.closeTrade(closed);
+    this.recentClosedCache.invalidate();
     const lesson = noteOutcome(this.advisor.memory, pos.mint, pnlPct, pnlPct > 0);
     this.advisor.save();
     if (lesson) {
@@ -3987,7 +3994,9 @@ export class Desk {
     const cashUp = prev != null && cash > prev.cash + 500;
     if (prev && !cashUp && equity > prev.equity * 1.02 && prevMv > 1 && mv > prevMv * 25 && mv - prevMv > 500) return;
     this.lastEquitySample = { equity, cash };
-    this.store.insertEquity({ t: now, equity, cash });
+    const point = { t: now, equity, cash };
+    this.store.insertEquity(point);
+    this.equityWindow.push(point);
   }
 
   private remember(token: CandidateToken): void {
@@ -4716,6 +4725,7 @@ export class Desk {
   private log(event: Omit<FeedEvent, "id" | "ts">, payload?: unknown): void {
     const full: FeedEvent = { ...event, id: randomUUID(), ts: Date.now() };
     this.store.appendEvent(full, payload ?? null);
+    this.recentEventsCache.invalidate();
     this.bus.emit("log.event", full);
   }
 
@@ -5007,14 +5017,6 @@ function price(n: number): string {
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(6);
   return tinyPx(n);
-}
-
-function downsample<T>(rows: T[], max: number): T[] {
-  if (rows.length <= max) return rows;
-  const out: T[] = [];
-  const step = (rows.length - 1) / (max - 1);
-  for (let i = 0; i < max; i += 1) out.push(rows[Math.round(i * step)]!);
-  return out;
 }
 
 export { entryAllowed };

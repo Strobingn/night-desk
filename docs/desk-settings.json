@@ -10,11 +10,11 @@
       "/api/live/ready",
       "/api/orders"
     ],
-    "code": "13.31. Engine behavior is Claude's trading-engine tip 8b3fe9484c12e41efded821e223891907c3051d6 (rebased on 31c6d56; same patches as the engine already in 13.30 through 9f6bd0d). Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). The engine was not on the host, and the 8b3fe94 author had no desk token, so /api/strategy/* was not re-pulled.",
-    "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
+    "code": "13.32 on branch claude/app-redesign",
+    "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled. 13.32 adds no desk settings; see DESK_SETTINGS.md \"13.32 notes\"."
   },
   "version": {
-    "appVersion": "13.31",
+    "appVersion": "13.32",
     "androidVersionName": "13.31",
     "androidVersionCode": 1331,
     "applicationId": "com.dirk.nightdesk",
@@ -29,7 +29,8 @@
       "githubRelease": "https://github.com/Strobingn/night-desk/releases/tag/v13.29",
       "service": "night-desk",
       "serviceActive": true
-    }
+    },
+    "mergeSha": "pending (claude/app-redesign)"
   },
   "backend": {
     "publicBaseUrl": "https://night-desk.157-151-200-171.sslip.io",
@@ -350,7 +351,14 @@
         },
         "display": "1% stop on the main paper book",
         "source": "strategy",
-        "choices": ["launch-1", "launch-3", "launch-6", "momentum-1", "momentum-3", "momentum-6"],
+        "choices": [
+          "launch-1",
+          "launch-3",
+          "launch-6",
+          "momentum-1",
+          "momentum-3",
+          "momentum-6"
+        ],
         "notes": "Production's hard stop is 2.5% (tighter than the -6% floor) and is checked first, so a 3% or 6% active variant never reaches its own stop on the main book. Shadow books use their own stop."
       },
       "dailyMaxLossUsd": {

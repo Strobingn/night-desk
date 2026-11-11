@@ -358,6 +358,7 @@ export function startServer(
 
   let pending: NodeJS.Timeout | null = null;
   let lastSnapshotAt = 0;
+  let lastPayload = "";
   const push = () => {
     if (pending) return;
     const wait = Math.max(WS_PUSH_MS, lastSnapshotAt + WS_SNAPSHOT_MIN_MS - Date.now());
@@ -365,11 +366,18 @@ export function startServer(
       pending = null;
       lastSnapshotAt = Date.now();
       let payload: string;
+      let fingerprint: string;
       try {
-        payload = JSON.stringify({ type: "snapshot", data: desk.snapshot() });
+        const data = desk.snapshot();
+        payload = JSON.stringify({ type: "snapshot", data });
+        // The clock alone does not make a new snapshot. Clients stamp their own receive time.
+        fingerprint = JSON.stringify({ ...data, now: 0 });
       } catch {
         return;
       }
+      // v13.32 nothing changed since the last push: the clients keep what they have.
+      if (fingerprint === lastPayload) return;
+      lastPayload = fingerprint;
       // A socket still draining an older snapshot skips this one and gets the latest once it drains.
       if (sendSnapshot(sockets, payload) > 0) push();
     }, wait);

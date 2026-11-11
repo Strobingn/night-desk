@@ -277,3 +277,7 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.32 notes
+
+No new desk settings. The phone gets five tabs (Home, Tape, Search, Engine, Settings) with Recap, Link and Pump under Settings → More, and `POST /api/strategy/reset` is reachable from the Engine tab. Backend: the equity curve, the last 180 events and the last 20 closed trades are cached in memory and refreshed only when they change, so a snapshot no longer re-reads the whole equity table (one row per 2 s since the last paper reset) on every push. Measured on a 7-day-old book: 334 ms per snapshot before, under 1 ms after. A push whose content did not change (clock aside) is not sent.

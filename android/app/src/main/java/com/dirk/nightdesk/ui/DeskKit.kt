@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -482,13 +483,16 @@ fun ThinBar(fraction: Float, color: Color, modifier: Modifier = Modifier, track:
 
 /** A small "Hide ▴ / More ▾" text toggle. */
 @Composable
-fun Disclosure(open: Boolean, openLabel: String = "Hide", closedLabel: String = "Details", onToggle: () -> Unit) {
+fun Disclosure(open: Boolean, openLabel: String = "Hide", closedLabel: String = "Details", tag: String? = null, onToggle: () -> Unit) {
     Text(
         if (open) "$openLabel ▴" else "$closedLabel ▾",
         color = P.accent,
         fontSize = 13.sp,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.clickable(onClick = onToggle).padding(vertical = 6.dp)
+        modifier = Modifier
+            .then(if (tag != null) Modifier.testTag(tag) else Modifier)
+            .clickable(onClick = onToggle)
+            .padding(vertical = 6.dp)
     )
 }
 

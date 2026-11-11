@@ -185,6 +185,7 @@ class DeskRepository private constructor(private val context: Context) {
     private var persistedGood: String? = null
     private var networkRegistered = false
     private var lastPersistAt = 0L
+    @Volatile private var lastSnapshotText: String? = null
 
     fun linkSnapshot(): DeskLink = link
 
@@ -938,6 +939,9 @@ class DeskRepository private constructor(private val context: Context) {
                             _snapshot.value = current.withMarks(msg)
                             return@runCatching
                         }
+                        // v13.32 the same snapshot twice is not parsed or redrawn twice.
+                        if (text == lastSnapshotText) return@runCatching
+                        lastSnapshotText = text
                         parseDeskPayload(text)?.let {
                             apply(it)
                             persistSnapshot(text)

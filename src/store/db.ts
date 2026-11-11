@@ -76,9 +76,20 @@ export class DeskStore {
     if (!cols.has("trigger_price")) this.db.exec(`ALTER TABLE trades ADD COLUMN trigger_price REAL`);
   }
 
+  /** v13.32 hot statements are prepared once. Each prepare() is a SQLite compile. */
+  private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
+
+  private stmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
+    let st = this.statements.get(sql);
+    if (!st) {
+      st = this.db.prepare(sql);
+      this.statements.set(sql, st);
+    }
+    return st;
+  }
+
   appendEvent(event: FeedEvent, payload: unknown): void {
-    this.db
-      .prepare(
+    this.stmt(
         `INSERT INTO events (id, ts, stage, kind, mint, symbol, code, message, detail, payload)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
@@ -148,8 +159,7 @@ export class DeskStore {
   }
 
   recentEvents(limit = 200): FeedEvent[] {
-    const rows = this.db
-      .prepare(
+    const rows = this.stmt(
         `SELECT id, ts, stage, kind, mint, symbol, code, message, detail
          FROM events ORDER BY ts DESC, rowid DESC LIMIT ?`
       )
@@ -191,7 +201,7 @@ export class DeskStore {
   }
 
   insertEquity(point: EquityPoint): void {
-    this.db.prepare(`INSERT INTO equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`).run(point.t, point.equity, point.cash);
+    this.stmt(`INSERT INTO equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`).run(point.t, point.equity, point.cash);
   }
 
   equitySince(sinceTs: number): EquityPoint[] {
