@@ -139,8 +139,10 @@ object OneTap {
         val fill = json.optFinite("fillPriceUsd", Double.NaN).takeIf { it.isFinite() && it > 0 }
         val clamped = json.optFinite("clampedFrom", Double.NaN).takeIf { it.isFinite() }
         val mode = json.optText("mode").ifBlank { "paper" }.let { if (it == "live") "LIVE" else it }
+        val warning = json.optText("warning").trim()
         return "Bought $sym ${formatUsd(size)}" + (if (fill != null) " @ ${priceText(fill)}" else "") +
-            (if (clamped != null) " (cut from ${formatUsd(clamped)} to the cap)" else "") + " · $mode · $ms ms"
+            (if (clamped != null) " (cut from ${formatUsd(clamped)} to the cap)" else "") + " · $mode · $ms ms" +
+            (if (warning.isEmpty()) "" else " $warning")
     }
 
     fun sellText(symbol: String, json: JSONObject?, ok: Boolean, ms: Long): String {

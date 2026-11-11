@@ -11,7 +11,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { TapeScreen } from "./screens/Tape";
 import type { DeskSnapshot, FeedEvent } from "./types";
 import { Icon } from "./ui";
-import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, hardKillFollowUp, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
+import { TAP_SIZE_KEY, buyToast, defaultTapUsd, effectiveTapUsd, hardKillFollowUp, liveGateFollowUp, liveTapBlock, liveTapUsd, newIdemKey, sellToast, type BuyReply, type SellReply } from "./onetap";
 import { PumpScreen } from "./pump/PumpScreen";
 import { applyTheme, nextTheme, readThemePref, saveThemePref, THEME_OPTIONS, type ThemePref } from "./theme";
 
@@ -41,6 +41,8 @@ export interface BuyAsk {
   hardKill?: string;
   confirmSize?: boolean;
   confirmHardKill?: boolean;
+  /** v13.32 set when Buy anyway confirms a live tap. Omitted stays paper. */
+  book?: "paper" | "live";
 }
 
 export interface DeskActions {
@@ -205,11 +207,12 @@ export function App() {
   const buy = useCallback(
     async (ask: BuyAsk): Promise<boolean> => {
       setBusy(ask.mint);
-      const payload: Record<string, unknown> = { mint: ask.mint, book: "paper" };
+      const payload: Record<string, unknown> = { mint: ask.mint, book: ask.book === "live" ? "live" : "paper" };
       if (ask.sizeUsd != null) payload.sizeUsd = ask.sizeUsd;
-      if (ask.minutesLeft != null) payload.ignoreCooldown = true;
+      if (ask.minutesLeft != null || ask.book === "live") payload.ignoreCooldown = true;
       if (ask.confirmHardKill) payload.confirmHardKill = true;
       if (ask.confirmSize) payload.confirmSize = true;
+      if (ask.book === "live") payload.idemKey = newIdemKey();
       const res = await api<{ symbol?: string; sizeUsd?: number; mode?: string; clampedFrom?: number }>("/api/positions/buy", { body: payload });
       setBusy(null);
       const body = res.body;
@@ -299,7 +302,19 @@ export function App() {
       const sizeUsd = liveTapUsd(current);
       const res = await api<BuyReply>("/api/positions/buy", { body: { mint, sizeUsd, book: "live", idemKey: newIdemKey(), oneTap: true } });
       track(key, false);
-      setNotice({ ok: res.ok, toast: true, text: buyToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
+      const body = { ...res.body, ok: res.ok };
+      const held = liveGateFollowUp(body.code, body.error);
+      if (held) {
+        setBuyAsk({
+          mint,
+          symbol,
+          sizeUsd,
+          minutesLeft: held.cooldown ? 1 : null,
+          hardKill: held.cooldown ? undefined : held.reason,
+          book: "live"
+        });
+      }
+      setNotice({ ok: res.ok, toast: true, text: buyToast(symbol, body, Math.round(performance.now() - started)) });
     },
     [track]
   );
@@ -490,14 +505,21 @@ function BuyModal({ ask, snap, onCancel, onConfirm }: { ask: BuyAsk; snap: DeskS
     <div className="modal-back" role="presentation" onClick={onCancel}>
       <div className="modal" role="dialog" aria-labelledby="buy-title" onClick={(event) => event.stopPropagation()}>
         <h2 id="buy-title">{anyway ? `Buy ${ask.symbol} anyway?` : `Buy ${ask.symbol}?`}</h2>
-        <p>
-          {ask.sizeUsd == null
-            ? snap.positionCapUsd > 0
-              ? `Size uses the position cap (${usd(snap.positionCapUsd)}).`
-              : "Size uses the position cap."
-            : `Size ${usd(ask.sizeUsd)}.${ask.confirmSize ? " Confirmed above the per-position cap (up to 100% of the book, still cut to cash)." : " A larger number is filled at the cap."}`}{" "}
-          Paper fill only. A real swap is the LIVE button, and only after the checklist is marked.
-        </p>
+        {ask.book === "live" ? (
+          <p>
+            Live buy {usd(ask.sizeUsd ?? liveTapUsd(snap))}. Real money from the desk wallet. The engine, the analyst, a filter miss, the score, and a watch do not block it.
+            Slippage, pool depth, the wallet check, the live size, and the daily cap still do.
+          </p>
+        ) : (
+          <p>
+            {ask.sizeUsd == null
+              ? snap.positionCapUsd > 0
+                ? `Size uses the position cap (${usd(snap.positionCapUsd)}).`
+                : "Size uses the position cap."
+              : `Size ${usd(ask.sizeUsd)}.${ask.confirmSize ? " Confirmed above the per-position cap (up to 100% of the book, still cut to cash)." : " A larger number is filled at the cap."}`}{" "}
+            Paper fill only. A real swap is the LIVE button, and only after the checklist is marked.
+          </p>
+        )}
         {ask.minutesLeft != null ? (
           <p className="ban">Mint is banned after a hard stop. Cooldown has about {ask.minutesLeft} minute(s) left. Auto buys stay blocked.</p>
         ) : null}

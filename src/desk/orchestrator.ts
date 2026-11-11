@@ -1260,6 +1260,7 @@ export class Desk {
     await this.drain();
   }
 
+  /** Paper only. The engine never names the live book. A manual live buy does not come through here. */
   private async strategyBuy(fired: FiredSignal): Promise<void> {
     const { token, score, meta } = fired;
     const startedAt = Date.now();
@@ -1337,7 +1338,10 @@ export class Desk {
     this.pinOrderMints();
   }
 
-  /** Limit-buy coins stay quoted on the Tape quoter (batched, rate-safe) while their order is open. */
+  /**
+   * Limit-buy coins and coins the engine is watching stay quoted on the Tape quoter.
+   * A pin is a quote slot. It does not disable Buy or hide Live, and a manual buy does not read it.
+   */
   private pinOrderMints(): void {
     this.tape?.pin([...this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint), ...this.strategy.pinned()]);
   }
@@ -2320,11 +2324,24 @@ export class Desk {
         message: `Warning: ${token.symbol} ${bundle.label}. A manual buy is not blocked.`
       });
     }
+    const cached = this.analystScores.get(token.mint);
+    const score = cached != null && Number.isFinite(cached) ? cached : scoreToken(token, this.config.rules).score;
+    this.analystScores.set(token.mint, score);
+    // Opinion gates (engine watch, analyst line, soft filter, hard-stop ban) warn and do not refuse.
+    // Hard kills still use Buy anyway: the first tap is held, the confirm buys.
+    const notes: string[] = [];
     if (!this.bk(kind).positions.has(token.mint)) {
       const rug = await this.rugs.lookup(token.devWallet);
-      const kills = evaluateFilter(token, rug, this.config.rules, { allowUnlockedLp: this.allowUnlockedLp }).checks.filter(
-        (check) => !check.pass && HARD_KILL_CODES.has(check.code)
-      );
+      const failed = evaluateFilter(token, rug, this.config.rules, {
+        allowUnlockedLp: this.allowUnlockedLp,
+        minLiquidityUsd: this.minLiquidityUsd,
+        minAgeSeconds: this.minTokenAgeMin > 0 ? this.minTokenAgeMin * 60 : 0,
+        maxAgeSeconds: this.maxTokenAgeMin > 0 ? this.maxTokenAgeMin * 60 : 0,
+        minHolderCount: this.minHolderCount,
+        maxDevHoldingPct: this.maxDevHoldingPct
+      }).checks.filter((check) => !check.pass);
+      const kills = failed.filter((check) => HARD_KILL_CODES.has(check.code));
+      const soft = failed.filter((check) => !HARD_KILL_CODES.has(check.code));
       const safetyBlocked = safety.status === "blocked";
       if ((kills.length || safetyBlocked) && opts?.confirmHardKill !== true) {
         const why = [...kills.map((k) => k.message), ...(safetyBlocked ? [safety.chip] : [])].join(" ");
@@ -2342,15 +2359,37 @@ export class Desk {
           message: `Operator chose Buy anyway on ${token.symbol} past ${[...kills.map((k) => k.code), ...(safetyBlocked ? [safety.chip] : [])].join(", ")}. ${kind === "live" ? "Live buy." : "Paper only."}`
         });
       }
+      if (this.strategy.isWatching(token.mint)) {
+        notes.push(`Engine is watching ${token.symbol} for a Launch or Momentum signal. No buy yet.`);
+      }
+      if (!(score + 1e-9 >= this.config.rules.analystMinScore)) {
+        notes.push(`Analyst scored ${token.symbol} ${score.toFixed(2)}. No trade. Below the ${this.config.rules.analystMinScore.toFixed(2)} line.`);
+      }
+      if (soft.length) notes.push(`Filter killed ${token.symbol}. ${soft.map((check) => check.message).join(" ")}`);
+      const until = this.cooldowns.get(bookKey(kind, token.mint)) ?? 0;
+      if (until > Date.now()) {
+        const mins = Math.ceil((until - Date.now()) / 60_000);
+        notes.push(`Mint is banned after a hard stop. Cooldown has about ${mins} minute(s) left. Auto buys stay blocked.`);
+      }
     }
-    const cached = this.analystScores.get(token.mint);
-    const score = cached != null && Number.isFinite(cached) ? cached : scoreToken(token, this.config.rules).score;
-    this.analystScores.set(token.mint, score);
+    const warning = notes.length ? `${notes.join(" ")} Manual ${kind} buy goes through.` : undefined;
+    if (warning) {
+      this.log({
+        stage: "system",
+        kind: "info",
+        mint: token.mint,
+        symbol: token.symbol,
+        code: "MANUAL_OVERRIDE",
+        message: warning
+      });
+    }
     const tag = looked ? positionTag(looked.platform) : undefined;
-    return this.executeBuy(token, score, sizeUsd, "manual", opts?.ignoreCooldown === true, {
+    // A manual buy is Dirk's call, including past a hard-stop ban. Analyst and engine buys do not set this.
+    return this.executeBuy(token, score, sizeUsd, "manual", true, {
       confirmSize: opts?.confirmSize === true,
       tag,
-      book: kind
+      book: kind,
+      warning
     });
   }
 
@@ -2776,7 +2815,7 @@ export class Desk {
     requestedUsd: number | undefined,
     source: "analyst" | "manual",
     ignoreCooldown = false,
-    extra: { confirmSize?: boolean; tag?: string; book?: BookKind; strategy?: StrategyMeta } = {}
+    extra: { confirmSize?: boolean; tag?: string; book?: BookKind; strategy?: StrategyMeta; warning?: string } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
     // AI auto-buys are paper. A request that names the live book is refused and sends nothing.
@@ -3022,7 +3061,7 @@ export class Desk {
             extra.tag,
             "live"
           );
-          return this.bought(token, sized, "live");
+          return this.bought(token, sized, "live", extra.warning);
         } catch (err) {
           if (err instanceof LiveSubmitError) {
             if (err.submitState === "submitted_unknown") {
@@ -3090,7 +3129,7 @@ export class Desk {
         "paper",
         extra.strategy
       );
-      return this.bought(token, sized, "paper");
+      return this.bought(token, sized, "paper", extra.warning);
     } finally {
       this.opening.delete(key);
     }
@@ -4088,7 +4127,8 @@ export class Desk {
   private bought(
     token: CandidateToken,
     sized: { sizeUsd: number; clampedFrom?: number },
-    mode: "paper" | "live"
+    mode: "paper" | "live",
+    warning?: string
   ): ManualBuyResult {
     return {
       ok: true,
@@ -4097,7 +4137,8 @@ export class Desk {
       sizeUsd: sized.sizeUsd,
       mode,
       ...(sized.clampedFrom != null ? { clampedFrom: sized.clampedFrom } : {}),
-      ...(this.bk(mode).positions.get(token.mint)?.entryPrice ? { fillPriceUsd: this.bk(mode).positions.get(token.mint)!.entryPrice } : {})
+      ...(this.bk(mode).positions.get(token.mint)?.entryPrice ? { fillPriceUsd: this.bk(mode).positions.get(token.mint)!.entryPrice } : {}),
+      ...(warning ? { warning } : {})
     };
   }
 

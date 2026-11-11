@@ -38,6 +38,7 @@ export interface BuyReply {
   code?: string;
   ms?: number;
   replayed?: boolean;
+  warning?: string;
 }
 
 /** Hard-kill refusals keep the desk's reason and open the existing Buy anyway confirm. */
@@ -45,6 +46,16 @@ export function hardKillFollowUp(code: string | undefined, error: string | undef
   if (code !== "HARD_KILL") return null;
   const reason = error?.trim() ? error.trim() : "Hard kill.";
   return { reason };
+}
+
+/**
+ * v13.32 a live tap that the desk held for Buy anyway (hard kill or the hard-stop ban).
+ * Analyst score, filter misses, and an engine watch are not holds: those buys already filled.
+ */
+export function liveGateFollowUp(code: string | undefined, error: string | undefined): { reason: string; cooldown: boolean } | null {
+  if (code === "HARD_KILL") return { reason: error?.trim() ? error.trim() : "Hard kill.", cooldown: false };
+  if (code === "REVENGE_COOLDOWN") return { reason: error?.trim() ? error.trim() : "Mint is banned after a hard stop.", cooldown: true };
+  return null;
 }
 
 export function buyToast(symbol: string, r: BuyReply, roundTripMs: number): string {
@@ -55,7 +66,8 @@ export function buyToast(symbol: string, r: BuyReply, roundTripMs: number): stri
   const clamp = r.clampedFrom != null ? ` (cut from ${usd(r.clampedFrom)} to the cap)` : "";
   const fill = r.fillPriceUsd ? ` @ ${px(r.fillPriceUsd)}` : "";
   const mode = r.mode === "live" ? "LIVE" : r.mode ?? "paper";
-  return `Bought ${r.symbol ?? symbol} ${usd(r.sizeUsd ?? 0)}${fill}${clamp} · ${mode} · ${roundTripMs} ms`;
+  const warning = r.warning?.trim() ? ` ${r.warning.trim()}` : "";
+  return `Bought ${r.symbol ?? symbol} ${usd(r.sizeUsd ?? 0)}${fill}${clamp} · ${mode} · ${roundTripMs} ms${warning}`;
 }
 
 export interface SellReply {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
+import { newIdemKey } from "../../onetap";
 import type { Caps, CurveState, ReverseQuote, TradeIntent } from "../../../../src/pump/types";
 import { CurveChart } from "../CurveChart";
 import { formatSol, prefillForTarget, solToLamports } from "../curve";
@@ -29,6 +30,7 @@ export function Terminal() {
   const [wallet, setWallet] = useState<ConnectedWallet | null>(null);
   const [wallets, setWallets] = useState<StandardWallet[]>([]);
   const [note, setNote] = useState<string | null>(null);
+  const [deskHold, setDeskHold] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -124,6 +126,34 @@ export function Terminal() {
     setNote(`${past}${approved.message}${sim}`);
   }
 
+  /** Desk manual live buy for the watched mint. The curve prepare button above is unchanged. */
+  async function deskLiveBuy(confirm: boolean) {
+    const watched = curve?.mint;
+    if (!watched) return;
+    setBusy(true);
+    const res = await api<{ ok?: boolean; error?: string; code?: string; warning?: string; symbol?: string; sizeUsd?: number; mode?: string }>(
+      "/api/positions/buy",
+      {
+        body: {
+          mint: watched,
+          book: "live",
+          idemKey: newIdemKey(),
+          oneTap: true,
+          ...(confirm ? { confirmHardKill: true, ignoreCooldown: true } : {})
+        }
+      }
+    );
+    setBusy(false);
+    if (!res.ok && res.body.code === "HARD_KILL" && !confirm) {
+      setDeskHold(res.body.error ?? "Hard kill.");
+      setNote(res.body.error ?? "Hard kill. Tap Buy anyway to buy it with real money.");
+      return;
+    }
+    setDeskHold(null);
+    const err = res.body.error ? `${res.body.error}${res.body.code ? ` (${res.body.code})` : ""}` : "Desk live buy failed.";
+    setNote(res.ok ? `Desk live buy filled${res.body.warning ? `. ${res.body.warning}` : "."}` : err);
+  }
+
   return (
     <section className="card terminal" aria-label="Bonding curve terminal">
       <header>
@@ -179,6 +209,19 @@ export function Terminal() {
         <button className="primary" type="button" disabled={busy || !curve} onClick={() => void buy()}>
           {busy ? "Preparing…" : "Buy into curve"}
         </button>
+        <button
+          className="ghost"
+          type="button"
+          disabled={busy || !curve}
+          onClick={() => void deskLiveBuy(false)}
+        >
+          Desk LIVE BUY
+        </button>
+        {deskHold ? (
+          <button className="ghost" type="button" disabled={busy} onClick={() => void deskLiveBuy(true)}>
+            Buy anyway
+          </button>
+        ) : null}
         <label className="term-live">
           <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} />
           Live {armed ? "(session armed)" : "(session is simulate-only)"}

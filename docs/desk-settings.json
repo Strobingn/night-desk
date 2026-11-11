@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "lastUpdatedET": "2026-11-11 2:33 PM ET",
-  "lastUpdated": "2026-11-11T14:33:00-05:00",
+  "lastUpdatedET": "2026-11-11 4:15 PM ET",
+  "lastUpdated": "2026-11-11T16:15:00-05:00",
   "pulledFrom": {
     "oracleApi": [
       "/api/state",
@@ -10,13 +10,13 @@
       "/api/live/ready",
       "/api/orders"
     ],
-    "code": "13.31. Engine behavior is Claude's trading-engine tip 8b3fe9484c12e41efded821e223891907c3051d6 (rebased on 31c6d56; same patches as the engine already in 13.30 through 9f6bd0d). Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). The engine was not on the host, and the 8b3fe94 author had no desk token, so /api/strategy/* was not re-pulled.",
+    "code": "13.32. Manual paper and live buys bypass engine watch, analyst score, soft filter, and the hard-stop ban. Hard kills still need Buy anyway. Engine and AI stay paper-only. Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull. Engine behavior remains Claude's trading-engine tip 8b3fe9484c12e41efded821e223891907c3051d6.",
     "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.31",
-    "androidVersionName": "13.31",
-    "androidVersionCode": 1331,
+    "appVersion": "13.32",
+    "androidVersionName": "13.32",
+    "androidVersionCode": 1332,
     "applicationId": "com.dirk.nightdesk",
     "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. That deploy is liveOracleUntilThisRelease. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
@@ -75,8 +75,20 @@
     "Do not print secrets. RPC URLs may carry API keys in the path or query; publish hostnames only.",
     "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current.",
     "13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard ready flag arms nothing.",
-    "13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5/$20 limits."
+    "13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5/$20 limits.",
+    "13.32: an explicit manual paper or live buy bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path."
   ],
+  "manualOverride": {
+    "version": "13.32",
+    "surfaces": ["Home", "Tape", "Search", "Details", "Pump Watch"],
+    "route": "POST /api/positions/buy",
+    "source": "manual",
+    "books": ["paper", "live"],
+    "bypasses": ["engine watch / SIGNAL_WATCH", "analyst score", "soft filter", "hard-stop ban"],
+    "stillHeld": "HARD_KILL until confirmHardKill (mint authority, dev rug, token safety blocked). The confirm may be live.",
+    "logCode": "MANUAL_OVERRIDE",
+    "engineAndAi": "paper only. strategyBuy never names the live book. source analyst plus book live returns LIVE_AI_BLOCKED. POST /api/settings liveAutoBuy true is refused."
+  },
   "settings": {
     "_storage": "SQLite KV key 'settings' at DB_PATH (/var/lib/night-desk/desk.sqlite). POST /api/settings writes the allowed patch. Saved rows win over env boot defaults. Read them back from /api/state as prefs (most keys) or rules (volume, analyst line, top-10, position %, stop, trail arm/gap, entry slippage, volume boost, revengeCooldownMs).",
     "filters": {
@@ -1150,8 +1162,8 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.31",
-      "androidVersionCode": 1331,
+      "version": "13.32",
+      "androidVersionCode": 1332,
       "applicationId": "com.dirk.nightdesk",
       "note": "Code in this branch. Not the host at the 1:46 PM ET pull. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {

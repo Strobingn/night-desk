@@ -152,6 +152,11 @@ export class StrategyEngine {
     }
   }
 
+  /** True while the engine is still waiting on a Launch or Momentum signal for this mint. */
+  isWatching(mint: string): boolean {
+    return this.tracker.has(mint);
+  }
+
   /** Start watching a coin the Filter and the analyst passed. False when off, cooling down, or already watched. */
   watch(token: CandidateToken, score: number, now: number): boolean {
     if (!this.settings.enabled) return false;

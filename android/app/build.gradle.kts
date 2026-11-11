@@ -12,8 +12,8 @@ android {
         applicationId = "com.dirk.nightdesk"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1331
-        versionName = "13.31"
+        versionCode = 1332
+        versionName = "13.32"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
