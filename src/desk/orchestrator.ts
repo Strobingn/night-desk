@@ -1232,7 +1232,8 @@ export class Desk {
       if (at == null || mark == null || now - at > STRATEGY.watch.markFreshMs) continue;
       this.review(pos.mint, mark, "paper");
     }
-    if (pinned.length !== this.strategy.pinned().length) this.pinOrderMints();
+    // Keep the Tape quoter's pins in step with what the engine is watching or holding now.
+    if (pinned.length || this.strategy.pinned().length) this.pinOrderMints();
   }
 
   /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
@@ -1315,7 +1316,7 @@ export class Desk {
     }
     if (verdict.action !== "exit" || !verdict.code) return;
     // A refused exit (thin pool, unverified mark) is retried, but not on every tick.
-    this.strategyExitRetryAt.set(pos.mint, now + 15_000);
+    this.strategyExitRetryAt.set(pos.mint, now + (verdict.code === "STRATEGY_STOP" ? 15_000 : 60_000));
     pos.closing = true;
     this.bus.emit("risk.exit", {
       mint: pos.mint,
@@ -2629,7 +2630,7 @@ export class Desk {
           kind: "pass",
           mint: report.token.mint,
           symbol: report.token.symbol,
-          message: `Analyst scored ${report.token.symbol} ${report.score.toFixed(2)}. Handing to Executor.`,
+          message: `Analyst scored ${report.token.symbol} ${report.score.toFixed(2)}. Handing to ${this.strategy.settings.enabled ? "the trading engine" : "Executor"}.`,
           detail: report.score.toFixed(2)
         },
         { breakdown: report.breakdown }
