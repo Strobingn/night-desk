@@ -1,3 +1,4 @@
+import { nextDeskHold } from "../web/src/pump/desk-hold.js";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +39,17 @@ beforeEach(() => {
     const price = req.markPriceUsd && req.markPriceUsd > 0 ? req.markPriceUsd : 1;
     const size = req.sizeUsd ?? 0;
     return { signature: "sig-mock", fillPriceUsd: price, qty: size / price, notionalUsd: size, feeUsd: 0.01, slippage: 0.001 };
+  });
+});
+
+describe("v13.32 pump watch hold", () => {
+  const kill = { ok: false, code: "HARD_KILL", error: "Hard kill on A." };
+
+  it("keeps Buy anyway on the mint that was held", () => {
+    const held = nextDeskHold(null, { requestedMint: "A", watchedMint: "A", confirm: false, ...kill });
+    expect(held).toEqual({ mint: "A", reason: "Hard kill on A." });
+    expect(nextDeskHold(held, { requestedMint: "A", watchedMint: "B", confirm: false, ...kill })).toBe(held);
+    expect(nextDeskHold(held, { requestedMint: "A", watchedMint: "A", confirm: true, ok: true })).toBeNull();
   });
 });
 

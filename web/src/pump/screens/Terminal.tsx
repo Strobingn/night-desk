@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import { newIdemKey } from "../../onetap";
+import { nextDeskHold, type DeskHold } from "../desk-hold";
 import type { Caps, CurveState, ReverseQuote, TradeIntent } from "../../../../src/pump/types";
 import { CurveChart } from "../CurveChart";
 import { formatSol, prefillForTarget, solToLamports } from "../curve";
@@ -30,8 +31,10 @@ export function Terminal() {
   const [wallet, setWallet] = useState<ConnectedWallet | null>(null);
   const [wallets, setWallets] = useState<StandardWallet[]>([]);
   const [note, setNote] = useState<string | null>(null);
-  const [deskHold, setDeskHold] = useState<string | null>(null);
+  const [deskHold, setDeskHold] = useState<DeskHold | null>(null);
   const [busy, setBusy] = useState(false);
+  const watchedMint = useRef(active);
+  watchedMint.current = active;
 
   useEffect(() => {
     const stop = attachWalletStandard(browserHost(), (found) => {
@@ -39,6 +42,10 @@ export function Terminal() {
     });
     return stop;
   }, []);
+
+  useEffect(() => {
+    setDeskHold(null);
+  }, [active]);
 
   useEffect(() => {
     void api<PumpStatusBody>("/api/pump/status").then((res) => {
@@ -126,16 +133,15 @@ export function Terminal() {
     setNote(`${past}${approved.message}${sim}`);
   }
 
-  /** Desk manual live buy for the watched mint. The curve prepare button above is unchanged. */
-  async function deskLiveBuy(confirm: boolean) {
-    const watched = curve?.mint;
-    if (!watched) return;
+  /** Desk manual live buy for one mint. Buy anyway may confirm only the mint that was held. */
+  async function deskLiveBuy(mintToBuy: string, confirm: boolean) {
+    if (!mintToBuy || watchedMint.current !== mintToBuy) return;
     setBusy(true);
     const res = await api<{ ok?: boolean; error?: string; code?: string; warning?: string; symbol?: string; sizeUsd?: number; mode?: string }>(
       "/api/positions/buy",
       {
         body: {
-          mint: watched,
+          mint: mintToBuy,
           book: "live",
           idemKey: newIdemKey(),
           oneTap: true,
@@ -144,12 +150,21 @@ export function Terminal() {
       }
     );
     setBusy(false);
+    setDeskHold((current) =>
+      nextDeskHold(current, {
+        requestedMint: mintToBuy,
+        watchedMint: watchedMint.current,
+        confirm,
+        ok: res.ok,
+        code: res.body.code,
+        error: res.body.error
+      })
+    );
+    if (watchedMint.current !== mintToBuy) return;
     if (!res.ok && res.body.code === "HARD_KILL" && !confirm) {
-      setDeskHold(res.body.error ?? "Hard kill.");
       setNote(res.body.error ?? "Hard kill. Tap Buy anyway to buy it with real money.");
       return;
     }
-    setDeskHold(null);
     const err = res.body.error ? `${res.body.error}${res.body.code ? ` (${res.body.code})` : ""}` : "Desk live buy failed.";
     setNote(res.ok ? `Desk live buy filled${res.body.warning ? `. ${res.body.warning}` : "."}` : err);
   }
@@ -213,12 +228,15 @@ export function Terminal() {
           className="ghost"
           type="button"
           disabled={busy || !curve}
-          onClick={() => void deskLiveBuy(false)}
+          onClick={() => {
+            const watched = curve?.mint;
+            if (watched && watched === active) void deskLiveBuy(watched, false);
+          }}
         >
           Desk LIVE BUY
         </button>
-        {deskHold ? (
-          <button className="ghost" type="button" disabled={busy} onClick={() => void deskLiveBuy(true)}>
+        {deskHold && deskHold.mint === active ? (
+          <button className="ghost" type="button" disabled={busy} onClick={() => void deskLiveBuy(deskHold.mint, true)}>
             Buy anyway
           </button>
         ) : null}
