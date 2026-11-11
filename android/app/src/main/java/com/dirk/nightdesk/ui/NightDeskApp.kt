@@ -84,6 +84,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -676,7 +677,11 @@ private fun BookScreen(
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     val liveBook = snap?.liveBook
-    LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(
+        modifier = Modifier.testTag("home-list"),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         item { LastCrashCard() }
         if (showDeskCrash(snap?.lastClientCrashVersion.orEmpty(), snap?.lastClientCrashDismissed == true, BuildConfig.VERSION_NAME) && !snap?.lastClientCrash.isNullOrBlank()) {
             item {

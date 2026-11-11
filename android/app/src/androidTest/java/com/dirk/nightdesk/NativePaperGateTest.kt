@@ -8,6 +8,8 @@ import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.assertExists
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.isToggleable
@@ -70,14 +72,13 @@ class NativePaperGateTest {
         waitFor("· paper")
         dismissNotice()
         openTab("Home")
-        scrollUntil("DRC")
-        scrollUntil("SPCX")
-        scrollUntil("NOVA")
-        scrollUntil("GATE")
+        shot("home-top")
+        // v13.32 the Home list is a tagged LazyColumn: scroll it to each card by node, not by swiping.
+        for (symbol in listOf("DRC", "SPCX", "NOVA", "GATE")) homeScrollTo(hasTestTag("details-$symbol"))
         shot("home-collapsed")
         openDetails("GATE")
-        scrollUntil("Sell 25%")
-        scrollUntil("Sell 100%")
+        homeScrollTo(hasText("Sell 25%"))
+        homeScrollTo(hasText("Sell 100%"))
         shot("home-expanded")
         openTab("Settings")
         scrollUntil("One tap")
@@ -153,9 +154,9 @@ class NativePaperGateTest {
 
         openTab("Home")
         // v13.32 the checklist sits in the folded "Wallet & live" section.
-        scrollUntil("Wallet & live")
+        homeScrollTo(hasText("Wallet & live"))
         tapContains("Wallet & live")
-        scrollUntil("Mark checklist ready")
+        homeScrollTo(hasText("Mark checklist ready"))
         rule.onNode(isToggleable()).performClick()
         Thread.sleep(2_000)
 
@@ -223,9 +224,22 @@ class NativePaperGateTest {
 
     /** v13.32 the Details toggle on one position card, found by tag so another coin's card is never opened. */
     private fun openDetails(symbol: String) {
-        scrollUntil(symbol)
-        rule.onNode(hasTestTag("details-$symbol")).performScrollTo().performClick()
+        homeScrollTo(hasTestTag("details-$symbol"))
+        rule.onNode(hasTestTag("details-$symbol")).performClick()
         rule.waitForIdle()
+    }
+
+    /** Scrolls the Home list until a node matches. Works for items the lazy list has not composed yet. */
+    private fun homeScrollTo(matcher: SemanticsMatcher) {
+        val deadline = System.currentTimeMillis() + 20_000
+        while (true) {
+            val ok = runCatching { rule.onNode(hasTestTag("home-list")).performScrollToNode(matcher) }.isSuccess
+            rule.waitForIdle()
+            if (ok || System.currentTimeMillis() > deadline) break
+            dismissAnr()
+            Thread.sleep(300)
+        }
+        rule.onNode(matcher).assertExists()
     }
 
     /** v13.32 opens the folded LIVE strip on one tape card, if it is still closed. */
