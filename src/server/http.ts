@@ -6,6 +6,7 @@ import path from "node:path";
 import { WebSocketServer } from "ws";
 import type { Desk } from "../desk/orchestrator.js";
 import { deskSessionCookie, requestAuthorized } from "./auth.js";
+import { eventLoopLag } from "./loop-lag.js";
 
 const DEFAULT_DIST = path.resolve("web/dist");
 
@@ -65,6 +66,15 @@ export function startServer(
 ): http.Server {
   const dist = path.resolve(uiDist);
   const idem = new IdempotencyCache();
+  /** v13.33 repeated polls within a second share one snapshot. A log or desk change drops it. */
+  let snapCache: { at: number; data: ReturnType<Desk["snapshot"]> } | null = null;
+  const takeSnapshot = (force: boolean): ReturnType<Desk["snapshot"]> => {
+    const now = Date.now();
+    if (!force && snapCache && now - snapCache.at < 1_000) return snapCache.data;
+    const data = desk.snapshot();
+    snapCache = { at: now, data };
+    return data;
+  };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -72,15 +82,26 @@ export function startServer(
       if (deskToken) res.setHeader("set-cookie", deskSessionCookie(deskToken));
       if (url.pathname === "/api/health") {
         // v12.2: the desk's current public tunnel URL (written by ensure-tunnel.ps1), so the phone can learn a new one.
-        return json(res, 200, { ok: true, mode: desk.config.mode, now: Date.now(), publicUrl: readPublicUrl(desk.config.dbPath) });
+        // v13.33 eventLoopLag is milliseconds. It does not change a trading limit.
+        return json(res, 200, {
+          ok: true,
+          mode: desk.config.mode,
+          now: Date.now(),
+          publicUrl: readPublicUrl(desk.config.dbPath),
+          eventLoopLag: eventLoopLag()
+        });
       }
-      if (url.pathname === "/api/state") return json(res, 200, desk.snapshot());
+      if (url.pathname === "/api/state") return json(res, 200, takeSnapshot(false));
       if (url.pathname === "/api/events" && req.method === "GET") {
         const limit = Number(url.searchParams.get("limit") ?? "800");
         const stage = url.searchParams.get("stage") ?? undefined;
         const beforeRaw = url.searchParams.get("before");
         const before = beforeRaw != null && beforeRaw !== "" ? Number(beforeRaw) : undefined;
         return json(res, 200, { events: desk.store.queryEvents({ limit, stage, before }) });
+      }
+      if (url.pathname === "/api/settings" && req.method === "GET") {
+        // v13.33 settings are a small object. This used to fall through to the SPA and waited on the blocked loop.
+        return json(res, 200, desk.settingsBody());
       }
       if (url.pathname === "/api/settings" && req.method === "POST") {
         const body = await readJson(req);
@@ -173,7 +194,8 @@ export function startServer(
       if (url.pathname === "/api/live/ready" && req.method === "GET") return json(res, 200, desk.readiness());
       // v13.5 read-only wallet card: public address, SOL / USDC, key loaded, LIVE on/off. Never the secret.
       if (url.pathname === "/api/wallet" && req.method === "GET") {
-        await desk.refreshWalletThrottled();
+        // Cached balance, with age and stale. The Helius read continues in the background.
+        desk.refreshWalletInBackground();
         return json(res, 200, desk.walletView());
       }
       if (url.pathname === "/api/live/ready" && req.method === "POST") {
@@ -212,7 +234,7 @@ export function startServer(
       }
       // v13.11 limit / take-profit / stop orders. Placing never fires; cancel works on open orders.
       if (url.pathname === "/api/orders" && req.method === "GET") {
-        return json(res, 200, { ok: true, orders: desk.snapshot().orders ?? [] });
+        return json(res, 200, desk.ordersBody());
       }
       if (url.pathname === "/api/orders" && req.method === "POST") {
         const body = await readJson(req);
@@ -332,7 +354,7 @@ export function startServer(
     alive.set(socket, true);
     socket.on("pong", () => alive.set(socket, true));
     socket.on("message", (buf) => desk.pump.onClientMessage(socket, buf.toString()));
-    socket.send(JSON.stringify({ type: "snapshot", data: desk.snapshot() }));
+    socket.send(JSON.stringify({ type: "snapshot", data: takeSnapshot(false) }));
     socket.on("close", () => {
       sockets.delete(socket);
       desk.pump.detachSocket(socket);
@@ -367,7 +389,7 @@ export function startServer(
       lastSnapshotAt = Date.now();
       let payload: string;
       try {
-        payload = JSON.stringify({ type: "snapshot", data: desk.snapshot() });
+        payload = JSON.stringify({ type: "snapshot", data: takeSnapshot(false) });
       } catch {
         return;
       }
@@ -396,10 +418,16 @@ export function startServer(
     pending = null;
     marksPending = null;
   });
-  desk.bus.on("log.event", () => push());
+  desk.bus.on("log.event", () => {
+    snapCache = null;
+    push();
+  });
   // v13.2: a tick only refreshes the tape, so it rides the 1/s snapshot. Held marks go as deltas.
   desk.bus.on("market.tick", () => push());
-  desk.bus.on("desk.changed", () => push());
+  desk.bus.on("desk.changed", () => {
+    snapCache = null;
+    push();
+  });
   desk.bus.on("position.mark", () => pushMarks());
 
   server.listen(port, host, () => {

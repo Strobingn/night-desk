@@ -658,6 +658,10 @@ export interface WalletView {
   /** When that SOL/USD print was cached. Display only. */
   solPriceAt?: number | null;
   balanceAt: number | null;
+  /** v13.33 milliseconds since the cached balance was read. Null when no read has landed. */
+  balanceAgeMs?: number | null;
+  /** v13.33 true when the figure is missing, failed, or older than the live-check cache window. */
+  balanceStale?: boolean;
   balanceError: string | null;
   /** Desk is placing real swaps (LIVE_TRADING=true and a usable key at boot). */
   live: boolean;

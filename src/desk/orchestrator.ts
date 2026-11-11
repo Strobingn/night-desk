@@ -256,6 +256,12 @@ const WATCHLIST_MAX = 60;
  *   risk.exit → Executor sell
  *   every stage result → Logger
  */
+
+/** A live buy waits this long for Helius, then uses a recent cache or refuses. */
+const LIVE_BALANCE_WAIT_MS = 4_000;
+/** A cached balance older than this cannot authorize a live buy or sell. */
+const LIVE_BALANCE_CACHE_MS = 60_000;
+
 export class Desk {
   readonly bus = new EventBus<DeskEvents>();
   readonly book: PaperBook;
@@ -391,6 +397,7 @@ export class Desk {
   private liveAutoBuy = false;
   /** v13.5 last read-only wallet balance read. */
   private walletBalances: WalletBalances | null = null;
+  private walletInflight: Promise<WalletBalances | null> | null = null;
   private walletTimer: NodeJS.Timeout | null = null;
   private readonly walletReader: () => Promise<WalletBalances>;
   private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
@@ -1517,7 +1524,7 @@ export class Desk {
     }
     const now = Date.now();
     if (o.book === "live") {
-      const read = await this.refreshWallet();
+      const read = await this.liveBalance(false);
       if (!read || read.error != null || read.sol == null) {
         o.status = "open";
         o.note = `Refused: wallet balance not current${read?.error ? ` (${read.error})` : ""}. Nothing was sent.`;
@@ -1591,6 +1598,16 @@ export class Desk {
       this.firingOrders.delete(o.id);
       this.saveOrders();
     }
+  }
+
+  /** Open orders for GET /api/orders. Does not build the rest of the snapshot. */
+  ordersBody(): { ok: true; orders: NonNullable<DeskSnapshot["orders"]> } {
+    return { ok: true, orders: this.orderViews() };
+  }
+
+  /** Saved settings for GET /api/settings. Does not build the snapshot or read the SPA. */
+  settingsBody(): { ok: true; settings: DeskSettingsView } {
+    return { ok: true, settings: this.settingsView() };
   }
 
   /** Tests: wait for orders that are firing. */
@@ -2551,7 +2568,7 @@ export class Desk {
         .recentClosed(40)
         .filter((trade) => trade.closedAt >= this.startedAt)
         .slice(-20),
-      equity: downsample(visibleEquity(this.store.equitySince(this.startedAt)), 240),
+      equity: downsample(visibleEquity(this.store.equityCurve(this.startedAt)), 240),
       events: this.store.recentEvents(180),
       advice: this.advice,
       watchlist: this.watchlist.map((item) => ({ ...item })),
@@ -3231,7 +3248,7 @@ export class Desk {
           pos.closing = false;
           return;
         }
-        const read = await this.refreshWallet();
+        const read = await this.liveBalance(false);
         if (!read || read.error != null || read.sol == null) {
           throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
         }
@@ -4515,6 +4532,16 @@ export class Desk {
 
   /** v13.5 read-only SOL / USDC balance. In live mode the wallet's USDC is the book's cash. */
   async refreshWallet(): Promise<WalletBalances | null> {
+    if (this.walletInflight) return this.walletInflight;
+    let job: Promise<WalletBalances | null>;
+    job = this.readWalletOnce().finally(() => {
+      if (this.walletInflight === job) this.walletInflight = null;
+    });
+    this.walletInflight = job;
+    return job;
+  }
+
+  private async readWalletOnce(): Promise<WalletBalances | null> {
     const read = await this.walletReader();
     if (read.error != null || read.usdc == null || read.sol == null) {
       const prev = this.walletBalances;
@@ -4539,11 +4566,50 @@ export class Desk {
     return read;
   }
 
-  /** v13.5 the wallet card's refresh button: at most one RPC read per 10 s. */
-  async refreshWalletThrottled(): Promise<void> {
+  /**
+   * v13.33 the wallet card starts a read and returns. The HTTP handler must not wait on Helius.
+   * At most one read per 10s when the last one succeeded.
+   */
+  refreshWalletInBackground(): void {
     if (!this.walletStatus.walletPublicKey && this.config.mode !== "live") return;
-    if (this.walletBalances && Date.now() - this.walletBalances.at < 10_000) return;
-    await this.refreshWallet();
+    const bal = this.walletBalances;
+    if (bal && bal.error == null && Date.now() - bal.at < 10_000) return;
+    void this.refreshWallet().catch((err) => console.error("[desk] wallet refresh", err));
+  }
+
+  /** v13.5 the wallet card's refresh button. v13.33 does not block the caller on the RPC. */
+  async refreshWalletThrottled(): Promise<void> {
+    this.refreshWalletInBackground();
+  }
+
+  /** How long a live buy waits for a fresh balance before it uses a recent cache or refuses. */
+  private async refreshWalletBounded(ms: number): Promise<WalletBalances | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        this.refreshWallet().catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), ms);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A live check still reads the wallet. The wait is bounded so a full Helius queue cannot
+   * hold the buy open. A recent successful cache is used only after that wait, and the
+   * dollar and SOL checks still run on those figures. An error or an empty cache refuses.
+   */
+  private async liveBalance(pump: boolean): Promise<WalletBalances | null> {
+    const read = await this.refreshWalletBounded(LIVE_BALANCE_WAIT_MS);
+    if (read && read.error == null && read.sol != null && (pump || read.usdc != null)) return read;
+    const cached = this.walletBalances;
+    if (!cached || cached.error != null || cached.sol == null) return null;
+    if (!pump && cached.usdc == null) return null;
+    if (Date.now() - cached.at > LIVE_BALANCE_CACHE_MS) return null;
+    return cached;
   }
 
   /** v13.5 USD spent on live buys today (desk-host local day). */
@@ -4573,7 +4639,7 @@ export class Desk {
         };
       }
     }
-    const read = await this.refreshWallet();
+    const read = await this.liveBalance(pump);
     if (!read || read.error != null || read.sol == null || (!pump && read.usdc == null)) {
       return { ok: false, error: `Wallet balance unknown${read?.error ? ` (${read.error})` : ""}. Live buy refused.`, code: "LIVE_WALLET" };
     }
@@ -4743,6 +4809,8 @@ export class Desk {
       solPriceUsd: sol?.value ?? null,
       solPriceAt: sol?.at ?? null,
       balanceAt: bal?.at ?? null,
+      balanceAgeMs: bal ? Math.max(0, Date.now() - bal.at) : null,
+      balanceStale: bal == null || bal.error != null || Date.now() - bal.at > LIVE_BALANCE_CACHE_MS,
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",
       liveScope: this.liveBook ? "manual" : null,
