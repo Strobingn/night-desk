@@ -87,6 +87,42 @@ describe("v13.29 dev share from the top 20", () => {
     expect(needsFilterRugcheck({ ...ready, volume1hUsd: 10 }, 10_000, 0.1)).toBe(false);
   });
 
+  it("bounds dev share from a complete holder page without another top-20 read", async () => {
+    const dev = "DevWallet111111111111111111111111111111";
+    const methods: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("dexscreener")) return Response.json({ pairs: [] });
+      const method = (JSON.parse(String(init?.body)) as { method: string }).method;
+      methods.push(method);
+      if (method === "getAccountInfo") {
+        return Response.json({
+          result: { value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, supply: "100000000", decimals: 6 } } } } }
+        });
+      }
+      if (method === "getTokenAccounts") {
+        return Response.json({
+          result: {
+            token_accounts: [
+              { address: "DevAcct", owner: dev, amount: "25000000" },
+              { address: "OtherAcct", owner: "SomeoneElse", amount: "1000000" }
+            ]
+          }
+        });
+      }
+      return Response.json({ result: { value: [] } });
+    };
+    const token = await enrichSighting(
+      { mint: MINT, source: "pumpfun", observedAt: 1, devWallet: dev, volume1hUsd: 10 },
+      { rpcUrl: HELIUS, holderPagesMax: 1, fetchImpl }
+    );
+    expect(methods).toContain("getTokenAccounts");
+    expect(methods).not.toContain("getTokenLargestAccounts");
+    expect(token.devHoldingPct).toBeCloseTo(0.25, 8);
+    expect(token.devHoldingUpperBound).toBe(false);
+    expect(token.holderSample?.rows.map((row) => row.owner)).toEqual([dev, "SomeoneElse"]);
+  });
+
   it("passes when the upper bound is inside the limit and fails closed when no bound exists", () => {
     const bound = evaluateFilter(makeToken({ devHoldingPct: 0.04, devHoldingUpperBound: true }), { status: "clean" }, rules, {
       maxDevHoldingPct: 0.05
@@ -257,6 +293,95 @@ describe("v13.29 soft-gate recheck", () => {
       const inMinute = sent.filter((t) => t > start - 60_000 && t <= start).length;
       expect(inMinute).toBeLessThanOrEqual(ENRICH_CALLS_PER_MIN_DEFAULT + 8);
     }
+  });
+
+  it("keeps verified safety fields when the recheck cannot re-read them", async () => {
+    const prior = makeToken({
+      mint: MINT,
+      source: "pumpfun",
+      volume1hUsd: 0,
+      liquidityUsd: 1_000,
+      freezeAuthorityRevoked: true,
+      lpLockedOrBurned: true,
+      lpLockPct: 98,
+      top10HolderPct: 0.11,
+      holderCount: 42,
+      holderCountAtLeast: false,
+      devHoldingPct: 0.02,
+      devHoldingUpperBound: true,
+      holderSample: { supplyUi: 100, rows: [{ owner: "Dev", uiAmount: 2 }] }
+    });
+    const fetchImpl: typeof fetch = async (input) => {
+      expect(String(input).includes("helius")).toBe(false);
+      return Response.json({
+        pairs: [
+          {
+            chainId: "solana",
+            dexId: "pumpswap",
+            pairAddress: POOL,
+            priceUsd: "0.02",
+            baseToken: { address: MINT, symbol: "GOOD", name: "Good Coin" },
+            liquidity: { usd: 40_000 },
+            volume: { h1: 25_000 }
+          }
+        ]
+      });
+    };
+    const next = await recheckToken(prior, { rpcUrl: HELIUS, fetchImpl });
+    expect(next.volume1hUsd).toBe(25_000);
+    expect(next.liquidityUsd).toBe(40_000);
+    expect(next.mintAuthorityRevoked).toBe(true);
+    expect(next.freezeAuthorityRevoked).toBe(true);
+    expect(next.lpLockedOrBurned).toBe(true);
+    expect(next.lpLockPct).toBe(98);
+    expect(next.top10HolderPct).toBe(0.11);
+    expect(next.holderCount).toBe(42);
+    expect(next.holderCountAtLeast).toBe(false);
+    expect(next.devHoldingPct).toBe(0.02);
+    expect(next.devHoldingUpperBound).toBe(true);
+    expect(next.holderSample?.supplyUi).toBe(100);
+  });
+
+  it("keeps a verified mint when the recheck RPC misses and uses a fresh read when one arrives", async () => {
+    const prior = makeToken({
+      mint: MINT,
+      source: "pumpfun",
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      top10HolderPct: 0.2,
+      holderCount: 10
+    });
+    const miss: typeof fetch = async (input, init) => {
+      if (String(input).includes("dexscreener")) return Response.json({ pairs: [] });
+      const method = (JSON.parse(String(init?.body)) as { method: string }).method;
+      if (method === "getAccountInfo") return Response.json({ error: { message: "miss" } });
+      if (method === "getTokenLargestAccounts") return Response.json({ result: { value: [] } });
+      return Response.json({ result: { value: [] } });
+    };
+    const missed = await recheckToken(prior, { rpcUrl: ALCHEMY, fetchImpl: miss });
+    expect(missed.mintAuthorityRevoked).toBe(true);
+    expect(missed.freezeAuthorityRevoked).toBe(true);
+    expect(missed.top10HolderPct).toBe(0.2);
+    expect(missed.holderCount).toBe(10);
+
+    const fresh: typeof fetch = async (input, init) => {
+      if (String(input).includes("dexscreener")) return Response.json({ pairs: [] });
+      const method = (JSON.parse(String(init?.body)) as { method: string }).method;
+      if (method === "getAccountInfo") {
+        return Response.json({
+          result: {
+            value: { data: { parsed: { info: { mintAuthority: "StillOn", freezeAuthority: null, supply: "1000", decimals: 0 } } } }
+          }
+        });
+      }
+      if (method === "getTokenLargestAccounts") return Response.json({ result: { value: [{ address: "A", uiAmount: 10, decimals: 0 }] } });
+      return Response.json({ result: { value: [{ data: { parsed: { info: { owner: "Wallet" } } } }] } });
+    };
+    const read = await recheckToken(prior, { rpcUrl: ALCHEMY, fetchImpl: fresh });
+    expect(read.mintAuthorityRevoked).toBe(false);
+    expect(read.freezeAuthorityRevoked).toBe(true);
+    expect(read.top10HolderPct).toBeCloseTo(0.01, 8);
+    expect(read.holderCount).toBe(1);
   });
 
   it("shows the recheck queue on /api/state and skips a hard rug", async () => {

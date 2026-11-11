@@ -103,6 +103,9 @@ export class RecheckQueue {
  * Re-read a soft-failed coin on the enrich RPC only.
  * A Helius URL is dropped, and a fetch that still points at Helius is not sent.
  * Holder pages stay off so this cannot open a Helius DAS lane.
+ * Fields the new pass leaves unknown stay at the values already verified.
+ * A Helius-only desk, or a mint read that misses, would otherwise hard-kill
+ * a coin that only missed volume, liquidity, or holders, and the one-shot is spent.
  */
 export async function recheckToken(token: CandidateToken, deps: EnrichDeps): Promise<CandidateToken> {
   const rpcUrl = deps.rpcUrl && !isHeliusUrl(deps.rpcUrl) ? deps.rpcUrl : undefined;
@@ -114,7 +117,7 @@ export async function recheckToken(token: CandidateToken, deps: EnrichDeps): Pro
         return inner(input, init);
       }
     : undefined;
-  return enrichSighting(
+  const next = await enrichSighting(
     {
       mint: token.mint,
       symbol: token.symbol,
@@ -128,4 +131,34 @@ export async function recheckToken(token: CandidateToken, deps: EnrichDeps): Pro
     },
     { ...deps, rpcUrl, fetchImpl, holderPagesMax: 0 }
   );
+  return keepVerified(next, token);
+}
+
+/** Fill only the safety fields the new enrich did not verify. A fresh read always wins. */
+function keepVerified(next: CandidateToken, prior: CandidateToken): CandidateToken {
+  if (next.mintAuthorityRevoked == null && prior.mintAuthorityRevoked != null) {
+    next.mintAuthorityRevoked = prior.mintAuthorityRevoked;
+  }
+  if (next.freezeAuthorityRevoked == null && prior.freezeAuthorityRevoked != null) {
+    next.freezeAuthorityRevoked = prior.freezeAuthorityRevoked;
+  }
+  if (next.lpLockedOrBurned == null && prior.lpLockedOrBurned != null) {
+    next.lpLockedOrBurned = prior.lpLockedOrBurned;
+    if (next.lpLockPct == null && prior.lpLockPct != null) next.lpLockPct = prior.lpLockPct;
+  }
+  if (next.top10HolderPct == null && prior.top10HolderPct != null) next.top10HolderPct = prior.top10HolderPct;
+  if (next.holderCount == null && prior.holderCount != null) {
+    next.holderCount = prior.holderCount;
+    next.holderCountAtLeast = prior.holderCountAtLeast;
+  }
+  if (!next.holderSample && prior.holderSample) next.holderSample = prior.holderSample;
+  if (!knownDevShare(next) && knownDevShare(prior)) {
+    next.devHoldingPct = prior.devHoldingPct;
+    next.devHoldingUpperBound = prior.devHoldingUpperBound;
+  }
+  return next;
+}
+
+function knownDevShare(token: CandidateToken): boolean {
+  return typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct);
 }

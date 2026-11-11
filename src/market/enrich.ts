@@ -2,6 +2,7 @@ import type { CandidateToken, RawSighting } from "../types.js";
 import { holderExclusions, inferOnBondingCurve } from "./exclusions.js";
 import { ENRICH_CIRCUIT_MS } from "./net.js";
 import {
+  LARGEST_HOLDER_CAP,
   attachTokenOwners,
   authorityHints,
   devShareFromLargest,
@@ -221,6 +222,9 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
             };
           } else {
             holders = parsedFull;
+            // The full page is the holder set. Dev share still reads a top-20 sample,
+            // and skipping getTokenLargestAccounts left that sample empty.
+            holderSample.current = largestFromDas(full.accounts, mint.supplyUi, mint.decimals);
           }
         }
       }
@@ -324,6 +328,30 @@ function hintsFromDex(payload: unknown, mint: string): AuthorityHints {
   // Market cap / price is not a mint supply. It has produced shares above 100%.
   // On-chain getAccountInfo supply is used instead, and only an explicit supply field is a fallback.
   return authorityHints(best);
+}
+
+/** Largest accounts on a complete DAS page, in the shape dev share already reads. */
+function largestFromDas(
+  accounts: TokenAccountRow[],
+  supplyUi: number | null,
+  decimals: number | null
+): { supplyUi: number | null; rows: LargestHolderRow[] } {
+  if (decimals == null) return { supplyUi, rows: [] };
+  const scale = 10 ** decimals;
+  const rows: LargestHolderRow[] = [];
+  for (const account of accounts) {
+    const raw = Number(account.amount);
+    if (!(raw > 0) || !Number.isFinite(raw)) continue;
+    rows.push({
+      address: account.address,
+      owner: account.owner ?? null,
+      uiAmount: raw / scale,
+      amount: String(account.amount),
+      decimals
+    });
+  }
+  rows.sort((a, b) => (b.uiAmount ?? 0) - (a.uiAmount ?? 0));
+  return { supplyUi, rows: rows.slice(0, LARGEST_HOLDER_CAP) };
 }
 
 async function readAllHolders(
