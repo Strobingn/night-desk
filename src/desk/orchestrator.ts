@@ -8,6 +8,11 @@ import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
 import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailArmFraction, TRAIL_ARM_MAX, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
+import { STRATEGY } from "../strategy/config.js";
+import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
+import { assessStrategyExit, type StrategyMeta } from "../strategy/exits.js";
+import { BoundedMap, LatencyStats } from "../strategy/latency.js";
+import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
 import { MomentumTracker } from "../market/momentum.js";
 import { DEFAULT_SCOUT_SOURCES, type ScoutSources } from "../agents/scout.js";
@@ -328,6 +333,17 @@ export class Desk {
   /** v13.11 limit / take-profit / stop orders (paper and live), saved in the desk store. */
   private orders = new OrderList();
   private orderTimer: NodeJS.Timeout | null = null;
+  /** Trading engine: signals, shadow books, scorecard. It never places an order itself. */
+  readonly strategy: StrategyEngine;
+  private strategyTimer: NodeJS.Timeout | null = null;
+  /** Last Tape quote time handed to the engine per mint, so one quote is not counted twice. */
+  private strategyQuoteAt = new Map<string, number>();
+  /** Price feed each watched coin is anchored to. A quote from another feed is not used. */
+  private strategyFeed = new BoundedMap<string, string | undefined>(400);
+  private strategyExitRetryAt = new Map<string, number>();
+  readonly latency = new LatencyStats();
+  private candidateAt = new BoundedMap<string, number>(2_000);
+  private watchAt = new BoundedMap<string, number>(400);
   private readonly firingOrders = new Set<string>();
   private readonly orderJobs = new Set<Promise<unknown>>();
   /** Marks restored from disk at boot are not fresh prices: an order never fires on them. */
@@ -583,6 +599,14 @@ export class Desk {
     this.watchlist = loadWatchlist(this.store.readJson("watchlist"));
     this.unconfirmedLive = loadUnconfirmed(this.store.readJson("liveUnconfirmed"));
     this.orders = new OrderList(this.store.readJson("orders"));
+    const strategyBase = { ...defaultStrategySettings(), enabled: config.strategyEngine === true };
+    const strategySaved = this.store.readJson("strategy");
+    const strategyLoaded = strategySaved != null ? patchStrategySettings(strategyBase, strategySaved) : null;
+    this.strategy = new StrategyEngine({
+      store: new ShadowStore(this.store.db),
+      settings: strategyLoaded?.ok ? strategyLoaded.settings : strategyBase,
+      onError: (where, err) => console.error(`[strategy] ${where}`, err)
+    });
     this.bootAt = Date.now();
     for (const [mint, at] of this.book.lastMarkAt) this.bootMarks.set(`paper:${mint}`, at);
     for (const [mint, at] of this.liveBook?.lastMarkAt ?? []) this.bootMarks.set(`live:${mint}`, at);
@@ -755,6 +779,8 @@ export class Desk {
     // v13.11 orders: every 2 s on the latest fresh price (held coins are also checked on every mark).
     this.orderTimer = setInterval(() => this.checkOrders(), 2_000);
     this.orderTimer.unref?.();
+    this.strategyTimer = setInterval(() => this.strategyPass(), 2_000);
+    this.strategyTimer.unref?.();
     this.pinOrderMints();
     // v13.5 read-only wallet balance for the card (and the live cash line). Never signs.
     if (this.walletStatus.walletPublicKey && this.config.feedMode !== "replay") {
@@ -794,6 +820,7 @@ export class Desk {
     if (this.watchTimer) clearInterval(this.watchTimer);
     if (this.tapeTimer) clearInterval(this.tapeTimer);
     if (this.orderTimer) clearInterval(this.orderTimer);
+    if (this.strategyTimer) clearInterval(this.strategyTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
     if (this.solTimer) clearInterval(this.solTimer);
     if (this.recheckTimer) clearTimeout(this.recheckTimer);
@@ -1125,6 +1152,184 @@ export class Desk {
   }
 
 
+  // ---------------------------------------------------------------- trading engine
+
+  strategyView(): ScorecardView {
+    return this.strategy.scorecard();
+  }
+
+  /** Change the engine's switch, sizes or active variants. Saved, and applied to the next signal. */
+  updateStrategy(patch: unknown): { ok: true; strategy: ScorecardView } | { ok: false; error: string } {
+    const result = patchStrategySettings(this.strategy.settings, patch);
+    if (!result.ok) return result;
+    const was = this.strategy.settings.enabled;
+    this.strategy.settings = result.settings;
+    this.store.writeJson("strategy", result.settings);
+    if (was !== result.settings.enabled) {
+      this.log({
+        stage: "system",
+        kind: "info",
+        code: "STRATEGY",
+        message: result.settings.enabled
+          ? `Trading engine on. Coins that pass Filter and Analyst are watched for a Launch or Momentum signal. Paper only: $${result.settings.tradeUsd.toFixed(0)} a trade, ${result.settings.maxOpen} open at most, take-profit at $${result.settings.targetNetUsd.toFixed(2)} net.`
+          : "Trading engine off. Analyst passes go straight to the Executor again."
+      });
+    }
+    this.pinOrderMints();
+    return { ok: true, strategy: this.strategy.scorecard() };
+  }
+
+  /** Wipe the shadow books and their saved trades. The main paper book is not touched. */
+  resetStrategy(confirm: boolean): { ok: true; strategy: ScorecardView } | { ok: false; error: string } {
+    if (!confirm) return { ok: false, error: "Send confirm: true to wipe the scorecard." };
+    this.strategy.reset();
+    this.log({ stage: "system", kind: "info", code: "STRATEGY", message: "Scorecard reset. Every shadow book is back to its starting balance." });
+    return { ok: true, strategy: this.strategy.scorecard() };
+  }
+
+  private watchForSignal(report: AnalystReport): void {
+    const token = report.token;
+    const now = Date.now();
+    if (this.book.positions.has(token.mint)) return;
+    if (!this.strategy.watch(token, report.score, now)) return;
+    this.strategyFeed.set(token.mint, token.priceFeed);
+    this.watchAt.set(token.mint, now);
+    this.pinOrderMints();
+    this.log({
+      stage: "analyst",
+      kind: "info",
+      mint: token.mint,
+      symbol: token.symbol,
+      code: "SIGNAL_WATCH",
+      message: `Engine is watching ${token.symbol} for a Launch or Momentum signal (up to ${Math.round(STRATEGY.watch.maxWatchMs / 60_000)} min). No buy yet.`
+    });
+  }
+
+  /**
+   * Every 2 s: hand fresh Tape quotes for the engine's coins to the engine, run its time limits,
+   * and re-check time limits on the main book's engine positions. Adds no network calls: the
+   * quotes come from the Tape quoter's existing batched pass.
+   */
+  strategyPass(now = Date.now()): void {
+    const pinned = this.strategy.pinned();
+    for (const mint of pinned) {
+      const q = this.tape?.get(mint);
+      if (!q || q.priceUsd == null || !(q.priceUsd > 0) || !Number.isFinite(q.priceUsd)) continue;
+      if (this.strategyQuoteAt.get(mint) === q.at) continue;
+      this.strategyQuoteAt.set(mint, q.at);
+      // A position is marked only by the feed that priced its entry, so a signal must come from that feed too.
+      const anchor = this.strategyFeed.get(mint);
+      const feed = q.source === "dexscreener" ? "dexscreener" : q.source === "jupiter" ? "jupiter" : q.source === "pump.fun curve" ? "chain" : q.source;
+      if (anchor && feed && anchor !== feed) continue;
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null }, now);
+    }
+    this.strategy.tick(now);
+    for (const mint of [...this.strategyQuoteAt.keys()]) if (!pinned.includes(mint)) this.strategyQuoteAt.delete(mint);
+    for (const pos of [...this.book.positions.values()]) {
+      if (!pos.strategy || pos.closing) continue;
+      const at = this.book.markedAt(pos.mint);
+      const mark = this.book.lastPrice.get(pos.mint);
+      if (at == null || mark == null || now - at > STRATEGY.watch.markFreshMs) continue;
+      this.review(pos.mint, mark, "paper");
+    }
+    // Keep the Tape quoter's pins in step with what the engine is watching or holding now.
+    if (pinned.length || this.strategy.pinned().length) this.pinOrderMints();
+  }
+
+  /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
+  strategyQuote(mint: string, quote: EngineQuote, now = Date.now()): void {
+    const fired = this.strategy.onQuote(mint, quote, now);
+    if (!fired) return;
+    const watchedAt = this.watchAt.get(mint);
+    if (watchedAt != null) this.latency.record("watchToSignal", now - watchedAt);
+    this.log({
+      stage: "analyst",
+      kind: "pass",
+      mint,
+      symbol: fired.token.symbol,
+      code: "SIGNAL",
+      message: `Engine signal on ${fired.token.symbol}. ${fired.signal.reason}`,
+      detail: fired.signal.signal
+    });
+    this.track(this.strategyBuy(fired));
+  }
+
+  /** Tests and tools: one engine quote, then wait for any buy it caused. */
+  async submitStrategyQuote(mint: string, quote: EngineQuote, now = Date.now()): Promise<void> {
+    this.strategyQuote(mint, quote, now);
+    await this.drain();
+  }
+
+  private async strategyBuy(fired: FiredSignal): Promise<void> {
+    const { token, score, meta } = fired;
+    const startedAt = Date.now();
+    const skip = (code: import("../types.js").ReasonCode, message: string) => {
+      this.pipeline.executorSkips += 1;
+      this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Executor skipped ${token.symbol}. ${message}` });
+    };
+    const open = [...this.book.positions.values()].filter((pos) => pos.strategy && !pos.closing).length;
+    if (open >= this.strategy.settings.maxOpen) {
+      skip("MAX_OPEN_POSITIONS", `The engine already has ${open} open. It holds ${this.strategy.settings.maxOpen} at most.`);
+      return;
+    }
+    const net = this.netTodayUsd();
+    if (net <= -STRATEGY.dailyMaxLossUsd + 1e-9) {
+      skip("DAILY_LOSS", `The paper book is ${money(net)} on the day, past the engine's $${STRATEGY.dailyMaxLossUsd.toFixed(0)} pause. It resumes on the next UTC day.`);
+      return;
+    }
+    await this.buyIfSafe({ token, score, breakdown: [], decision: "trade" }, { sizeUsd: this.strategy.settings.tradeUsd, tag: fired.signal.signal, meta });
+    if (this.book.positions.get(token.mint)?.strategy) this.latency.record("signalToFill", Date.now() - startedAt);
+  }
+
+  /** Today's paper result (UTC day): closed trades plus what the open positions are showing. */
+  private netTodayUsd(): number {
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    let net = 0;
+    for (const trade of this.store.closedSince(start.getTime())) if (trade.mode === "paper") net += trade.pnlUsd;
+    for (const pos of this.book.positions.values()) net += pos.qty * this.book.price(pos.mint, pos.entryPrice) - pos.costUsd;
+    return net;
+  }
+
+  /** Take-profit, the engine stop, breakeven and the time limit for a position the engine opened. */
+  private strategyExit(pos: Position, mark: number): void {
+    const meta = pos.strategy;
+    if (!meta || pos.closing) return;
+    const now = Date.now();
+    const retryAt = this.strategyExitRetryAt.get(pos.mint);
+    if (retryAt != null && now < retryAt) return;
+    const markAt = this.book.markedAt(pos.mint) ?? 0;
+    const liquidityUsd = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
+    const net = realizablePnl({ markPrice: mark, qty: pos.qty, costUsd: pos.costUsd, liquidityUsd, markAt, now });
+    const verdict = assessStrategyExit({
+      entryPrice: pos.entryPrice,
+      openedAt: pos.openedAt,
+      mark,
+      markFresh: now - markAt <= STRATEGY.watch.markFreshMs,
+      netPnlUsd: net?.netPnlUsd ?? null,
+      now,
+      meta
+    });
+    if (verdict.armBreakeven) {
+      pos.strategy = { ...meta, breakevenArmed: true };
+      this.persist();
+    }
+    if (verdict.action !== "exit" || !verdict.code) return;
+    // A refused exit (thin pool, unverified mark) is retried, but not on every tick.
+    this.strategyExitRetryAt.set(pos.mint, now + (verdict.code === "STRATEGY_STOP" ? 15_000 : 60_000));
+    pos.closing = true;
+    this.bus.emit("risk.exit", {
+      mint: pos.mint,
+      symbol: pos.symbol,
+      qty: pos.qty,
+      markPrice: mark,
+      liquidityUsd: pos.liquidityUsd,
+      pnlPct: pos.entryPrice > 0 ? mark / pos.entryPrice - 1 : 0,
+      score: pos.score,
+      reason: { code: verdict.code, message: verdict.message }
+    });
+  }
+
   // ---------------------------------------------------------------- v13.11 orders
 
   private saveOrders(): void {
@@ -1134,7 +1339,7 @@ export class Desk {
 
   /** Limit-buy coins stay quoted on the Tape quoter (batched, rate-safe) while their order is open. */
   private pinOrderMints(): void {
-    this.tape?.pin(this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint));
+    this.tape?.pin([...this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint), ...this.strategy.pinned()]);
   }
 
   /**
@@ -2315,12 +2520,17 @@ export class Desk {
       appVersion: APP_VERSION,
       lastClientCrash: this.lastClientCrash,
       markLoop: this.markLoopView(),
-      safetyChips: this.safetyChipList()
+      safetyChips: this.safetyChipList(),
+      strategy: this.strategy.scorecard(),
+      perf: this.latency.view()
     };
   }
 
   private wire(): void {
     this.bus.on("scout.candidate", (token) => {
+      const arrivedAt = Date.now();
+      if (token.discoveredAt > 0) this.latency.record("sightingToCandidate", arrivedAt - token.discoveredAt);
+      this.candidateAt.set(token.mint, arrivedAt);
       this.rawTape.markEnriched(token);
       const seen = this.sightings.get(token.mint);
       const prior = seen ? { priceUsd: seen.priceUsd, volume1hUsd: seen.volume1hUsd } : null;
@@ -2420,11 +2630,18 @@ export class Desk {
           kind: "pass",
           mint: report.token.mint,
           symbol: report.token.symbol,
-          message: `Analyst scored ${report.token.symbol} ${report.score.toFixed(2)}. Handing to Executor.`,
+          message: `Analyst scored ${report.token.symbol} ${report.score.toFixed(2)}. Handing to ${this.strategy.settings.enabled ? "the trading engine" : "Executor"}.`,
           detail: report.score.toFixed(2)
         },
         { breakdown: report.breakdown }
       );
+      const candidateAt = this.candidateAt.get(report.token.mint);
+      if (candidateAt != null) this.latency.record("candidateToDecision", Date.now() - candidateAt);
+      // Engine on: the coin is watched for a Launch or Momentum signal instead of being bought on sight.
+      if (this.strategy.settings.enabled) {
+        this.watchForSignal(report);
+        return;
+      }
       const job = this.buyIfSafe(report);
       this.track(job);
     });
@@ -2438,6 +2655,7 @@ export class Desk {
       // A rejected outlier must not become the crash-guard high and block the next buy.
       if (!markUnusable(tick.priceUsd) && !(anchor != null && outlierReason(anchor, tick.priceUsd))) {
         this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
+        this.strategy.onTick(tick.mint, tick.priceUsd, tick.at, tick.liquidityUsd);
       }
       this.noteFeedQuote(tick.mint, tick.feed, tick.priceUsd, tick.at);
       this.applyMark(tick.mint, tick.priceUsd, {
@@ -2547,8 +2765,9 @@ export class Desk {
     this.publishAdvice(this.buildAdvice());
   }
 
-  private async buy(report: AnalystReport): Promise<void> {
-    await this.executeBuy(report.token, report.score, this.positionSizeUsd ?? undefined, "analyst");
+  private async buy(report: AnalystReport, order?: { sizeUsd: number; tag: string; meta: StrategyMeta }): Promise<ManualBuyResult | ManualBuyRefusal> {
+    if (order) return this.executeBuy(report.token, report.score, order.sizeUsd, "analyst", false, { tag: order.tag, strategy: order.meta });
+    return this.executeBuy(report.token, report.score, this.positionSizeUsd ?? undefined, "analyst");
   }
 
   private async executeBuy(
@@ -2557,7 +2776,7 @@ export class Desk {
     requestedUsd: number | undefined,
     source: "analyst" | "manual",
     ignoreCooldown = false,
-    extra: { confirmSize?: boolean; tag?: string; book?: BookKind } = {}
+    extra: { confirmSize?: boolean; tag?: string; book?: BookKind; strategy?: StrategyMeta } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
     // AI auto-buys are paper. A request that names the live book is refused and sends nothing.
@@ -2576,10 +2795,13 @@ export class Desk {
     const isLive = kind === "live";
     // A confirmed manual buy may use up to 100% of the book. Everything else uses the saved cap (≤ 50%).
     // v13.5 live: the wallet's USDC is the book and the live per-trade size is the limit.
+    // An engine buy asks for its own trade size, up to the auto ceiling (never the manual 100%).
     const capPct =
       isLive || (source === "manual" && extra.confirmSize === true)
         ? SIZING_BAND.manualMaxPct
-        : Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
+        : extra.strategy && source === "analyst"
+          ? SIZING_BAND.autoMaxPct
+          : Math.min(this.config.rules.maxPositionPct, SIZING_BAND.autoMaxPct);
     if (isLive) {
       const pending = await this.blockIfUnconfirmed(token.mint, "buy", token.symbol);
       if (pending) return pending;
@@ -2864,7 +3086,9 @@ export class Desk {
         score,
         source,
         capPct,
-        extra.tag
+        extra.tag,
+        "paper",
+        extra.strategy
       );
       return this.bought(token, sized, "paper");
     } finally {
@@ -2879,7 +3103,8 @@ export class Desk {
     entry: "manual" | "analyst",
     capPct: number = this.config.rules.maxPositionPct,
     tag?: string,
-    kind: BookKind = "paper"
+    kind: BookKind = "paper",
+    strategy?: StrategyMeta
   ): void {
     const book = this.bk(kind);
     if (!(capPct > 0) || fill.notionalUsd > book.equity() * Math.min(capPct, SIZING_BAND.manualMaxPct) + 0.02) {
@@ -2908,7 +3133,8 @@ export class Desk {
       tradeId: fill.id,
       ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {}),
       ...(Number.isFinite(fill.slippage) ? { entrySlippage: fill.slippage } : {}),
-      ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {})
+      ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {}),
+      ...(strategy && kind === "paper" ? { strategy: { ...strategy } } : {})
     };
     book.positions.set(token.mint, position);
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
@@ -3155,6 +3381,8 @@ export class Desk {
     pos.trailArmed = view.trailArmed;
     if (view.action === "hold" || !view.code) {
       if (peakRose || armChanged) this.persist();
+      // The hard stop above always goes first. The engine's exits only apply to positions it opened.
+      if (kind === "paper" && pos.strategy) this.strategyExit(pos, mark);
       return;
     }
     pos.closing = true;
@@ -4492,7 +4720,10 @@ export class Desk {
   }
 
   /** AI buys stop on a blocked mint, an unread mint, or a flagged launch bundle. */
-  private async buyIfSafe(report: { token: import("../types.js").CandidateToken; score: number; breakdown: import("../types.js").ScoreFactor[]; decision: "trade" | "reject"; reason?: import("../types.js").Rejection }): Promise<void> {
+  private async buyIfSafe(
+    report: { token: import("../types.js").CandidateToken; score: number; breakdown: import("../types.js").ScoreFactor[]; decision: "trade" | "reject"; reason?: import("../types.js").Rejection },
+    order?: { sizeUsd: number; tag: string; meta: StrategyMeta }
+  ): Promise<void> {
     const safety = await this.tokenSafety(report.token.mint);
     if (safety.status !== "safe") {
       this.pipeline.executorSkips += 1;
@@ -4521,7 +4752,7 @@ export class Desk {
         return;
       }
     }
-    await this.buy(report);
+    await this.buy(report, order);
   }
 
   private cardChips(mint: string): { safetyChip: string; bundleChip: string | null } {

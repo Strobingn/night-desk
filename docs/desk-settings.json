@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "lastUpdatedET": "2026-11-11 1:46 PM ET",
-  "lastUpdated": "2026-11-11T13:46:42-05:00",
+  "lastUpdatedET": "2026-11-11 1:55 PM ET",
+  "lastUpdated": "2026-11-11T13:55:00-05:00",
   "pulledFrom": {
     "oracleApi": [
       "/api/state",
@@ -10,22 +10,22 @@
       "/api/live/ready",
       "/api/orders"
     ],
-    "code": "13.29 at merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
-    "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current values come from /api/state prefs and rules, which are the KV store snapshot the desk also writes on POST /api/settings."
+    "code": "13.30 on branch claude/trading-engine (rebased on 31c6d56)",
+    "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current values come from /api/state prefs and rules, which are the KV store snapshot the desk also writes on POST /api/settings. 13.30 live values were not re-pulled: the desk token is not available to the branch author. The 13.29 values below stand until the release deploy re-pulls them."
   },
   "version": {
-    "appVersion": "13.29",
-    "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
-    "treeSha": "1d1d654968ec787335cdcc5a6afde49447fc3462",
-    "deployPath": "/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
-    "githubRelease": "https://github.com/Strobingn/night-desk/releases/tag/v13.29",
+    "appVersion": "13.30",
+    "mergeSha": "pending (claude/trading-engine)",
+    "treeSha": "pending",
+    "deployPath": "pending",
+    "githubRelease": "pending",
     "service": "night-desk",
     "serviceActive": true
   },
   "backend": {
     "publicBaseUrl": "https://night-desk.157-151-200-171.sslip.io",
     "tls": "Caddy on :443, Let's Encrypt ACME (HTTP-01 disabled). No :80 listener; HTTP redirects are disabled.",
-    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme \u2026 disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
+    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme … disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
     "deskBind": "127.0.0.1:4721",
     "envHost": "127.0.0.1",
     "envPort": 4721,
@@ -50,10 +50,11 @@
   "hardRules": [
     "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live.",
     "Never drop the v13.11 baseline controls: paper and live limit / take-profit / stop orders (GET/POST /api/orders, POST /api/orders/cancel), and the rest of the v13.11 book and ticket UI.",
-    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or \u22640) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25\u00d7 or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
+    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or ≤0) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25× or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
     "The hard stop cannot be loosened past 6%. LIVE_TRADING, the wallet secret, and mode cannot be changed from the API.",
     "Do not print secrets. RPC URLs may carry API keys in the path or query; publish hostnames only.",
-    "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current."
+    "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current.",
+    "13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard ready flag arms nothing."
   ],
   "settings": {
     "_storage": "SQLite KV key 'settings' at DB_PATH (/var/lib/night-desk/desk.sqlite). POST /api/settings writes the allowed patch. Saved rows win over env boot defaults. Read them back from /api/state as prefs (most keys) or rules (volume, analyst line, top-10, position %, stop, trail arm/gap, entry slippage, volume boost, revengeCooldownMs).",
@@ -62,7 +63,7 @@
         "raw": 5000,
         "display": "$5,000",
         "source": "rules",
-        "notes": "8:22 PM ET tuning. Band $1,000\u2013$500,000."
+        "notes": "8:22 PM ET tuning. Band $1,000–$500,000."
       },
       "minLiquidityUsd": {
         "raw": 4000,
@@ -86,7 +87,7 @@
         "raw": 0.1,
         "display": "10%",
         "source": "prefs",
-        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 \u2192 0.1)."
+        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 → 0.1)."
       },
       "minTokenAgeMin": {
         "raw": 0,
@@ -110,7 +111,7 @@
         "raw": 0.35,
         "display": "0.35",
         "source": "rules",
-        "notes": "Trade line. Band 0.10\u20130.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
+        "notes": "Trade line. Band 0.10–0.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
       },
       "volumeBoost": {
         "raw": 0.5,
@@ -156,7 +157,7 @@
         "raw": 20,
         "display": "20",
         "source": "prefs",
-        "notes": "Band 1\u201324."
+        "notes": "Band 1–24."
       },
       "maxTradesPerHour": {
         "raw": 34,
@@ -178,7 +179,7 @@
         "raw": 1000,
         "display": "1 s",
         "source": "prefs",
-        "notes": "Band 1,000\u201310,000 ms."
+        "notes": "Band 1,000–10,000 ms."
       }
     },
     "liveCaps": {
@@ -186,7 +187,7 @@
         "raw": 5,
         "display": "$5",
         "source": "prefs",
-        "notes": "Per live trade. Band $1\u2013$100. Do not change unless Dirk approves."
+        "notes": "Per live trade. Band $1–$100. Do not change unless Dirk approves."
       },
       "liveDailyCapUsd": {
         "raw": 20,
@@ -201,7 +202,7 @@
       },
       "liveScope": {
         "raw": "manual",
-        "display": "Live: manual only \u00b7 AI: paper"
+        "display": "Live: manual only · AI: paper"
       },
       "liveSpentTodayUsd": {
         "raw": 0,
@@ -237,7 +238,7 @@
         "raw": 0.06,
         "display": "6%",
         "source": "rules",
-        "notes": "Band 0.5\u201350%."
+        "notes": "Band 0.5–50%."
       },
       "maxExitSlippage": {
         "raw": 0.06,
@@ -286,6 +287,68 @@
         "raw": true,
         "source": "/api/live/ready and /api/state readiness",
         "notes": "Operator checklist only. It does not set LIVE_TRADING or place a trade."
+      }
+    },
+    "tradingEngine": {
+      "_note": "13.30. Stored in SQLite KV key strategy (not in prefs/rules). Default when nothing is saved: enabled = FEED_MODE=live and DEMO_FEED=0, so on for the Oracle host. Values below are the code defaults; re-pull after deploy.",
+      "enabled": {
+        "raw": true,
+        "display": "on (default for live feeds)",
+        "source": "strategy",
+        "notes": "Off: analyst passes are bought on sight as in 13.29. On: they are watched for a Launch or Momentum signal first."
+      },
+      "targetNetUsd": {
+        "raw": 3,
+        "display": "$3.00 net",
+        "source": "strategy"
+      },
+      "tradeUsd": {
+        "raw": 50,
+        "display": "$50",
+        "source": "strategy",
+        "notes": "Up to the 50% auto ceiling; the exposure cap still applies."
+      },
+      "maxOpen": {
+        "raw": 2,
+        "display": "2",
+        "source": "strategy",
+        "notes": "Engine positions only. maxOpenPositions still caps the whole book."
+      },
+      "active": {
+        "raw": {
+          "launch": "launch-1",
+          "momentum": "momentum-1"
+        },
+        "display": "1% stop for both signals",
+        "source": "strategy",
+        "notes": "The hard stop (2.5% on this host) is checked first, so a 3% or 6% active variant can never reach its own stop on the main book. Shadow books use their own stop."
+      },
+      "dailyPauseUsd": {
+        "raw": 10,
+        "display": "$10 (fixed in code)",
+        "source": "src/strategy/config.ts",
+        "notes": "New engine buys pause once the paper book is $10 down on the UTC day."
+      },
+      "timeLimits": {
+        "raw": {
+          "launch": 600000,
+          "momentum": 1800000
+        },
+        "display": "10 min launch, 30 min momentum",
+        "source": "src/strategy/config.ts"
+      },
+      "shadowBooks": {
+        "raw": [
+          "launch-1",
+          "launch-3",
+          "launch-6",
+          "momentum-1",
+          "momentum-3",
+          "momentum-6"
+        ],
+        "display": "six, $100 each",
+        "source": "src/strategy/config.ts",
+        "notes": "Closed trades in SQLite table shadow_trades. Open shadow positions are dropped on restart. Ready = 200 trades with net profit; information only."
       }
     }
   },
@@ -561,7 +624,7 @@
         "name": "SCOUT_ENRICH_CONCURRENCY",
         "secret": false,
         "present": false,
-        "default": "8 (code default, clamped 1\u201316)"
+        "default": "8 (code default, clamped 1–16)"
       },
       {
         "name": "SCOUT_ENRICH_QUEUE",
@@ -604,6 +667,13 @@
         "name": "RUG_WALLETS_FILE",
         "secret": false,
         "present": false
+      },
+      {
+        "name": "STRATEGY_ENGINE",
+        "secret": false,
+        "classification": "set, non-secret value",
+        "present": false,
+        "notes": "13.30 optional. 1/0 sets the engine default when no switch is saved. Not in the production env file: the default is on because FEED_MODE=live and DEMO_FEED=0."
       }
     ]
   },
@@ -686,9 +756,11 @@
           "liveRequested",
           "liveNotArmed",
           "startedAt",
-          "now"
+          "now",
+          "strategy",
+          "perf"
         ],
-        "notes": "Full desk snapshot. This is how clients read settings (prefs + rules). Paper cash/equity are cashUsd / equityUsd. Live book is liveBook."
+        "notes": "Full desk snapshot. This is how clients read settings (prefs + rules). Paper cash/equity are cashUsd / equityUsd. Live book is liveBook. 13.30: strategy is the trading engine scorecard (settings, watching, six shadow-book rows, stats, note); perf is timing per pipeline step (sightingToCandidate, candidateToDecision, watchToSignal, signalToFill)."
       },
       {
         "method": "GET",
@@ -913,7 +985,7 @@
           "archivePath",
           "error"
         ],
-        "notes": "Paper book only. Live mode is refused. startingUsd 100\u201310,000."
+        "notes": "Paper book only. Live mode is refused. startingUsd 100–10,000."
       },
       {
         "method": "GET",
@@ -978,6 +1050,35 @@
         "method": "WS",
         "path": "/ws",
         "notes": "Same auth (header, ?token=, or cookie). Pushes coalesced snapshots and mark deltas."
+      },
+      {
+        "method": "GET",
+        "path": "/api/strategy/scorecard",
+        "keyFields": [
+          "ok",
+          "strategy"
+        ],
+        "notes": "13.30 trading engine: settings, watch count, per-variant results (trades, wins, winRate, avgWinUsd, avgLossUsd, netUsd, avgNetUsd, maxDrawdownUsd, equityUsd, open, active, ready), stats, note. Paper only."
+      },
+      {
+        "method": "POST",
+        "path": "/api/strategy/settings",
+        "keyFields": [
+          "ok",
+          "strategy",
+          "error"
+        ],
+        "notes": "13.30. Body keys: enabled (bool), targetNetUsd (0.25-50), tradeUsd (5-500), maxOpen (1-6), active ({launch, momentum} variant ids). Cannot arm live trading. Saved in SQLite KV key strategy."
+      },
+      {
+        "method": "POST",
+        "path": "/api/strategy/reset",
+        "keyFields": [
+          "ok",
+          "strategy",
+          "error"
+        ],
+        "notes": "13.30. Requires {\"confirm\": true}. Wipes the six shadow books and the shadow_trades table. The main paper book is untouched."
       }
     ]
   },

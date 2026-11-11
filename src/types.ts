@@ -57,7 +57,12 @@ export type ReasonCode =
   /** Armed desk received a buy that did not name paper or live. */
   | "BOOK_REQUIRED"
   /** Explicit live buy while the checklist is off. Nothing was sent. */
-  | "OPERATOR_NOT_READY";
+  | "OPERATOR_NOT_READY"
+  /** Trading engine exits. The engine's stop only ever sits tighter than the hard stop. */
+  | "TAKE_PROFIT"
+  | "STRATEGY_STOP"
+  | "BREAKEVEN_STOP"
+  | "TIME_LIMIT";
 
 export interface Rejection {
   code: ReasonCode;
@@ -256,6 +261,8 @@ export interface Position {
   entrySlippage?: number;
   /** v13.5 live trail: highest accepted risk mark since entry. */
   markPeak?: number;
+  /** Set when the trading engine opened the position: its signal, stop, target and time limit. */
+  strategy?: import("./strategy/exits.js").StrategyMeta;
 }
 
 export interface ClosedTrade {
@@ -665,6 +672,10 @@ export interface WalletView {
 }
 
 export interface DeskSnapshot {
+  /** Trading engine: settings, what it is watching, and the shadow-book scorecard. */
+  strategy?: import("./strategy/engine.js").ScorecardView;
+  /** Timing per pipeline step, in ms. Measurement only. */
+  perf?: Record<string, import("./strategy/latency.js").LatencySummary>;
   /** v13.7 armed desk: who trades live. `mode` stays "live" when armed (old apps then show LIVE). */
   liveScope?: "manual" | "all" | null;
   /** v13.7 the live book. Top-level cash/equity/positions are the paper book on an armed desk. */
