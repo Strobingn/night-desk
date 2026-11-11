@@ -18,6 +18,11 @@ export interface DeskConfig {
   advisorPath: string;
   demoFeed: boolean;
   feedMode: FeedStatus["mode"];
+  /**
+   * Trading engine default when nothing is saved. On for live feeds (it needs live quotes),
+   * off on the replay tape. STRATEGY_ENGINE=1 or 0 overrides. A saved switch wins.
+   */
+  strategyEngine?: boolean;
   port: number;
   host: string;
   rpcUrl: string;
@@ -91,6 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     advisorPath: path.resolve(env.ADVISOR_PATH?.trim() || "./data/advisor.json"),
     demoFeed,
     feedMode,
+    strategyEngine: /^(1|true|on)$/i.test(env.STRATEGY_ENGINE ?? "") ? true : /^(0|false|off)$/i.test(env.STRATEGY_ENGINE ?? "") ? false : feedMode === "live" && !demoFeed,
     port: Number(env.PORT) > 0 ? Number(env.PORT) : 4721,
     host: env.HOST?.trim() || "0.0.0.0",
     rpcUrl,

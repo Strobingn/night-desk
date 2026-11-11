@@ -47,6 +47,20 @@ class V122LinkTest {
     }
 
     @Test
+    fun oracleSitsAheadOfTheAustinTunnelAndTheSavedLinkStaysFirst() {
+        val saved = "https://link-tab.example.com"
+        val order = candidateUrls(DeskLink(saved, ""), beaconUrl = dead, lastGood = null, discovered = null)
+        assertEquals(saved, order[0].baseUrl)
+        assertEquals("saved", order[0].source)
+        val oracle = order.indexOfFirst { it.baseUrl == ORACLE_DESK_URL && it.source == "oracle" }
+        val austin = order.indexOfFirst { it.baseUrl == DeskBeacon.DEFAULT_PUBLIC_URL && it.source == "default" }
+        assertTrue(oracle > 0)
+        assertTrue(austin > oracle)
+        val bare = candidateUrls(DeskLink("", ""), beaconUrl = null, lastGood = null, discovered = null)
+        assertEquals(listOf(ORACLE_DESK_URL, DeskBeacon.DEFAULT_PUBLIC_URL), bare.map { it.baseUrl })
+    }
+
+    @Test
     fun picksTheFirstCandidateThatAnswersEvenWhenTheBeaconIsDead() {
         val order = candidateUrls(DeskLink("", ""), beaconUrl = dead, lastGood = null, discovered = null)
         // Fresh install: beacon dead, the default tunnel is the fallback. No hardcoded :4721.

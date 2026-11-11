@@ -148,7 +148,12 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
 }
 
 @Composable
-fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<String, Any?>) -> Unit) {
+fun SettingsScreen(
+    snap: DeskSnapshot?,
+    oneTap: OneTapUi? = null,
+    onStrategy: ((Map<String, Any?>) -> Unit)? = null,
+    onSave: (Map<String, Any?>) -> Unit
+) {
     var draft by remember { mutableStateOf(draftOf(snap)) }
     var saved by remember { mutableStateOf(draftOf(snap)) }
     val incoming = draftOf(snap)
@@ -175,6 +180,7 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
         }
         AppearanceGroup()
         CrashLogGroup(snap)
+        StrategyGroup(snap?.strategy, onStrategy)
         if (oneTap != null) {
             Group("One tap") {
                 Text(
@@ -310,6 +316,37 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
     }
 }
 
+/** v13.30 the desk's trading engine: one switch, a summary line, and the shadow-book scorecard. */
+@Composable
+private fun StrategyGroup(view: com.dirk.nightdesk.StrategyView?, onStrategy: ((Map<String, Any?>) -> Unit)?) {
+    var open by remember { mutableStateOf(false) }
+    Group("Trading engine") {
+        if (view == null) {
+            Text("This desk does not have the trading engine yet. Update the desk to 13.30.", color = Dim, fontSize = 12.sp)
+        } else {
+            ToggleRow("Engine on", view.enabled) { on -> onStrategy?.invoke(mapOf("enabled" to on)) }
+            Text(com.dirk.nightdesk.Strategy.summary(view), color = Dim, fontSize = 12.sp)
+            TextButton(onClick = { open = !open }) { Text(if (open) "Hide scorecard" else "Show scorecard", color = P.accent) }
+        }
+        if (view != null && open) {
+            for (row in view.variants) {
+                val tint = if (row.trades <= 0) Dim else if (row.netUsd > 0) P.up else if (row.netUsd < 0) P.down else Ink
+                Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(com.dirk.nightdesk.Strategy.label(row), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        if (row.ready) Chip("Ready", P.up, P.up.copy(alpha = 0.16f), size = 11)
+                        if (row.active) Chip("In use", P.accent, P.accent.copy(alpha = 0.16f), size = 11)
+                        else TextButton(onClick = { onStrategy?.invoke(mapOf("active" to mapOf(row.signal to row.variant))) }) { Text("Use", color = P.accent, fontSize = 12.sp) }
+                    }
+                    Text(com.dirk.nightdesk.Strategy.stats(row), color = tint, fontSize = 12.sp)
+                }
+            }
+            Text("Ready means ${view.readyTrades}+ trades and a net profit. It does not turn on live trading.", color = Dim, fontSize = 12.sp)
+            if (view.note.isNotBlank()) Text(view.note, color = Dim, fontSize = 12.sp)
+        }
+    }
+}
+
 /** Only the keys Dirk changed are sent, so a save never rewrites a value he did not touch. */
 internal fun changedOnly(before: Map<String, Any?>, after: Map<String, Any?>): Map<String, Any?> =
     after.filter { (key, value) -> before[key] != value }
@@ -380,7 +417,8 @@ private val GROUP_META = mapOf(
     Pair("Risk / Exits", Pair("shield", "Hard stop, cooldown, daily loss and the trailing take-profit.")),
     Pair("Sizing", Pair("coins", "How much each buy spends and how much can be open at once.")),
     Pair("Scout sources", Pair("radar", "Which feeds the Scout listens to for new pairs.")),
-    Pair("Alerts", Pair("bell", "When the phone should ping you."))
+    Pair("Alerts", Pair("bell", "When the phone should ping you.")),
+    Pair("Trading engine", Pair("radar", "Buys and sells on its own, on paper. The scorecard shows which settings make money."))
 )
 
 @Composable

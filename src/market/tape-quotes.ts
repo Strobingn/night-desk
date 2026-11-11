@@ -19,6 +19,8 @@ export interface TapeQuote {
   at: number;
   /** Short reason a value is missing, e.g. "no pool yet". Null when the price is known. */
   why: string | null;
+  /** Depth of the DexScreener pool that priced this quote. Absent when the price came from elsewhere. */
+  liquidityUsd?: number;
 }
 
 export interface DexTapeRow {
@@ -254,7 +256,8 @@ export class TapeQuoter {
           change1hPct: d?.change1hPct ?? (dexFailed ? prev?.change1hPct ?? null : null),
           source,
           at,
-          why
+          why,
+          ...(d?.priceUsd != null && d.liquidityUsd > 0 ? { liquidityUsd: d.liquidityUsd } : {})
         });
       }
       return mints.length;

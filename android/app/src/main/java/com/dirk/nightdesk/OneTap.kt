@@ -167,11 +167,15 @@ object OneTap {
         "TRAIL_STOP" -> "trailing stop"
         "MANUAL_CLOSE" -> "manual sell"
         "PARTIAL_SELL" -> "partial sell"
+        "TAKE_PROFIT" -> "take-profit"
+        "STRATEGY_STOP" -> "engine stop"
+        "BREAKEVEN_STOP" -> "breakeven"
+        "TIME_LIMIT" -> "time limit"
         else -> code.lowercase().replace('_', ' ')
     }
 
     /** Stop-type exits that should ping when Stops alerts are on. */
-    fun isStopExit(code: String?): Boolean = code == "STOP_LOSS" || code == "TRAIL_STOP" || code == "GAP_RUG"
+    fun isStopExit(code: String?): Boolean = code == "STOP_LOSS" || code == "TRAIL_STOP" || code == "GAP_RUG" || code == "STRATEGY_STOP"
 
     private fun signed(n: Double): String = (if (n > 0) "+" else if (n < 0) "−" else "") + formatUsd(kotlin.math.abs(n))
     private fun pct(f: Double): String = (if (f > 0) "+" else if (f < 0) "−" else "") + "%.2f".format(java.util.Locale.US, kotlin.math.abs(f * 100)) + "%"
