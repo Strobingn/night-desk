@@ -131,7 +131,13 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** v13 bottom nav: label to icon. Link stays as the sixth tab. */
-private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Search" to "search", "Recap" to "recap", "Settings" to "settings", "Link" to "link", "Pump" to "radar")
+/** v13.32 five tabs. Recap, Link and Pump live under Settings → More. */
+private val NAV_TABS = listOf("Home" to "home", "Tape" to "tape", "Search" to "search", "Engine" to "radar", "Settings" to "settings")
+internal const val TAB_HOME = 0
+internal const val TAB_TAPE = 1
+internal const val TAB_SEARCH = 2
+internal const val TAB_ENGINE = 3
+internal const val TAB_SETTINGS = 4
 
 private fun stageColor(stage: String): Color = when (stage) {
     "filter" -> P.down
@@ -147,6 +153,8 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
     // v13.11 limit buy ticket on this card.
     var limitOpen by remember(coin.mint) { mutableStateOf(orders?.openFor?.let { it.first == coin.mint && it.second == "limit_buy" } == true) }
     var liveOrderOpen by remember(coin.mint) { mutableStateOf(false) }
+    // v13.32 the LIVE strip is folded away by default; a held live position opens it.
+    var liveOpen by remember(coin.mint) { mutableStateOf(oneTap?.liveHeld?.containsKey(coin.mint) == true) }
     // v13.4 compact card: same facts and buttons as v13.1, packed into three rows so 4-5 cards fit
     // on one phone screen. Symbol, 1h change and volume stay large; nothing was dropped.
     val vc = verdictColor(coin.verdict)
@@ -169,11 +177,11 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(P.card)
-            .border(if (selected) 2.dp else 1.dp, borderColor, RoundedCornerShape(18.dp))
+            .border(if (selected) 2.dp else 1.dp, borderColor, RoundedCornerShape(16.dp))
             .clickable(onClick = onSelect)
-            .padding(start = 12.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 9.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -276,10 +284,23 @@ private fun CoinCardRow(coin: CoinCard, selected: Boolean, onSelect: () -> Unit,
                 }
             }
         }
-        // LIVE BUY / LIVE SELL on every tape card. Paper buttons above stay paper.
+        // LIVE BUY / LIVE SELL, folded behind one line. Paper buttons above stay paper.
         if (oneTap != null) {
-            LivePair(oneTap, coin.mint, coin.symbol, Modifier.padding(top = 6.dp), compact = true)
-            if (orders != null) {
+            val heldLiveNow = oneTap.liveHeld[coin.mint]
+            Row(Modifier.fillMaxWidth().clickable { liveOpen = !liveOpen }.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                BookTag(live = true)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (heldLiveNow != null) "held · " + (if (heldLiveNow.pnlUsd >= 0) "+" else "−") + formatUsd(kotlin.math.abs(heldLiveNow.pnlUsd)) else "real money",
+                    color = if (heldLiveNow == null) P.muted else if (heldLiveNow.pnlUsd >= 0) P.up else P.down,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(if (liveOpen) "Hide ▴" else "Show ▾", color = LivePink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            if (liveOpen) LivePair(oneTap, coin.mint, coin.symbol, Modifier.padding(top = 4.dp), compact = true)
+            if (orders != null && liveOpen) {
                 val heldLive = oneTap.liveHeld.containsKey(coin.mint)
                 BigButton(
                     if (heldLive) "LIVE stop" else "LIVE limit",
@@ -337,6 +358,8 @@ fun NightDeskApp(desk: DeskRepository) {
     val hardKill by desk.hardKillAsk.collectAsState()
     val shared by desk.sharedCoin.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    // v13.32 Settings hosts Link, Recap and Pump as sub-screens.
+    var settingsSub by rememberSaveable { mutableStateOf<String?>(null) }
     var addPrefill by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val scope = rememberCoroutineScope()
     // v13.3 one tap: haptic tick on every one-tap Buy / Sell, one order per tap.
@@ -434,11 +457,15 @@ fun NightDeskApp(desk: DeskRepository) {
                     NAV_TABS.forEachIndexed { index, (label, icon) ->
                         NavigationBarItem(
                             selected = tab == index,
-                            onClick = { tab = index },
+                            onClick = {
+                                // Tapping Settings always lands on the Settings list, not a sub-screen left open.
+                                if (index == TAB_SETTINGS) settingsSub = null
+                                tab = index
+                            },
                             label = { Text(label, fontSize = 11.sp, maxLines = 1, fontWeight = if (tab == index) FontWeight.SemiBold else FontWeight.Medium) },
                             icon = {
                                 BadgedBox(badge = {
-                                    if (index == 0 && positionCount > 0) Badge(containerColor = P.accent, contentColor = P.onAccent) { Text("$positionCount") }
+                                    if (index == TAB_HOME && positionCount > 0) Badge(containerColor = P.accent, contentColor = P.onAccent) { Text("$positionCount") }
                                 }) { Icon(deskIcon(icon), contentDescription = label, modifier = Modifier.size(22.dp)) }
                             },
                             colors = NavigationBarItemDefaults.colors(
@@ -464,7 +491,10 @@ fun NightDeskApp(desk: DeskRepository) {
                     message = shortConnectionError(error, status),
                     canUseLastGood = !lastGood.isNullOrBlank() && lastGood != activeUrl,
                     onUseLastGood = { scope.launch { desk.useLastGood() } },
-                    onEditLink = { tab = 5 }
+                    onEditLink = {
+                        tab = TAB_SETTINGS
+                        settingsSub = "link"
+                    }
                 )
             }
             notice?.let { note ->
@@ -486,7 +516,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 }
             }
             when (tab) {
-                0 -> BookScreen(
+                TAB_HOME -> BookScreen(
                     snap,
                     onClose = { mint -> scope.launch { desk.closePosition(mint) } },
                     onCloseLive = { mint -> scope.launch { desk.closePosition(mint, live = true) } },
@@ -500,9 +530,10 @@ fun NightDeskApp(desk: DeskRepository) {
                         tab = 2
                     },
                     orders = orderActions,
-                    onDismissCrash = { scope.launch { desk.dismissClientCrash() } }
+                    onDismissCrash = { scope.launch { desk.dismissClientCrash() } },
+                    onOpenEngine = { tab = TAB_ENGINE }
                 )
-                1 -> TapeScreen(
+                TAB_TAPE -> TapeScreen(
                     snap?.events.orEmpty(),
                     positionCapUsd = snap?.positionCapUsd,
                     cooldowns = snap?.cooldowns.orEmpty(),
@@ -519,11 +550,23 @@ fun NightDeskApp(desk: DeskRepository) {
                     tapeOrders = orderActions,
                     safetyChips = snap?.safetyChips.orEmpty()
                 )
-                2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
-                3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
-                4 -> SettingsScreen(snap, oneTap, onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } }) { patch -> scope.launch { desk.saveSettings(patch) } }
-                6 -> PumpScreen()
-                else -> LinkScreen(desk)
+                TAB_SEARCH -> AddCoinScreen(desk, snap, addPrefill, oneTap)
+                TAB_ENGINE -> EngineScreen(snap?.strategy, snap?.perf.orEmpty(), onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } }, onReset = { scope.launch { desk.resetStrategy() } })
+                else -> when (settingsSub) {
+                    "link" -> SubScreen("Link", onBack = { settingsSub = null }) { LinkScreen(desk) }
+                    "recap" -> SubScreen("Recap", onBack = { settingsSub = null }) {
+                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
+                    }
+                    "pump" -> SubScreen("Pump terminal", onBack = { settingsSub = null }) { PumpScreen() }
+                    else -> SettingsScreen(
+                        snap,
+                        oneTap,
+                        onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } },
+                        onOpen = { settingsSub = it },
+                        onOpenEngine = { tab = TAB_ENGINE },
+                        onReset = { scope.launch { desk.resetPaperBook() } }
+                    ) { patch -> scope.launch { desk.saveSettings(patch) } }
+                }
             }
         }
     }
@@ -562,11 +605,10 @@ fun NightDeskApp(desk: DeskRepository) {
 
 @Composable
 private fun Header(status: String, live: Boolean, mode: String, compact: Boolean = false, liveScope: String? = null, subline: (@Composable () -> Unit)? = null) {
-    val context = LocalContext.current
-    // v13.4: the Tape tab uses a slimmer header so the coin list gets the room.
-    val box = if (compact) 34.dp else 40.dp
+    // v13.32 one slim header on every tab.
+    val box = if (compact) 30.dp else 34.dp
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = if (compact) 6.dp else 14.dp, bottom = if (compact) 2.dp else 8.dp),
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = if (compact) 6.dp else 10.dp, bottom = if (compact) 2.dp else 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.size(box).clip(RoundedCornerShape(12.dp)).background(P.accent), contentAlignment = Alignment.Center) {
@@ -575,8 +617,8 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
         Spacer(Modifier.width(if (compact) 10.dp else 12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.Bottom) {
-                Text("Night", color = P.ink, fontSize = if (compact) 19.sp else 22.sp, fontWeight = FontWeight.Bold)
-                Text(" Desk", color = P.muted, fontSize = if (compact) 19.sp else 22.sp, fontWeight = FontWeight.Medium)
+                Text("Night", color = P.ink, fontSize = if (compact) 17.sp else 18.sp, fontWeight = FontWeight.Bold)
+                Text(" Desk", color = P.muted, fontSize = if (compact) 17.sp else 18.sp, fontWeight = FontWeight.Medium)
             }
             // v13.4: on the Tape tab the Scout line takes this spot while the feed is live.
             if (subline != null && live) subline() else Row(verticalAlignment = Alignment.CenterVertically) {
@@ -585,25 +627,7 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
                 Text(if (live) "Feed live · $status" else status, color = P.dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        // v13 quick theme toggle: Dark → Light → System. Saved on this phone only.
-        val pref = ThemeState.pref
-        Box(
-            Modifier
-                .size(box)
-                .clip(RoundedCornerShape(12.dp))
-                .background(P.card)
-                .border(1.dp, P.lineStrong, RoundedCornerShape(12.dp))
-                .clickable { ThemeState.set(context, ThemeState.next(pref)) },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                deskIcon(when (pref) { ThemePref.DARK -> "moon"; ThemePref.LIGHT -> "sun"; ThemePref.SYSTEM -> "auto" }),
-                contentDescription = "Theme: ${pref.label}. Tap for ${ThemeState.next(pref).label}",
-                tint = P.ink,
-                modifier = Modifier.size(20.dp)
-            )
-        }
-        Spacer(Modifier.width(8.dp))
+        // v13.32 the theme toggle lives in Settings → Appearance. The header keeps only the mode pill.
         val isLive = mode == "live"
         Text(
             when {
@@ -614,9 +638,9 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
             },
             color = if (isLive) P.onDown else P.onAccent,
             fontWeight = FontWeight.ExtraBold,
-            fontSize = 12.sp,
+            fontSize = 11.sp,
             letterSpacing = 1.sp,
-            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (isLive) P.down else P.accent).padding(horizontal = 12.dp, vertical = if (compact) 6.dp else 8.dp)
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (isLive) P.down else P.accent).padding(horizontal = 10.dp, vertical = 5.dp)
         )
     }
 }
@@ -646,48 +670,41 @@ private fun BookScreen(
     onCloseLive: (String) -> Unit = {},
     /** v13.11 limit / take-profit / stop orders. */
     orders: OrderActions? = null,
-    onDismissCrash: () -> Unit = {}
+    onDismissCrash: () -> Unit = {},
+    /** v13.32 the engine line opens the Engine tab. */
+    onOpenEngine: () -> Unit = {}
 ) {
     val openPnl = snap?.positions?.sumOf { it.pnlUsd } ?: 0.0
     val liveBook = snap?.liveBook
-    LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { LastCrashCard() }
         if (showDeskCrash(snap?.lastClientCrashVersion.orEmpty(), snap?.lastClientCrashDismissed == true, BuildConfig.VERSION_NAME) && !snap?.lastClientCrash.isNullOrBlank()) {
             item {
-                Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
-                    Text("LAST CRASH ON THE DESK", color = Coral, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                    Text(snap?.lastClientCrash.orEmpty().take(400), color = Dim, fontSize = 12.sp)
-                    TextButton(onClick = onDismissCrash) { Text("Dismiss", color = Dim) }
+                Column(Modifier.deskCard(radius = 16.dp).padding(14.dp)) {
+                    Text("LAST CRASH ON THE DESK", color = P.down, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Text(snap?.lastClientCrash.orEmpty().take(400), color = P.muted, fontSize = 12.sp)
+                    TextButton(onClick = onDismissCrash) { Text("Dismiss", color = P.muted) }
                 }
             }
         }
-        item {
-            Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(money(snap?.equityUsd ?: 0.0), color = P.ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
-                    Text(
-                        if (liveBook != null) "Paper · AI · ${snap?.positions?.size ?: 0} open" else "${snap?.positions?.size ?: 0} open",
-                        color = P.muted,
-                        fontSize = 12.sp
-                    )
-                }
-                Text(signed(openPnl), color = if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            }
-        }
+        // v13.32 the one number first: equity, today's result, the curve.
+        item { HeroCard(snap, openPnl) }
+        snap?.strategy?.let { engine -> item { EngineLine(engine, onOpenEngine) } }
         item {
             SectionTitle(
-                if (liveBook != null) "Paper · AI" else "Open positions",
+                if (liveBook != null) "Paper · AI" else "Positions",
                 "${signed(openPnl)} · ${snap?.positions?.size ?: 0} open · exposure ${money(snap?.exposureUsd ?: 0.0)}",
-                if (openPnl > 0) P.up else if (openPnl < 0) P.down else P.muted
+                pnlTint(openPnl)
             )
         }
         if (snap == null || snap.positions.isEmpty()) {
             item {
                 Text(
-                    "No open positions. A name still has to clear every hard filter.",
-                    color = Dim,
-                    fontSize = 15.sp,
-                    modifier = Modifier.padding(vertical = 8.dp)
+                    if (snap?.strategy?.enabled == true) "No open positions. The engine buys when a watched coin fires a signal."
+                    else "No open positions. A name still has to clear every hard filter.",
+                    color = P.muted,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(vertical = 4.dp)
                 )
             }
         } else {
@@ -698,13 +715,13 @@ private fun BookScreen(
         if (liveBook != null) {
             item {
                 SectionTitle(
-                    "LIVE",
+                    "Live positions",
                     "${signed(liveBook.openPnlUsd)} · ${liveBook.positions.size} open · ${liveCashLabel(liveBook, snap?.wallet)}",
                     P.down
                 )
             }
             if (liveBook.positions.isEmpty()) {
-                item { Text("No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real ${money(liveBook.tradeUsd)} buy.", color = Dim, fontSize = 14.sp) }
+                item { Text("No live positions. LIVE BUY on a coin sends a real ${money(liveBook.tradeUsd)} buy.", color = P.muted, fontSize = 13.sp) }
             } else {
                 itemsIndexed(liveBook.positions, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
                     OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
@@ -715,36 +732,67 @@ private fun BookScreen(
                     (if (liveBook.manualOnly) "Live: manual only · AI: paper. " else "Live: manual + AI. ") +
                         "${money(liveBook.tradeUsd)} per trade · trail ${"%.1f".format(Locale.US, liveBook.trailPct * 100)}% · hard stop −${"%.0f".format(Locale.US, snap.stopLossPct * 100)}% · " +
                         (liveBook.dailyCapUsd?.let { "daily cap ${money(it)}" } ?: "no daily max") + ".",
-                    color = P.ink,
-                    fontSize = 13.sp
+                    color = P.muted,
+                    fontSize = 12.sp
                 )
             }
         }
-        item { HeroCard(snap, openPnl) }
-        if (orders != null) item { OrdersCard(orders) }
-        item { WalletCard(snap) }
-        item { LiveReadyCard(snap, onReady) }
-        item { AdvisorCard(snap?.advice.orEmpty(), snap?.cooldowns.orEmpty(), onBuy) }
-        if (snap?.mode != "live" || liveBook != null) {
-            item { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
+        // v13.32 the rest folds into sections so the positions get the screen.
+        if (orders != null) {
+            val n = orders.orders.size
+            item { Section("Orders", trailing = if (n == 0) "none" else "$n open", collapsible = true, open = n > 0, padded = true) { OrdersCard(orders) } }
         }
-        item { SectionTitle("Recent trades", "${snap?.closed?.size ?: 0}") }
+        item { Section("Wallet & live", collapsible = true, open = false, padded = true) { WalletCard(snap); LiveReadyCard(snap, onReady) } }
+        val notes = snap?.advice.orEmpty()
+        item { Section("Advisor", trailing = if (notes.isEmpty()) "quiet" else "${notes.size}", collapsible = true, open = notes.isNotEmpty(), padded = true) { AdvisorCard(notes, snap?.cooldowns.orEmpty(), onBuy) } }
         val recent = snap?.closed.orEmpty().takeLast(20).asReversed()
-        if (recent.isEmpty()) {
-            item { Text("No realized trades yet. Hard stops and manual closes land here.", color = Dim, modifier = Modifier.padding(bottom = 24.dp)) }
-        } else {
-            itemsIndexed(recent, key = { index, trade -> "${trade.id}#$index" }) { _, trade ->
-                Column(Modifier.deskCard(radius = 16.dp).padding(14.dp)) {
-                    Text(trade.symbol, color = Ink, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "entry ${px(trade.entryPrice)} → exit ${px(trade.exitPrice)} · ${com.dirk.nightdesk.OneTap.exitLabel(trade.exitCode)} · ${clock(trade.closedAt)}",
-                        color = if (trade.exitCode == "GAP_RUG") Coral else Dim,
-                        fontSize = 12.sp
-                    )
-                    Text(money(trade.pnlUsd), color = if (trade.pnlUsd >= 0) Mint else Coral, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        item {
+            Section("Recent trades", trailing = "${snap?.closed?.size ?: 0}", collapsible = true, open = true) {
+                if (recent.isEmpty()) {
+                    Text("No closed trades yet. Stops, take-profits and manual sells land here.", color = P.muted, fontSize = 13.sp, modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp))
+                } else {
+                    recent.forEachIndexed { i, trade ->
+                        ListRow(
+                            trade.symbol,
+                            "${com.dirk.nightdesk.OneTap.exitLabel(trade.exitCode)} · ${px(trade.entryPrice)} → ${px(trade.exitPrice)} · ${clock(trade.closedAt)}",
+                            titleColor = if (trade.exitCode == "GAP_RUG") P.down else P.ink,
+                            trailing = { Text(signed(trade.pnlUsd), color = pnlTint(trade.pnlUsd), fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        )
+                        if (i < recent.lastIndex) RowDivider()
+                    }
                 }
             }
         }
+        if (snap?.mode != "live" || liveBook != null) {
+            item { Text("Reset the paper book under Settings → Paper book.", color = P.faint, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp)) }
+        }
+    }
+}
+
+/** v13.32 one line of engine status under the hero. Tap for the Engine tab. */
+@Composable
+private fun EngineLine(engine: com.dirk.nightdesk.StrategyView, onOpen: () -> Unit) {
+    val best = engine.variants.filter { it.trades > 0 }.maxByOrNull { it.netUsd }
+    val open = engine.variants.filter { it.active }.sumOf { it.open }
+    Row(
+        Modifier.deskCard(radius = 14.dp).clickable(onClick = onOpen).padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(if (engine.enabled) P.up else P.faint))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(if (engine.enabled) "Engine on · paper" else "Engine off", color = P.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (!engine.enabled) "Analyst passes are bought on sight."
+                else "watching ${engine.watching} · $open open · ${engine.signals} signals" +
+                    (if (best != null) " · best ${com.dirk.nightdesk.Strategy.label(best)} ${com.dirk.nightdesk.Strategy.signedUsd(best.netUsd)}" else ""),
+                color = P.muted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Chevron()
     }
 }
 
@@ -760,28 +808,29 @@ private fun HeroCard(snap: DeskSnapshot?, openPnl: Double) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(Brush.linearGradient(listOf(P.heroFrom, P.heroTo)))
-            .border(1.dp, P.accent.copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+            .border(1.dp, P.accent.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
             .padding(14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Marked equity", color = P.dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text("Equity", color = P.muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.4.sp, modifier = Modifier.weight(1f))
             val live = snap?.mode == "live" && snap.liveBook == null
-            Chip(if (live) "LIVE" else if (snap?.liveBook != null) "PAPER · AI" else "PAPER", if (live) P.onDown else P.onAccent, if (live) P.down else P.accent, size = 11)
+            Chip(if (live) "LIVE" else if (snap?.liveBook != null) "PAPER · AI" else "PAPER", if (live) P.onDown else P.onAccent, if (live) P.down else P.accent, size = 10)
         }
-        Text(money(equity), color = P.ink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp, modifier = Modifier.padding(vertical = 2.dp))
-        @OptIn(ExperimentalLayoutApi::class)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Chip("Today ${signed(day)}" + (if (base > 0) " · ${pct(day / base)}" else ""), tint(day), tint(day).copy(alpha = 0.16f), size = 12)
-            Chip("Session ${signed(session)} · ${pct(snap?.sessionPnlPct ?: 0.0)}", tint(session), tint(session).copy(alpha = 0.16f), size = 12)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(money(equity), color = P.ink, fontSize = 36.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(bottom = 6.dp)) {
+                Text("TODAY", color = P.faint, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                Text(signed(day) + (if (base > 0) "  ${pct(day / base)}" else ""), color = tint(day), fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
+            }
         }
-        Sparkline(snap?.equityPoints.orEmpty().map { it.equity }, start, Modifier.padding(top = 10.dp, bottom = 6.dp))
-        Box(Modifier.fillMaxWidth().height(1.dp).background(P.lineStrong))
-        Row(Modifier.fillMaxWidth().padding(top = 10.dp)) {
-            HeroStat("Cash", money(snap?.cashUsd), "book ${money(start)}")
-            HeroStat("Open", "${snap?.positions?.size ?: 0}", signed(openPnl), tint(openPnl))
-            HeroStat("Cap / buy", money(snap?.positionCapUsd), "exp. ${money(snap?.exposureUsd ?: 0.0)}")
+        Sparkline(snap?.equityPoints.orEmpty().map { it.equity }, start, Modifier.padding(top = 8.dp, bottom = 8.dp))
+        Row(Modifier.fillMaxWidth()) {
+            Stat("Cash", money(snap?.cashUsd))
+            Stat("Open", "${snap?.positions?.size ?: 0} · ${signed(openPnl)}", tint(openPnl))
+            Stat("Session", signed(session), tint(session))
+            Stat("Exposure", money(snap?.exposureUsd ?: 0.0))
         }
     }
 }
@@ -928,7 +977,7 @@ private fun AdvisorCard(notes: List<AdviceNote>, cooldowns: List<MintCooldown>, 
 }
 
 @Composable
-private fun ResetCard(amountUsd: Double, onReset: () -> Unit) {
+internal fun ResetCard(amountUsd: Double, onReset: () -> Unit) {
     val amount = "$" + "%,.0f".format(Locale.US, amountUsd)
     var ask by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).padding(16.dp)) {
@@ -1145,16 +1194,23 @@ private fun OpenPositionCard(
     val context = LocalContext.current
     var sellAsk by remember { mutableStateOf<Int?>(null) }
     var expanded by rememberSaveable(pos.mint) { mutableStateOf(false) }
-    Column(Modifier.deskCard().padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Column(Modifier.deskCard(radius = 16.dp).padding(horizontal = 12.dp, vertical = 10.dp)) {
         Row(Modifier.fillMaxWidth().clickable(onClickLabel = "Open ${pos.symbol} coin card") { onOpenCoin(pos.mint) }, verticalAlignment = Alignment.CenterVertically) {
-            CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null, size = if (expanded) 44.dp else 32.dp)
+            CoinAvatar(pos.symbol, pos.mint, ring = if (pos.pnlUsd > 0) P.up else if (pos.pnlUsd < 0) P.down else null, size = if (expanded) 40.dp else 32.dp)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(pos.symbol + " ›", color = P.ink, fontSize = if (expanded) 18.sp else 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(pos.symbol, color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.width(6.dp))
                     if (pos.live) Chip("LIVE", P.onDown, P.down, size = 10)
-                    else if (oneTap != null) BookTag(live = false)
+                    else {
+                        val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
+                        if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.16f), size = 10)
+                    }
+                    if (!expanded) {
+                        Spacer(Modifier.width(6.dp))
+                        Text("${money(pos.costUsd)} · ${heldFor(pos.openedAt)}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 if (pos.safetyChip.isNotBlank() || pos.bundleChip.isNotBlank()) {
                     Text(
@@ -1166,14 +1222,7 @@ private fun OpenPositionCard(
                     )
                 }
                 if (expanded) {
-                    val tag = pos.tag ?: if (pos.entry == "manual") "manual" else null
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (tag != null) Chip(tag.uppercase(), P.accent, P.accent.copy(alpha = 0.18f), size = 10)
-                        else Chip(pos.source.ifBlank { "auto" }, P.dim, P.card3, bold = false, size = 10)
-                        Spacer(Modifier.width(6.dp))
-                        Text("score ${num(pos.score, "%.2f")}", color = P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                        if (pos.lpUnlocked) Text("LP unlocked", color = P.amber, fontSize = 11.sp)
+                    Text("${pos.source.ifBlank { "auto" }} · score ${num(pos.score, "%.2f")}" + (if (pos.lpUnlocked) " · LP unlocked" else ""), color = if (pos.lpUnlocked) P.amber else P.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             Column(horizontalAlignment = Alignment.End) {
@@ -1202,15 +1251,16 @@ private fun OpenPositionCard(
             }
         }
         MarkUpdated(pos)
-        CoinSpark(pos.marks, pos.entryPrice, height = if (expanded) 36.dp else 18.dp)
+        CoinSpark(pos.marks, pos.entryPrice, height = if (expanded) 36.dp else 20.dp)
         if (!expanded) {
-            Text(
-                "Details",
-                color = P.accent,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 2.dp).clickable { expanded = true }
-            )
+            // Collapsed: how far the mark sits above the stop, as a thin bar.
+            val room = stopRoom(pos)
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                ThinBar(room, if (room < 0.25f) P.down else if (room < 0.5f) P.amber else P.up, Modifier.weight(1f))
+                Spacer(Modifier.width(8.dp))
+                Text("stop ${num(pos.stopDistancePct, "%.1f")}% away", color = P.muted, fontSize = 11.sp, maxLines = 1)
+            }
+            Disclosure(open = false) { expanded = true }
         } else {
         StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
         Column(
@@ -1275,13 +1325,7 @@ private fun OpenPositionCard(
                 )
             }
         }
-            Text(
-                "Hide",
-                color = P.accent,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 6.dp).clickable { expanded = false }
-            )
+            Disclosure(open = true) { expanded = false }
         }
     }
     val pending = sellAsk
@@ -2194,10 +2238,28 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                     } else {
                         SettingsScreen(snap) {}
                     }
+                    3 -> EngineScreen(snap.strategy, snap.perf, {}, {})
                     else -> SettingsScreen(snap) {}
                 }
             }
         }
+    }
+}
+
+/** v13.32 a Settings sub-screen (Link, Recap, Pump) with a back row. */
+@Composable
+internal fun SubScreen(title: String, onBack: () -> Unit, body: @Composable () -> Unit) {
+    androidx.activity.compose.BackHandler(onBack = onBack)
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onBack).padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("‹ Settings", color = P.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(12.dp))
+            Text(title, color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+        Box(Modifier.weight(1f)) { body() }
     }
 }
 

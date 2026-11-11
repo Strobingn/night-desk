@@ -12,8 +12,8 @@ android {
         applicationId = "com.dirk.nightdesk"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1333
-        versionName = "13.33"
+        versionCode = 1334
+        versionName = "13.34"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -65,6 +65,8 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM unit tests; the Android stub throws "not mocked".
+    testImplementation("org.json:json:20240303")
     testImplementation("org.robolectric:robolectric:4.14.1")
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-messaging")

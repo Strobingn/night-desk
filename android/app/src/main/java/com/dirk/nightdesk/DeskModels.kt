@@ -447,7 +447,9 @@ data class DeskSnapshot(
     /** v13.30 trading engine and its scorecard. Null on an older desk. */
     val strategy: StrategyView? = null,
     /** v13.33 monotonic snapshot id. 0 on an older desk. */
-    val seq: Long = 0
+    val seq: Long = 0,
+    /** v13.32 pipeline timings from the desk. Empty on an older desk. */
+    val perf: List<PerfRow> = emptyList()
 )
 
 data class SafetyChip(val mint: String, val safety: String, val bundle: String = "")
@@ -874,7 +876,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         safetyChips = parseSafetyChips(data.optJSONArray("safetyChips")),
         enrichHost = data.optJSONObject("enrich")?.optText("host")?.ifBlank { null },
         strategy = Strategy.parse(data.optJSONObject("strategy")),
-        seq = data.optLong("seq", 0L)
+        seq = data.optLong("seq", 0L),
+        perf = Perf.parse(data.optJSONObject("perf"))
     )
 }
 
