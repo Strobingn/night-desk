@@ -93,7 +93,7 @@ export interface ScorecardView {
 }
 
 export const SCORECARD_NOTE =
-  "Paper results. Fills are modeled, and shadow books see a price about every 10 seconds, so a real 1% stop would trigger more often than shown. Treat these numbers as a best case.";
+  "Paper results. Fills are modeled, and shadow books see a price about every 10 to 16 seconds, so a real 1% stop would trigger more often than shown. Treat these numbers as a best case.";
 
 /**
  * Watches Filter-passing coins, fires Launch and Momentum signals, and runs the shadow books.

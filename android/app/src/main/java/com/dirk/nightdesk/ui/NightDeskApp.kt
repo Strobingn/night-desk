@@ -521,7 +521,7 @@ fun NightDeskApp(desk: DeskRepository) {
                 )
                 2 -> AddCoinScreen(desk, snap, addPrefill, oneTap)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { RecapCard(desk) }
-                4 -> SettingsScreen(snap, oneTap) { patch -> scope.launch { desk.saveSettings(patch) } }
+                4 -> SettingsScreen(snap, oneTap, onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } }) { patch -> scope.launch { desk.saveSettings(patch) } }
                 6 -> PumpScreen()
                 else -> LinkScreen(desk)
             }

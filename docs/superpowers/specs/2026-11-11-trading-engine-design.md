@@ -1,6 +1,6 @@
 # Trading engine design (part 1 of 3)
 
-Date: 2026-11-11. Branch: `claude/trading-engine`. Status: waiting for Austin's review.
+Date: 2026-11-11. Branch: `claude/trading-engine`. Status: approved by Austin and built. The last section lists where the build differs from the first draft.
 
 Parts 2 (app redesign) and 3 (speed) get their own specs after this one ships.
 
@@ -29,19 +29,19 @@ A signal is only looked at for a coin that already passed the existing Filter (r
 mint/freeze authority, LP, holder concentration, volume floor) and the analyst trade line.
 No existing gate is loosened.
 
-- **Launch.** Coin is under 30 minutes old. Buy pressure is rising: on the Pump trade stream,
-  buy volume over the last 60 seconds is at least 1.5 times sell volume across at least 5
-  buys. For a pooled coin with no trade stream, 5-minute volume runs at 1.5 times the
-  1-hour pace and the last tracked mark is above the first.
+- **Launch.** Coin is under 30 minutes old. Across at least 3 tracked marks spanning 20
+  seconds or more, the price is up at least 2%, and 5-minute volume runs at 1.5 times the
+  1-hour pace.
 - **Momentum.** Coin is 30 minutes old or more. Price is up at least 3% over the last 5
   minutes on the engine's own mark tracker, 5-minute volume runs at 1.5 times the 1-hour
   pace, and the 1-hour price change is positive.
 
-The mark tracker keeps up to 20 Filter-passing coins and a short ring of recent marks for
-each, for at most 30 minutes per coin. It reads marks from price feeds the desk already
-polls and adds no Helius calls. The implementation plan confirms which existing feed
-serves this before any code is written; if none can without new rate-limit pressure, the
-tracker size is cut rather than a budget raised.
+The mark tracker keeps up to 12 Filter-passing coins and a short ring of recent marks for
+each, for at most 30 minutes per coin. Watched coins are pinned on the Tape quoter, the
+batched DexScreener pass the desk already runs, so the engine adds no network calls and
+no Helius reads. A pinned coin is re-quoted roughly every 10 to 16 seconds. A quote is
+only used when it comes from the feed the coin is anchored to, because a position is only
+ever marked by the feed that priced its entry. Unknown volume is never a pass.
 
 Thresholds above are starting values and live in one config object.
 
@@ -63,8 +63,11 @@ on its own price; the hard stop path behaves exactly as today.
 ## Sizing and pauses
 
 - $50 per trade (the existing 50% auto cap), 2 positions open at most.
-- Daily loss pause at $10, using the existing `dailyMaxLossUsd` gate.
+- New engine buys pause once the paper book's net result for the UTC day is $10 down
+  (closed trades plus open positions). The existing `dailyMaxLossUsd` gate still applies
+  on top when it is set.
 - No averaging down, unchanged.
+- The same coin is not signalled again for 30 minutes.
 
 ## Shadow books
 
@@ -76,15 +79,23 @@ shadow book is caught and logged and cannot touch the main book.
 The main paper book trades one active variant per signal. Default: the 1% stop for both,
 as asked. Austin can switch the active variant in settings.
 
-Shadow trades are stored in a new `shadow_trades` table. Shadow positions open at restart
-are closed as void and excluded from the scorecard.
+Closed shadow trades are stored in a new `shadow_trades` table. Open shadow positions are
+not saved: after a restart they are gone and are never counted. Each shadow book has its
+own $10 daily pause on its own net result.
+
+Shadow books only see a price when the Tape quoter re-quotes the coin (about every 10 to
+16 seconds), or on every tick when the main book holds the same coin. A dip and recovery
+between two quotes is invisible to them, which flatters tight stops. The scorecard says so.
 
 ## Scorecard
 
 Per variant: closed trades, win rate, average win, average loss, net profit after costs,
 average net per trade, worst drawdown, and a `ready` flag (200 or more trades and net
-profit above zero). Served at `GET /api/strategy/scorecard`, with a one-line summary in
-the snapshot. The phone gets a plain Scorecard card on the Book screen; part 2 restyles it.
+profit above zero). Served at `GET /api/strategy/scorecard` and carried whole on the
+snapshot as `strategy`. `POST /api/strategy/settings` changes the switch, the sizes and the
+active variants; `POST /api/strategy/reset` with `confirm: true` wipes the shadow books.
+The phone shows it under Settings → Trading engine (a switch, a summary line and the
+scorecard); part 2 restyles it.
 
 ## Live trading
 
@@ -120,6 +131,27 @@ exit rule, breakeven math against the cost model, shadow-book isolation (a throw
 does not reach the main book), scorecard arithmetic, void handling at restart, and a
 pipeline test on the replay tape showing an auto entry and an auto exit. Existing tests
 must still pass unchanged.
+
+## Switch and default
+
+The engine has one switch, saved on the desk. With nothing saved it is on for live feeds
+(`npm run paper:live`) and off on the replay tape, which has no live quotes to signal on.
+`STRATEGY_ENGINE=1` or `0` sets the default. Off, the desk behaves exactly as before: an
+analyst pass is bought on sight at the saved cap, and winners are closed by hand.
+
+## Where the build differs from the first draft
+
+- The Launch rule does not use a per-coin trade stream. The desk's PumpPortal socket only
+  delivers new-token and migration frames; per-token trades are metered and not enabled.
+  Launch uses the price ring and volume pace instead.
+- The watch list is 12 coins, not 20, to leave room on the Tape quoter's 30-coin batch.
+- The daily pause is on the day's net result, not the existing gross-loss gate, so a book
+  that is winning is not paused by the size of its losers.
+- Open shadow positions are dropped at restart instead of being written as void trades.
+- The scorecard card is in Settings, not on Home, so the Home screen the emulator gate
+  drives is unchanged.
+- Modeled round-trip cost on a $50 trade is about 0.6% in a $200k pool and about 0.9% in a
+  $50k pool, higher than the 0.5% quoted in conversation.
 
 ## Not in this part
 

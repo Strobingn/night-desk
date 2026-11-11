@@ -1221,7 +1221,7 @@ export class Desk {
       const anchor = this.strategyFeed.get(mint);
       const feed = q.source === "dexscreener" ? "dexscreener" : q.source === "jupiter" ? "jupiter" : q.source === "pump.fun curve" ? "chain" : q.source;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: this.markLiquidity.get(mint) ?? null }, now);
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null }, now);
     }
     this.strategy.tick(now);
     for (const mint of [...this.strategyQuoteAt.keys()]) if (!pinned.includes(mint)) this.strategyQuoteAt.delete(mint);

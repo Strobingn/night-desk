@@ -733,6 +733,33 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
+    /** v13.30 trading engine switch and active variants. The desk answers with the new scorecard. */
+    suspend fun saveStrategy(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) {
+            val notice = DeskNotice(false, "No desk URL")
+            _notice.value = notice
+            return@withContext notice
+        }
+        val body = JSONObject()
+        for ((key, value) in patch) {
+            when (value) {
+                null -> body.put(key, JSONObject.NULL)
+                is Map<*, *> -> body.put(key, JSONObject(value.mapKeys { it.key.toString() }))
+                else -> body.put(key, value)
+            }
+        }
+        val notice = post("$base/api/strategy/settings", body.toString()).fold(
+            onSuccess = { raw ->
+                val on = runCatching { JSONObject(raw).optJSONObject("strategy")?.optBoolean("enabled", false) }.getOrNull()
+                DeskNotice(true, if (patch.containsKey("enabled")) (if (on == true) "Trading engine on. Paper only." else "Trading engine off.") else "Engine settings saved.")
+            },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Engine settings refused.") }
+        )
+        _notice.value = notice
+        notice
+    }
+
     suspend fun saveSettings(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) {
