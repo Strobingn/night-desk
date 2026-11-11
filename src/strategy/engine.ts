@@ -108,6 +108,8 @@ export class StrategyEngine {
   private readonly store: ShadowStore | null;
   private readonly coins = new Map<string, { token: CandidateToken; score: number }>();
   private readonly signalled = new Map<string, number>();
+  /** Scores are recomputed only when a book's closed-trade count changes. The snapshot asks for them often. */
+  private readonly scoreCache = new Map<string, { trades: number; score: VariantScore }>();
   private readonly onError: (where: string, err: unknown) => void;
 
   constructor(opts: { store?: ShadowStore | null; cfg?: StrategyConfig; settings?: EngineSettings; onError?: (where: string, err: unknown) => void } = {}) {
@@ -127,6 +129,7 @@ export class StrategyEngine {
       this.fail("load", err);
     }
     this.books.clear();
+    this.scoreCache.clear();
     for (const variant of VARIANTS) {
       this.books.set(
         variant.id,
@@ -278,8 +281,14 @@ export class StrategyEngine {
   scorecard(): ScorecardView {
     const variants = VARIANTS.map((variant) => {
       const book = this.books.get(variant.id);
+      const trades = book?.trades ?? [];
+      let cached = this.scoreCache.get(variant.id);
+      if (!cached || cached.trades !== trades.length) {
+        cached = { trades: trades.length, score: scoreVariant(variant, trades, this.cfg) };
+        this.scoreCache.set(variant.id, cached);
+      }
       return {
-        ...scoreVariant(variant, book?.trades ?? [], this.cfg),
+        ...cached.score,
         open: book?.positions.size ?? 0,
         active: this.settings.active[variant.signal] === variant.id
       };
