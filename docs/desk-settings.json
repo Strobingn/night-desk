@@ -1,0 +1,1008 @@
+{
+  "schemaVersion": 1,
+  "lastUpdatedET": "2026-11-11 1:46 PM ET",
+  "lastUpdated": "2026-11-11T13:46:42-05:00",
+  "pulledFrom": {
+    "oracleApi": [
+      "/api/state",
+      "/api/health",
+      "/api/wallet",
+      "/api/live/ready",
+      "/api/orders"
+    ],
+    "code": "13.29 at merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
+    "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current values come from /api/state prefs and rules, which are the KV store snapshot the desk also writes on POST /api/settings."
+  },
+  "version": {
+    "appVersion": "13.29",
+    "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
+    "treeSha": "1d1d654968ec787335cdcc5a6afde49447fc3462",
+    "deployPath": "/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
+    "githubRelease": "https://github.com/Strobingn/night-desk/releases/tag/v13.29",
+    "service": "night-desk",
+    "serviceActive": true
+  },
+  "backend": {
+    "publicBaseUrl": "https://night-desk.157-151-200-171.sslip.io",
+    "tls": "Caddy on :443, Let's Encrypt ACME (HTTP-01 disabled). No :80 listener; HTTP redirects are disabled.",
+    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme \u2026 disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
+    "deskBind": "127.0.0.1:4721",
+    "envHost": "127.0.0.1",
+    "envPort": 4721,
+    "websocketPath": "/ws"
+  },
+  "auth": {
+    "headerName": "X-Desk-Token",
+    "queryParam": "token",
+    "cookieName": "desk_token",
+    "wwwAuthenticate": "DeskToken",
+    "unauthorizedStatus": 401,
+    "unauthorizedBody": "Unauthorized",
+    "tokenFormat": "Opaque shared secret from the DESK_TOKEN env var. Any non-empty trimmed UTF-8 string. Not a JWT and not an Authorization Bearer token. Compared with SHA-256 plus timing-safe equality. The value is never logged and must never be committed.",
+    "tokenValue": "secret, not in repo",
+    "whenUnset": "If DESK_TOKEN is empty or whitespace, the gate stays open (local-open). Production has a token set.",
+    "clients": {
+      "android": "Paste the token on the Link screen (stored as preference desk_token). Every HTTP call sends header X-Desk-Token and also appends ?token= (URL-encoded). The WebSocket opens wss://<host>/ws?token= and also sets the header.",
+      "web": "A first visit may carry ?token=. The page copies it into sessionStorage key night-desk-token, then strips it from the address bar. Later fetches send header X-Desk-Token and also set the query param. Authorization: Bearer is not accepted.",
+      "serverCookie": "On every authorized response the desk also sets HttpOnly cookie desk_token; Path=/; SameSite=Lax; Max-Age=2592000, so a browser session can keep working after the query string is removed."
+    }
+  },
+  "hardRules": [
+    "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live.",
+    "Never drop the v13.11 baseline controls: paper and live limit / take-profit / stop orders (GET/POST /api/orders, POST /api/orders/cancel), and the rest of the v13.11 book and ticket UI.",
+    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or \u22640) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25\u00d7 or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
+    "The hard stop cannot be loosened past 6%. LIVE_TRADING, the wallet secret, and mode cannot be changed from the API.",
+    "Do not print secrets. RPC URLs may carry API keys in the path or query; publish hostnames only.",
+    "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current."
+  ],
+  "settings": {
+    "_storage": "SQLite KV key 'settings' at DB_PATH (/var/lib/night-desk/desk.sqlite). POST /api/settings writes the allowed patch. Saved rows win over env boot defaults. Read them back from /api/state as prefs (most keys) or rules (volume, analyst line, top-10, position %, stop, trail arm/gap, entry slippage, volume boost, revengeCooldownMs).",
+    "filters": {
+      "minVolume1hUsd": {
+        "raw": 5000,
+        "display": "$5,000",
+        "source": "rules",
+        "notes": "8:22 PM ET tuning. Band $1,000\u2013$500,000."
+      },
+      "minLiquidityUsd": {
+        "raw": 4000,
+        "display": "$4,000",
+        "source": "prefs",
+        "notes": "8:22 PM ET tuning. 0 = off."
+      },
+      "minHolderCount": {
+        "raw": 15,
+        "display": "15",
+        "source": "prefs",
+        "notes": "8:22 PM ET tuning. While enrich is on Alchemy (not Helius) the UI caps this at 20: a full top-20 list counts as 20 or more."
+      },
+      "maxTop10Pct": {
+        "raw": 0.3,
+        "display": "30%",
+        "source": "rules",
+        "notes": "8:22 PM ET tuning. Hard ceiling 35%."
+      },
+      "maxDevHoldingPct": {
+        "raw": 0.1,
+        "display": "10%",
+        "source": "prefs",
+        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 \u2192 0.1)."
+      },
+      "minTokenAgeMin": {
+        "raw": 0,
+        "display": "0 (off)",
+        "source": "prefs"
+      },
+      "maxTokenAgeMin": {
+        "raw": 0,
+        "display": "0 (no maximum)",
+        "source": "prefs"
+      },
+      "allowUnlockedLp": {
+        "raw": false,
+        "display": "off",
+        "source": "prefs",
+        "notes": "Mint authority and dev rugs stay hard kills."
+      }
+    },
+    "analyst": {
+      "analystMinScore": {
+        "raw": 0.35,
+        "display": "0.35",
+        "source": "rules",
+        "notes": "Trade line. Band 0.10\u20130.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
+      },
+      "volumeBoost": {
+        "raw": 0.5,
+        "display": "50%",
+        "source": "rules",
+        "notes": "Adds to the analyst score for high 1h volume; never lowers a score or lifts past 1."
+      }
+    },
+    "paperSizing": {
+      "autoBuy": {
+        "raw": true,
+        "display": "on",
+        "source": "prefs",
+        "notes": "AI / auto-buy on the paper book only."
+      },
+      "liveAutoBuy": {
+        "raw": false,
+        "display": "off (locked)",
+        "source": "prefs",
+        "notes": "Server forces this false. Cannot be enabled."
+      },
+      "defaultBuyUsd": {
+        "raw": 5,
+        "display": "$5",
+        "source": "prefs"
+      },
+      "positionSizeUsd": {
+        "raw": null,
+        "display": "use % cap",
+        "source": "prefs"
+      },
+      "maxPositionPct": {
+        "raw": 0.295,
+        "display": "29.5%",
+        "source": "rules"
+      },
+      "maxExposurePct": {
+        "raw": 0.7,
+        "display": "70%",
+        "source": "prefs"
+      },
+      "maxOpenPositions": {
+        "raw": 20,
+        "display": "20",
+        "source": "prefs",
+        "notes": "Band 1\u201324."
+      },
+      "maxTradesPerHour": {
+        "raw": 34,
+        "display": "34",
+        "source": "prefs",
+        "notes": "0 = no hourly cap."
+      },
+      "dailyMaxLossUsd": {
+        "raw": 0,
+        "display": "off",
+        "source": "prefs"
+      },
+      "paperResetUsd": {
+        "raw": 100,
+        "display": "$100",
+        "source": "prefs"
+      },
+      "positionRefreshMs": {
+        "raw": 1000,
+        "display": "1 s",
+        "source": "prefs",
+        "notes": "Band 1,000\u201310,000 ms."
+      }
+    },
+    "liveCaps": {
+      "liveTradeUsd": {
+        "raw": 5,
+        "display": "$5",
+        "source": "prefs",
+        "notes": "Per live trade. Band $1\u2013$100. Do not change unless Dirk approves."
+      },
+      "liveDailyCapUsd": {
+        "raw": 20,
+        "display": "$20",
+        "source": "prefs",
+        "notes": "Daily live spend cap. Do not change unless Dirk approves."
+      },
+      "liveTrailPct": {
+        "raw": 0.05,
+        "display": "5%",
+        "source": "prefs"
+      },
+      "liveScope": {
+        "raw": "manual",
+        "display": "Live: manual only \u00b7 AI: paper"
+      },
+      "liveSpentTodayUsd": {
+        "raw": 0,
+        "display": "$0",
+        "source": "wallet / liveBook"
+      }
+    },
+    "stopsTrailSlippageCooldown": {
+      "stopLossPct": {
+        "raw": 0.025,
+        "display": "2.5%",
+        "source": "rules",
+        "notes": "Hard stop. Locked at 6% or tighter; the desk refuses a looser stop. Current value is tighter than the 6% ceiling."
+      },
+      "trailTakeProfit": {
+        "raw": true,
+        "display": "on",
+        "source": "prefs"
+      },
+      "trailArmPct": {
+        "raw": 1.5,
+        "display": "150%",
+        "source": "rules",
+        "notes": "Profit the trail waits for before it locks in gains. Floor 12%."
+      },
+      "trailGapPct": {
+        "raw": 0.03,
+        "display": "3%",
+        "source": "rules",
+        "notes": "Ceiling 4%."
+      },
+      "maxEntrySlippage": {
+        "raw": 0.06,
+        "display": "6%",
+        "source": "rules",
+        "notes": "Band 0.5\u201350%."
+      },
+      "maxExitSlippage": {
+        "raw": 0.06,
+        "display": "6%",
+        "source": "prefs",
+        "notes": "Leave at 6% unless Dirk approves a change."
+      },
+      "cooldownHours": {
+        "raw": 0,
+        "display": "0 (off)",
+        "source": "prefs",
+        "notes": "A hard stop does not ban the mint. revengeCooldownMs is also 0."
+      },
+      "revengeCooldownMs": {
+        "raw": 0,
+        "display": "0",
+        "source": "rules"
+      }
+    },
+    "alerts": {
+      "notifyNearMiss": {
+        "raw": true,
+        "source": "prefs"
+      },
+      "notifyFills": {
+        "raw": true,
+        "source": "prefs"
+      },
+      "notifyStops": {
+        "raw": true,
+        "source": "prefs"
+      },
+      "pnlAlertPct": {
+        "raw": 0,
+        "display": "off",
+        "source": "prefs"
+      }
+    },
+    "other": {
+      "senderTipSol": {
+        "raw": 5e-06,
+        "display": "0.000005 SOL",
+        "source": "prefs"
+      },
+      "operatorReady": {
+        "raw": true,
+        "source": "/api/live/ready and /api/state readiness",
+        "notes": "Operator checklist only. It does not set LIVE_TRADING or place a trade."
+      }
+    }
+  },
+  "scoutFeeds": {
+    "scoutPump": {
+      "setting": true,
+      "locked": true,
+      "runtime": {
+        "id": "pump",
+        "enabled": true,
+        "state": "live"
+      },
+      "notes": "Always on. Primary PumpPortal stream."
+    },
+    "scoutPumpApi": {
+      "setting": true,
+      "runtime": {
+        "id": "pumpapi",
+        "enabled": true,
+        "state": "blocked",
+        "detail": "Cloudflare challenge on frontend-api-v3.pump.fun. HTTP coin discovery is off. The free Pump stream is separate."
+      }
+    },
+    "scoutLaunchLab": {
+      "setting": true,
+      "runtime": {
+        "id": "launchlab",
+        "enabled": true,
+        "state": "live"
+      }
+    },
+    "scoutDexscreener": {
+      "setting": true,
+      "runtime": {
+        "id": "dexscreener",
+        "enabled": true,
+        "state": "live"
+      }
+    },
+    "scoutGecko": {
+      "setting": true,
+      "runtime": {
+        "id": "gecko",
+        "enabled": true,
+        "state": "live"
+      }
+    },
+    "scoutJupiter": {
+      "setting": true,
+      "runtime": {
+        "id": "jupiter",
+        "enabled": true,
+        "state": "live"
+      }
+    },
+    "scoutDexpaprika": {
+      "setting": false,
+      "runtime": {
+        "id": "dexpaprika",
+        "enabled": false,
+        "state": "off",
+        "detail": "turned off"
+      }
+    },
+    "scoutBitquery": {
+      "setting": true,
+      "runtime": {
+        "id": "bitquery",
+        "enabled": false,
+        "state": "off",
+        "detail": "no API key"
+      },
+      "notes": "The toggle is on, but the source stays off until BITQUERY_API_KEY is set. That key is not present in the production env file."
+    }
+  },
+  "providers": {
+    "enrich": {
+      "env": "SOLANA_RPC_URL",
+      "hostname": "solana-mainnet.g.alchemy.com",
+      "role": "Scout enrich reads",
+      "secret": "secret, not in repo (URL may carry an API key in the path or query; hostname only)"
+    },
+    "walletMarksSwaps": {
+      "env": "DESK_WALLET_RPC_URL",
+      "hostname": "mainnet.helius-rpc.com",
+      "role": "Wallet balances, held-position marks, and live swaps",
+      "secret": "secret, not in repo (URL has a query string; hostname only)"
+    },
+    "walletWs": {
+      "env": "SOLANA_RPC_WS_URL",
+      "hostname": "mainnet.helius-rpc.com",
+      "role": "Optional RPC websocket, derived or set separately",
+      "secret": "secret, not in repo (URL has a query string; hostname only)"
+    },
+    "ENRICH_RPC_CALLS_PER_MIN": 45,
+    "HOLDER_PAGES_MAX": 0,
+    "heliusLaneCaps": {
+      "read": {
+        "id": "helius",
+        "budgetPerMin": 10,
+        "limitPerMin": 13,
+        "burst": 3
+      },
+      "exec": {
+        "id": "helius:exec",
+        "budgetPerMin": 8,
+        "limitPerMin": 10,
+        "burst": 2
+      },
+      "combinedReqLastMinMax": 18,
+      "notes": "Hard sliding-minute ceilings in src/market/net.ts. The two reqLastMin counts must never pass 18. Leave these caps unchanged unless Dirk approves."
+    },
+    "enrichLane": {
+      "id": "enrich",
+      "budgetPerMin": 45,
+      "limitPerMin": 57,
+      "hardRpsCap": 20,
+      "notes": "Used because SOLANA_RPC_URL is Alchemy, not Helius. HOLDER_PAGES_MAX is ignored on a non-Helius enrich host (top 20 only)."
+    }
+  },
+  "env": {
+    "file": "/etc/night-desk/night-desk.env",
+    "mode": "0600",
+    "note": "Names only. Secret values and any URL with an API key are omitted. Production env is not changed by a docs PR.",
+    "variables": [
+      {
+        "name": "DESK_TOKEN",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "present": true
+      },
+      {
+        "name": "WALLET_PRIVATE_KEY",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "present": true,
+        "notes": "Desk-host only. Never in the phone, chat, or git."
+      },
+      {
+        "name": "WALLET_KEYPAIR_PATH",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "present": false,
+        "notes": "Optional path alternative to WALLET_PRIVATE_KEY. Not set in the production env file."
+      },
+      {
+        "name": "SOLANA_RPC_URL",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "hostname": "solana-mainnet.g.alchemy.com",
+        "present": true
+      },
+      {
+        "name": "DESK_WALLET_RPC_URL",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "hostname": "mainnet.helius-rpc.com",
+        "present": true
+      },
+      {
+        "name": "SOLANA_RPC_WS_URL",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "hostname": "mainnet.helius-rpc.com",
+        "present": true
+      },
+      {
+        "name": "PUMPPORTAL_API_KEY",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "present": false
+      },
+      {
+        "name": "BITQUERY_API_KEY",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "present": false
+      },
+      {
+        "name": "OPENAI_API_KEY",
+        "secret": true,
+        "classification": "secret, not in repo",
+        "present": false,
+        "notes": "Commentary only. Never used to place or size a trade."
+      },
+      {
+        "name": "LIVE_TRADING",
+        "secret": false,
+        "value": "true",
+        "present": true,
+        "notes": "Only the exact string true arms live (with a valid key). The phone cannot set this."
+      },
+      {
+        "name": "HOST",
+        "secret": false,
+        "value": "127.0.0.1",
+        "present": true
+      },
+      {
+        "name": "PORT",
+        "secret": false,
+        "value": "4721",
+        "present": true
+      },
+      {
+        "name": "FEED_MODE",
+        "secret": false,
+        "value": "live",
+        "present": true
+      },
+      {
+        "name": "DEMO_FEED",
+        "secret": false,
+        "value": "0",
+        "present": true
+      },
+      {
+        "name": "PAPER_BALANCE_USD",
+        "secret": false,
+        "value": "100",
+        "present": true,
+        "notes": "Used only for a fresh book or PAPER_RESET=1. The live paper book is already larger."
+      },
+      {
+        "name": "PAPER_RESET",
+        "secret": false,
+        "present": false,
+        "default": "unset / 0"
+      },
+      {
+        "name": "HOLDER_PAGES_MAX",
+        "secret": false,
+        "value": "0",
+        "present": true
+      },
+      {
+        "name": "ENRICH_RPC_CALLS_PER_MIN",
+        "secret": false,
+        "value": "45",
+        "present": true
+      },
+      {
+        "name": "DB_PATH",
+        "secret": false,
+        "value": "/var/lib/night-desk/desk.sqlite",
+        "present": true
+      },
+      {
+        "name": "LOG_JSONL",
+        "secret": false,
+        "value": "/var/lib/night-desk/desk.jsonl",
+        "present": true
+      },
+      {
+        "name": "LOG_FILE",
+        "secret": false,
+        "value": "/var/lib/night-desk/desk.log",
+        "present": true
+      },
+      {
+        "name": "ADVISOR_PATH",
+        "secret": false,
+        "value": "/var/lib/night-desk/advisor.json",
+        "present": true
+      },
+      {
+        "name": "NODE_OPTIONS",
+        "secret": false,
+        "value": "--max-old-space-size=384",
+        "present": true
+      },
+      {
+        "name": "SCOUT_ENRICH_CONCURRENCY",
+        "secret": false,
+        "present": false,
+        "default": "8 (code default, clamped 1\u201316)"
+      },
+      {
+        "name": "SCOUT_ENRICH_QUEUE",
+        "secret": false,
+        "present": false,
+        "default": "160 (code default)"
+      },
+      {
+        "name": "OPENAI_MODEL",
+        "secret": false,
+        "present": false,
+        "default": "gpt-4o-mini"
+      },
+      {
+        "name": "PUMP_WS_URL",
+        "secret": false,
+        "present": false,
+        "default": "wss://pumpportal.fun/api/data",
+        "notes": "Do not commit a URL that has an api-key query string."
+      },
+      {
+        "name": "RUGCHECK_API_URL",
+        "secret": false,
+        "present": false,
+        "default": "https://api.rugcheck.xyz/v1"
+      },
+      {
+        "name": "JUPITER_QUOTE_URL",
+        "secret": false,
+        "present": false,
+        "default": "https://lite-api.jup.ag/swap/v1/quote"
+      },
+      {
+        "name": "JUPITER_SWAP_URL",
+        "secret": false,
+        "present": false,
+        "default": "https://lite-api.jup.ag/swap/v1/swap"
+      },
+      {
+        "name": "RUG_WALLETS_FILE",
+        "secret": false,
+        "present": false
+      }
+    ]
+  },
+  "walletPublic": {
+    "publicKey": "3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs15ha",
+    "keyLoaded": true,
+    "keySource": "env",
+    "notes": "Public address only. The private key never belongs in this repo."
+  },
+  "snapshotAtPull": {
+    "atET": "2026-11-11 1:43 PM ET",
+    "mode": "live",
+    "liveScope": "manual",
+    "paperCashUsd": 549.86,
+    "paperEquityUsd": 682.87,
+    "livePositions": 0,
+    "openOrders": 0,
+    "liveSpentTodayUsd": 0,
+    "operatorReady": true,
+    "lastClientCrash": null,
+    "health": {
+      "ok": true,
+      "mode": "live",
+      "publicUrl": null
+    }
+  },
+  "api": {
+    "note": "All of these require the desk token when DESK_TOKEN is set. GET /api/settings is not implemented; it serves the SPA HTML.",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/api/health",
+        "keyFields": [
+          "ok",
+          "mode",
+          "now",
+          "publicUrl"
+        ],
+        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null."
+      },
+      {
+        "method": "GET",
+        "path": "/api/state",
+        "keyFields": [
+          "appVersion",
+          "mode",
+          "liveScope",
+          "liveBook",
+          "wallet",
+          "readiness",
+          "cashUsd",
+          "equityUsd",
+          "startingBalanceUsd",
+          "sessionPnlUsd",
+          "sessionPnlPct",
+          "prefs",
+          "rules",
+          "positions",
+          "closed",
+          "orders",
+          "feed",
+          "pipeline",
+          "killReasons",
+          "recheck",
+          "enrich",
+          "events",
+          "advice",
+          "watchlist",
+          "exposureUsd",
+          "positionCapUsd",
+          "manualMaxUsd",
+          "capWhy",
+          "cooldowns",
+          "rawTape",
+          "tapeQuotes",
+          "equity",
+          "markLoop",
+          "safetyChips",
+          "lastClientCrash",
+          "liveRequested",
+          "liveNotArmed",
+          "startedAt",
+          "now"
+        ],
+        "notes": "Full desk snapshot. This is how clients read settings (prefs + rules). Paper cash/equity are cashUsd / equityUsd. Live book is liveBook."
+      },
+      {
+        "method": "GET",
+        "path": "/api/events",
+        "query": [
+          "limit",
+          "stage",
+          "before"
+        ],
+        "keyFields": [
+          "events"
+        ],
+        "notes": "Default limit 800."
+      },
+      {
+        "method": "POST",
+        "path": "/api/settings",
+        "body": "Partial object of allowed keys only. Send percents the way the clients already do (e.g. maxDevHoldingPct: 10 for 10%). Only changed fields should be sent.",
+        "keyFields": [
+          "ok",
+          "settings",
+          "error"
+        ],
+        "notes": "liveAutoBuy=true is refused. Blocked keys include stopLoss, liveTrading, LIVE_TRADING, mode, and any wallet secret field. stopLossPct may be tightened but not loosened past 6%.",
+        "allowedKeys": [
+          "liveTradeUsd",
+          "liveDailyCapUsd",
+          "liveTrailPct",
+          "positionRefreshMs",
+          "minVolume1hUsd",
+          "analystMinScore",
+          "volumeBoost",
+          "maxTop10Pct",
+          "maxPositionPct",
+          "defaultBuyUsd",
+          "maxOpenPositions",
+          "allowUnlockedLp",
+          "maxEntrySlippage",
+          "maxExitSlippage",
+          "minLiquidityUsd",
+          "minTokenAgeMin",
+          "maxTokenAgeMin",
+          "minHolderCount",
+          "maxDevHoldingPct",
+          "maxTradesPerHour",
+          "dailyMaxLossUsd",
+          "cooldownHours",
+          "stopLossPct",
+          "trailTakeProfit",
+          "trailArmPct",
+          "trailGapPct",
+          "autoBuy",
+          "scoutDexscreener",
+          "scoutGecko",
+          "scoutJupiter",
+          "scoutDexpaprika",
+          "scoutBitquery",
+          "scoutPumpApi",
+          "scoutLaunchLab",
+          "notifyNearMiss",
+          "notifyFills",
+          "notifyStops",
+          "pnlAlertPct",
+          "positionSizeUsd",
+          "maxExposurePct",
+          "paperResetUsd",
+          "senderTipSol"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/positions/buy",
+        "body": [
+          "mint",
+          "sizeUsd?",
+          "book?",
+          "idemKey?",
+          "ignoreCooldown?",
+          "confirmHardKill?",
+          "confirmSize?"
+        ],
+        "keyFields": [
+          "ok",
+          "error",
+          "code",
+          "ms",
+          "replayed"
+        ],
+        "notes": "On an armed desk the client must name the book (paper or live). Omitted is refused, not live. Size omitted uses the position cap, cut to liveTradeUsd on the live book."
+      },
+      {
+        "method": "POST",
+        "path": "/api/positions/sell",
+        "aliases": [
+          "/api/positions/close"
+        ],
+        "body": [
+          "mint",
+          "fraction? or percent?",
+          "book?",
+          "idemKey?"
+        ],
+        "keyFields": [
+          "ok",
+          "error",
+          "ms",
+          "replayed"
+        ],
+        "notes": "Sell size must be 25, 50 or 100 percent (or a fraction in (0,1]]. Omitted = 100%."
+      },
+      {
+        "method": "POST",
+        "path": "/api/positions/sell-all",
+        "body": [
+          "confirm=true",
+          "book?",
+          "idemKey?"
+        ],
+        "keyFields": [
+          "ok",
+          "error",
+          "ms"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/api/orders",
+        "keyFields": [
+          "ok",
+          "orders"
+        ],
+        "notes": "v13.11 limit / take-profit / stop orders, paper and live."
+      },
+      {
+        "method": "POST",
+        "path": "/api/orders",
+        "body": "Order ticket fields plus optional idemKey",
+        "keyFields": [
+          "ok",
+          "order",
+          "error",
+          "replayed"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/orders/cancel",
+        "body": [
+          "id"
+        ],
+        "keyFields": [
+          "ok",
+          "error"
+        ],
+        "notes": "404 if no such order."
+      },
+      {
+        "method": "GET",
+        "path": "/api/wallet",
+        "keyFields": [
+          "keyLoaded",
+          "keySource",
+          "keyInvalid",
+          "publicKey",
+          "solBalance",
+          "usdcBalance",
+          "solPriceUsd",
+          "balanceAt",
+          "balanceError",
+          "live",
+          "liveScope",
+          "liveScopeLine",
+          "liveAutoBuy",
+          "liveRequested",
+          "rpcPublic",
+          "liveTradeUsd",
+          "liveDailyCapUsd",
+          "liveTrailPct",
+          "liveSpentTodayUsd",
+          "minFeeSol"
+        ],
+        "notes": "Never returns the private key."
+      },
+      {
+        "method": "GET",
+        "path": "/api/live/ready",
+        "keyFields": [
+          "mode",
+          "liveTradingFlag",
+          "keypairPresent",
+          "walletPublicKey",
+          "rpcPresent",
+          "operatorReady",
+          "liveScope",
+          "lines"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/live/ready",
+        "body": {
+          "operatorReady": "boolean only"
+        },
+        "keyFields": [
+          "ok",
+          "error"
+        ],
+        "notes": "Cannot set LIVE_TRADING, a keypair, or a seed."
+      },
+      {
+        "method": "POST",
+        "path": "/api/paper/reset",
+        "body": [
+          "confirm=true",
+          "startingUsd?"
+        ],
+        "keyFields": [
+          "ok",
+          "cashUsd",
+          "startingBalanceUsd",
+          "archive",
+          "archivePath",
+          "error"
+        ],
+        "notes": "Paper book only. Live mode is refused. startingUsd 100\u201310,000."
+      },
+      {
+        "method": "GET",
+        "path": "/api/lookup",
+        "query": [
+          "q"
+        ],
+        "keyFields": [
+          "ok",
+          "code",
+          "error"
+        ],
+        "notes": "200 also for AMBIGUOUS; 422 for PRICE_UNAVAILABLE."
+      },
+      {
+        "method": "GET",
+        "path": "/api/watchlist",
+        "keyFields": [
+          "items or the watchlist array"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/watchlist",
+        "body": [
+          "q"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/watchlist/remove",
+        "aliases": [
+          "DELETE /api/watchlist"
+        ],
+        "body": [
+          "mint"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/api/recap",
+        "query": [
+          "since"
+        ],
+        "notes": "since is 12h, 24h, 7d, or reset."
+      },
+      {
+        "method": "POST",
+        "path": "/api/client-crash",
+        "notes": "Phone crash report."
+      },
+      {
+        "method": "POST",
+        "path": "/api/client-crash/dismiss"
+      },
+      {
+        "method": "GET/POST",
+        "path": "/api/pump/*",
+        "notes": "Pump terminal, journal, portfolio, sniper, alerts, and related screens. Same auth gate."
+      },
+      {
+        "method": "WS",
+        "path": "/ws",
+        "notes": "Same auth (header, ?token=, or cookie). Pushes coalesced snapshots and mark deltas."
+      }
+    ]
+  },
+  "releaseFlow": {
+    "standingPipeline": [
+      "Wait for hosted CI to finish green on the exact PR head. If CI fails, report it; do not silently fix it.",
+      "Review the diff against the hard rules (AI paper-only, live $5/$20, stops/trail/6% exit slippage, cooldown 0, bogus-price rejection, Helius caps, no secret leakage).",
+      "Squash-merge, then confirm the merge tree matches the tested head tree.",
+      "Build the APK and re-sign it with the existing Android debug certificate sha256 2c69c1b3d33c812142bf0d214e890e084227f01c84f234a8246f2acc7d111f04. Publish a GitHub release vX.Y with NightDesk-vX.Y-debug.apk and a private Drive copy.",
+      "Back up Oracle, deploy the merged tree to /opt/night-desk-releases/<merge sha>, leave /etc/night-desk/night-desk.env unchanged, and restart only the night-desk service.",
+      "Watch the desk and report version, pipeline, paper cash/equity, live book (0 unexpected spends), and provider error counts."
+    ],
+    "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
+    "current": {
+      "version": "13.29",
+      "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
+      "treeSha": "1d1d654968ec787335cdcc5a6afde49447fc3462",
+      "deployPath": "/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
+      "releaseUrl": "https://github.com/Strobingn/night-desk/releases/tag/v13.29",
+      "ciUrl": "https://github.com/Strobingn/night-desk/actions/runs/42946132006"
+    }
+  },
+  "filterSemantics1329": {
+    "holders": "When enrich only sees the top 20 accounts (Alchemy today; HOLDER_PAGES_MAX=0), a full list of 20 counts as 20 or more.",
+    "devShare": "Computed from the top-20 holders. Pool vaults are excluded. Any share over 100% fails closed.",
+    "recheck": "Coins that miss only the soft filters get one recheck. Counts are on /api/state.recheck (pending, ran, dropped)."
+  }
+}
