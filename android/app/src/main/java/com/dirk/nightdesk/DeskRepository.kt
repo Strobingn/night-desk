@@ -43,6 +43,12 @@ private val Context.deskStore by preferencesDataStore(name = "night_desk")
 
 data class DeskLink(val baseUrl: String, val token: String, val useManual: Boolean = false)
 
+/**
+ * Oracle VM that runs the desk. Tried after the saved Link URL and before
+ * [DeskBeacon.DEFAULT_PUBLIC_URL], the old Austin desktop tunnel.
+ */
+internal const val ORACLE_DESK_URL = "https://night-desk.157-151-200-171.sslip.io"
+
 data class ResolvedDesk(val baseUrl: String, val source: String)
 
 /**
@@ -64,6 +70,9 @@ internal fun candidateUrls(saved: DeskLink, beaconUrl: String?, lastGood: String
     add(beaconUrl, "beacon")
     // No fixed LAN :4721. That port was wslrelay on Austin's PC and is not the desk.
     // The phone follows the saved URL, the beacon, or the desk's publicUrl from /api/health.
+    // Oracle answers before the old Austin trycloudflare default, so a blank Link tab
+    // does not land on that desktop tunnel while the VM is up.
+    add(ORACLE_DESK_URL, "oracle")
     add(DeskBeacon.DEFAULT_PUBLIC_URL, "default")
     return out.map { (url, source) -> ResolvedDesk(url, source) }
 }
@@ -258,8 +267,9 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /**
-     * Manual hold, then the beacon, then the saved Link URL, then LAN, then the last
-     * URL that answered, then the public tunnel. Never returns a blank URL.
+     * Manual hold, then the beacon, then the saved Link URL, then the last URL that
+     * answered, then the Oracle host. Never returns a blank URL, and never the old
+     * Austin tunnel when nothing else was saved.
      */
     internal fun resolve(
         saved: DeskLink,
@@ -280,7 +290,7 @@ class DeskRepository private constructor(private val context: Context) {
         if (savedUrl != null) return ResolvedDesk(savedUrl, "saved")
         if (beacon != null) return ResolvedDesk(beacon, "beacon")
         if (remembered != null) return ResolvedDesk(remembered, "last")
-        return ResolvedDesk(DeskBeacon.DEFAULT_PUBLIC_URL, "default")
+        return ResolvedDesk(ORACLE_DESK_URL, "oracle")
     }
 
     private suspend fun connect(afterFailure: Boolean) {

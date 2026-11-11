@@ -84,6 +84,18 @@ curl -X POST http://127.0.0.1:4721/api/strategy/reset -H 'content-type: applicat
 
 `/api/state` also carries `perf`: how long coins take from sighting to candidate, candidate to decision, watch to signal, and signal to fill. Thresholds live in `src/strategy/config.ts`. The design is in [docs/superpowers/specs/2026-11-11-trading-engine-design.md](docs/superpowers/specs/2026-11-11-trading-engine-design.md).
 
+## Where this desk runs
+
+The backend for this build is the Oracle VM at `https://night-desk.157-151-200-171.sslip.io`. It is not the Austin desktop, and it is not the old `trycloudflare.com` tunnel stored on the phone as `DeskBeacon.DEFAULT_PUBLIC_URL`. The engine stays on for a live feed: `strategyEngine` defaults on when `FEED_MODE=live` and the demo tape is off. `STRATEGY_ENGINE=0` turns that default off, and a saved Settings → Trading engine switch wins after boot. The $10 UTC-day paper-loss pause and the other engine numbers stay in `src/strategy/config.ts` ($50 paper size, two open, $3 net target, 1% stop on the main paper book, Launch and Momentum at 1/3/6% on the shadow books).
+
+| Method | Path | What it does |
+| --- | --- | --- |
+| GET | `/api/strategy/scorecard` | Shadow-book scorecard |
+| POST | `/api/strategy/settings` | Engine switch, sizes, and which variant is in use |
+| POST | `/api/strategy/reset` | Wipes the shadow books when the body is `{"confirm":true}` |
+
+The phone keeps a Link-tab URL first. The Oracle host is the next fixed fallback, ahead of that old desktop tunnel.
+
 ## Phone access
 
 The desk binds `0.0.0.0:4721`. On home Wi‑Fi a phone can open `http://<lan-ip>:4721`. Away from home, put a tunnel in front and set a shared secret. Leave `LIVE_TRADING` unset or `false` unless you intentionally want real orders. A tunnel does not arm live trading.
