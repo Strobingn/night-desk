@@ -42,7 +42,10 @@ class NativePaperGateTest {
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         dismissBlockers(device)
         waitForDesk(device)
-        openTab("Link")
+        // v13.32 Link lives under Settings → More.
+        openTab("Settings")
+        waitFor("Link")
+        tap("Link")
         waitFor("Override URL")
         // The screen loads the saved link after the first frame and would wipe a URL typed too early.
         rule.waitForIdle()
@@ -72,7 +75,7 @@ class NativePaperGateTest {
         scrollUntil("NOVA")
         scrollUntil("GATE")
         shot("home-collapsed")
-        tapBelow("GATE", "Details")
+        tapBelow("GATE", "Details", substring = true)
         scrollUntil("Sell 25%")
         scrollUntil("Sell 100%")
         shot("home-expanded")
@@ -80,6 +83,9 @@ class NativePaperGateTest {
         scrollUntil("One tap")
         scrollUntil("Slip")
         shot("settings-onetap")
+        openTab("Engine")
+        waitFor("SCORECARD")
+        shot("engine")
         openTab("Tape")
         scrollUntil("⚡ Sell")
         tapContains("⚡ Sell")
@@ -132,30 +138,40 @@ class NativePaperGateTest {
         dismissNotice()
         openTab("Home")
         scrollUntil("SEEK")
-        tapBelow("SEEK", "Details")
+        tapBelow("SEEK", "Details", substring = true)
         tapContains("⚡ Sell")
         waitFor("Sold SEEK")
         dismissNotice()
 
         openTab("Tape")
         // SEEK is on the tape too, so both cards show LIVE BUY $5. The live checks stay on GATE.
+        // v13.32 the LIVE strip is folded on each card; open it on GATE first.
+        openLive("GATE")
         tapBelow("GATE", "LIVE BUY $5")
         waitFor("OPERATOR_NOT_READY")
         dismissNotice()
 
         openTab("Home")
+        // v13.32 the checklist sits in the folded "Wallet & live" section.
+        scrollUntil("Wallet & live")
+        tapContains("Wallet & live")
         scrollUntil("Mark checklist ready")
         rule.onNode(isToggleable()).performClick()
         Thread.sleep(2_000)
 
         openTab("Tape")
+        openLive("GATE")
         tapBelow("GATE", "LIVE BUY $5")
         waitFor("did not answer in time", 55_000)
         dismissNotice()
+        openLive("GATE")
         tapBelow("GATE", "LIVE BUY $5")
         Thread.sleep(4_000)
 
-        openTab("Pump")
+        // v13.32 Pump lives under Settings → More.
+        openTab("Settings")
+        waitFor("Pump terminal")
+        tap("Pump terminal")
         // The intro says "tap Watch". Scroll to the button itself so the mint field is on screen.
         rule.onNode(hasTestTag("pump-watch")).performScrollTo()
         rule.waitForIdle()
@@ -203,6 +219,13 @@ class NativePaperGateTest {
             Thread.sleep(700)
         }
         error("Night Desk never drew. Last package ${device.currentPackageName}")
+    }
+
+    /** v13.32 opens the folded LIVE strip on one tape card, if it is still closed. */
+    private fun openLive(anchor: String) {
+        scrollUntil(anchor)
+        val closed = rule.onAllNodes(hasText("Show ▾", substring = true) and hasClickAction()).fetchSemanticsNodes().isNotEmpty()
+        if (closed) tapBelow(anchor, "Show ▾", substring = true)
     }
 
     private fun openTab(label: String) {

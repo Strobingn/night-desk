@@ -1,0 +1,204 @@
+package com.dirk.nightdesk.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.PerfRow
+import com.dirk.nightdesk.Perf
+import com.dirk.nightdesk.Strategy
+import com.dirk.nightdesk.StrategyView
+import com.dirk.nightdesk.VariantScore
+import java.util.Locale
+
+/**
+ * v13.32 Engine tab: the trading engine's switch, sizes, the six shadow books and the
+ * pipeline timings. Everything here is paper. Nothing on this screen can arm live trading.
+ */
+@Composable
+fun EngineScreen(
+    view: StrategyView?,
+    perf: List<PerfRow>,
+    onStrategy: (Map<String, Any?>) -> Unit,
+    onReset: () -> Unit
+) {
+    var askReset by remember { mutableStateOf(false) }
+    LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Engine", color = P.ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                if (view != null) Chip(if (view.enabled) "ON · PAPER" else "OFF", if (view.enabled) P.onUp else P.muted, if (view.enabled) P.up else P.card3, size = 11)
+            }
+        }
+        if (view == null) {
+            item {
+                Section("Trading engine", padded = true) {
+                    Text("This desk does not have the trading engine. Update the desk to 13.30 or later.", color = P.muted, fontSize = 13.sp)
+                }
+            }
+            return@LazyColumn
+        }
+        item {
+            Section("Switch", padded = true) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Engine on", color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (view.enabled) "Coins that pass Filter and Analyst are watched for a Launch or Momentum signal, then bought on paper."
+                            else "Off: an Analyst pass is bought on sight and winners are closed by hand.",
+                            color = P.muted,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = view.enabled,
+                        onCheckedChange = { onStrategy(mapOf("enabled" to it)) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = P.accent, checkedThumbColor = P.onAccent, uncheckedTrackColor = P.card3, uncheckedThumbColor = P.muted, uncheckedBorderColor = P.lineStrong)
+                    )
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    Stat("Watching", "${view.watching}")
+                    Stat("Signals", "${view.signals}")
+                    Stat("Open", "${view.variants.filter { it.active }.sumOf { it.open }}")
+                }
+            }
+        }
+        item {
+            Section("Sizing", padded = true) {
+                Stepper("Trade size", "$" + "%.0f".format(Locale.US, view.tradeUsd), onMinus = { onStrategy(mapOf("tradeUsd" to (view.tradeUsd - 5).coerceAtLeast(5.0))) }, onPlus = { onStrategy(mapOf("tradeUsd" to (view.tradeUsd + 5).coerceAtMost(500.0))) })
+                Stepper("Take-profit, net", "$" + "%.2f".format(Locale.US, view.targetNetUsd), onMinus = { onStrategy(mapOf("targetNetUsd" to (view.targetNetUsd - 0.5).coerceAtLeast(0.25))) }, onPlus = { onStrategy(mapOf("targetNetUsd" to (view.targetNetUsd + 0.5).coerceAtMost(50.0))) })
+                Stepper("Max open", "${view.maxOpen}", onMinus = { onStrategy(mapOf("maxOpen" to (view.maxOpen - 1).coerceAtLeast(1))) }, onPlus = { onStrategy(mapOf("maxOpen" to (view.maxOpen + 1).coerceAtMost(6))) })
+                Text("Paper only. New engine buys pause once the paper book is $10 down on the day.", color = P.muted, fontSize = 12.sp)
+            }
+        }
+        item {
+            Text("SCORECARD", color = P.faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, modifier = Modifier.padding(start = 2.dp, top = 4.dp))
+        }
+        for (signal in listOf("launch", "momentum")) {
+            val rows = view.variants.filter { it.signal == signal }
+            if (rows.isEmpty()) continue
+            item {
+                Section(
+                    if (signal == "launch") "Launch · under 30 min old" else "Momentum · 30 min and older",
+                    trailing = "${rows.sumOf { it.trades }} trades"
+                ) {
+                    rows.forEachIndexed { i, row ->
+                        VariantRow(row) { onStrategy(mapOf("active" to mapOf(row.signal to row.variant))) }
+                        if (i < rows.lastIndex) RowDivider()
+                    }
+                }
+            }
+        }
+        item {
+            Text(
+                "In use: the stop the main paper book trades with. Ready: ${view.readyTrades}+ trades with a net profit; it is information and arms nothing. " + view.note,
+                color = P.muted,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+        }
+        if (perf.isNotEmpty()) {
+            item {
+                Section("Pipeline timing", trailing = "median · 90th") {
+                    perf.forEachIndexed { i, row ->
+                        ListRow(Perf.label(row.step), "${row.count} samples · worst ${Perf.ms(row.maxMs)}", trailing = {
+                            Text("${Perf.ms(row.p50Ms)} · ${Perf.ms(row.p90Ms)}", color = P.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        })
+                        if (i < perf.lastIndex) RowDivider()
+                    }
+                }
+            }
+        }
+        item {
+            TextButton(onClick = { askReset = true }) { Text("Reset scorecard", color = P.down, fontWeight = FontWeight.SemiBold) }
+        }
+    }
+    if (askReset) {
+        AlertDialog(
+            onDismissRequest = { askReset = false },
+            containerColor = P.card,
+            titleContentColor = P.ink,
+            textContentColor = P.ink,
+            title = { Text("Reset the scorecard?") },
+            text = { Text("Every shadow book goes back to $100 and its trades are deleted. The main paper book is not touched.") },
+            confirmButton = { TextButton(onClick = { askReset = false; onReset() }) { Text("Reset", color = P.down, fontWeight = FontWeight.Bold) } },
+            dismissButton = { TextButton(onClick = { askReset = false }) { Text("Cancel", color = P.muted) } }
+        )
+    }
+}
+
+@Composable
+private fun VariantRow(row: VariantScore, onUse: () -> Unit) {
+    val tint = if (row.trades <= 0) P.muted else pnlTint(row.netUsd)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(if (row.active) P.accent else P.line))
+            Text("${"%.0f".format(Locale.US, row.stopPct * 100)}% stop", color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            if (row.ready) Chip("Ready", P.onUp, P.up, size = 10)
+            if (row.active) Chip("In use", P.accent, P.accent.copy(alpha = 0.16f), size = 10)
+            else Text("Use", color = P.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable(onClick = onUse).padding(horizontal = 6.dp, vertical = 4.dp))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Stat("Net", if (row.trades > 0) Strategy.signedUsd(row.netUsd) else "—", tint, big = true)
+            Stat("Trades", "${row.trades}" + (if (row.open > 0) " · ${row.open} open" else ""))
+            Stat("Win", if (row.trades > 0) "%.0f%%".format(Locale.US, row.winRate * 100) else "—")
+            Stat("Avg", if (row.trades > 0) Strategy.signedUsd(row.avgNetUsd) else "—", tint)
+        }
+        if (row.trades > 0) {
+            Text(
+                "avg win ${Strategy.signedUsd(row.avgWinUsd)} · avg loss ${Strategy.signedUsd(row.avgLossUsd)} · worst drawdown $" + "%.2f".format(Locale.US, row.maxDrawdownUsd),
+                color = P.muted,
+                fontSize = 11.5.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun Stepper(label: String, value: String, onMinus: () -> Unit, onPlus: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = P.ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        StepButton("−", onMinus)
+        Text(value, color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp))
+        StepButton("+", onPlus)
+    }
+}
+
+@Composable
+private fun StepButton(glyph: String, onClick: () -> Unit) {
+    Box(
+        Modifier.size(34.dp).clip(CircleShape).background(P.card3).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) { Text(glyph, color = P.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+}

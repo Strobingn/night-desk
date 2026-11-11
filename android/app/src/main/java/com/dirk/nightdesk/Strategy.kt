@@ -34,6 +34,37 @@ data class StrategyView(
     val note: String
 )
 
+/** One pipeline step's timing from the desk's `perf` block. */
+data class PerfRow(val step: String, val count: Int, val p50Ms: Long, val p90Ms: Long, val maxMs: Long)
+
+object Perf {
+    private val ORDER = listOf("sightingToCandidate", "candidateToDecision", "watchToSignal", "signalToFill")
+    private val LABELS = mapOf(
+        "sightingToCandidate" to "Sighting → candidate",
+        "candidateToDecision" to "Candidate → decision",
+        "watchToSignal" to "Watch → signal",
+        "signalToFill" to "Signal → fill"
+    )
+
+    fun parse(json: JSONObject?): List<PerfRow> {
+        if (json == null) return emptyList()
+        val rows = ArrayList<PerfRow>()
+        for (key in json.keys()) {
+            val row = json.optJSONObject(key) ?: continue
+            rows.add(PerfRow(key, row.optFinite("count").toInt(), row.optFinite("p50Ms").toLong(), row.optFinite("p90Ms").toLong(), row.optFinite("maxMs").toLong()))
+        }
+        return rows.sortedBy { ORDER.indexOf(it.step).let { i -> if (i < 0) ORDER.size else i } }
+    }
+
+    fun label(step: String): String = LABELS[step] ?: step
+
+    fun ms(n: Long): String = when {
+        n >= 60_000 -> "%.1f min".format(Locale.US, n / 60_000.0)
+        n >= 1_000 -> "%.1f s".format(Locale.US, n / 1_000.0)
+        else -> "$n ms"
+    }
+}
+
 object Strategy {
     fun parse(json: JSONObject?): StrategyView? {
         if (json == null) return null

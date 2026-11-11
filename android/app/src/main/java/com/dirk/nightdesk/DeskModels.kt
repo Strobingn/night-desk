@@ -445,7 +445,9 @@ data class DeskSnapshot(
     /** v13.29 enrich RPC hostname. Null on an older desk. Off Helius, holder count is the top 20. */
     val enrichHost: String? = null,
     /** v13.30 trading engine and its scorecard. Null on an older desk. */
-    val strategy: StrategyView? = null
+    val strategy: StrategyView? = null,
+    /** v13.32 pipeline timings from the desk. Empty on an older desk. */
+    val perf: List<PerfRow> = emptyList()
 )
 
 data class SafetyChip(val mint: String, val safety: String, val bundle: String = "")
@@ -871,7 +873,8 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         senderTipSol = (prefs?.optFinite("senderTipSol", 0.000005) ?: 0.000005).coerceAtLeast(0.000005),
         safetyChips = parseSafetyChips(data.optJSONArray("safetyChips")),
         enrichHost = data.optJSONObject("enrich")?.optText("host")?.ifBlank { null },
-        strategy = Strategy.parse(data.optJSONObject("strategy"))
+        strategy = Strategy.parse(data.optJSONObject("strategy")),
+        perf = Perf.parse(data.optJSONObject("perf"))
     )
 }
 

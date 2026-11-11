@@ -21,6 +21,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -369,3 +373,123 @@ fun signedPct(fraction: Double): String {
     val sign = when { fraction > 0 -> "+"; fraction < 0 -> "−"; else -> "" }
     return sign + "%.2f".format(Locale.US, kotlin.math.abs(fraction * 100)) + "%"
 }
+
+/* ---------- v13.32 list rows and sections: one shape for every screen ---------- */
+
+/**
+ * A row in a list: optional leading slot, a title, an optional second line, a trailing slot.
+ * Every settings row, "More" entry and secondary list uses this so the screens read the same.
+ */
+@Composable
+fun ListRow(
+    title: String,
+    subtitle: String? = null,
+    modifier: Modifier = Modifier,
+    leading: (@Composable () -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    titleColor: Color = P.ink,
+    onClick: (() -> Unit)? = null
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, color = titleColor, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!subtitle.isNullOrBlank()) Text(subtitle, color = P.muted, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        if (trailing != null) {
+            Spacer(Modifier.width(10.dp))
+            trailing()
+        }
+    }
+}
+
+/** Small chevron for rows that open something. */
+@Composable
+fun Chevron(tint: Color = P.faint) {
+    Text("›", color = tint, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+}
+
+/** A one-dp line between rows in a section. */
+@Composable
+fun RowDivider() {
+    Box(Modifier.fillMaxWidth().padding(start = 14.dp).height(1.dp).background(P.line))
+}
+
+/**
+ * A titled card with rows inside. `trailing` sits at the right of the title (a count, a status).
+ * With `collapsible`, the title toggles the body; `open` is the starting state.
+ */
+@Composable
+fun Section(
+    title: String,
+    modifier: Modifier = Modifier,
+    trailing: String? = null,
+    trailingColor: Color = P.muted,
+    collapsible: Boolean = false,
+    open: Boolean = true,
+    padded: Boolean = false,
+    body: @Composable () -> Unit
+) {
+    var shown by rememberSaveable(title) { mutableStateOf(open) }
+    Column(modifier.deskCard(radius = 16.dp)) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .then(if (collapsible) Modifier.clickable { shown = !shown } else Modifier)
+                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = if (shown || !collapsible) 6.dp else 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = P.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.3.sp, modifier = Modifier.weight(1f))
+            if (trailing != null) Text(trailing, color = trailingColor, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (collapsible) {
+                Spacer(Modifier.width(8.dp))
+                Text(if (shown) "▴" else "▾", color = P.faint, fontSize = 12.sp)
+            }
+        }
+        if (shown || !collapsible) {
+            if (padded) Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { body() }
+            else Column(Modifier.padding(bottom = 4.dp)) { body() }
+        }
+    }
+}
+
+/** Label over value, for a row of three or four numbers. */
+@Composable
+fun RowScope.Stat(label: String, value: String, tint: Color = P.ink, big: Boolean = false) {
+    Column(Modifier.weight(1f)) {
+        Text(label.uppercase(Locale.US), color = P.faint, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp, maxLines = 1)
+        Text(value, color = tint, fontSize = if (big) 18.sp else 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Thin horizontal bar: `fraction` of the width filled, 0..1. */
+@Composable
+fun ThinBar(fraction: Float, color: Color, modifier: Modifier = Modifier, track: Color = P.card3) {
+    val f = fraction.coerceIn(0f, 1f)
+    Box(modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(track)) {
+        Box(Modifier.fillMaxWidth(f).height(4.dp).background(color))
+    }
+}
+
+/** A small "Hide ▴ / More ▾" text toggle. */
+@Composable
+fun Disclosure(open: Boolean, openLabel: String = "Hide", closedLabel: String = "Details", onToggle: () -> Unit) {
+    Text(
+        if (open) "$openLabel ▴" else "$closedLabel ▾",
+        color = P.accent,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.clickable(onClick = onToggle).padding(vertical = 6.dp)
+    )
+}
+
+fun pnlTint(n: Double): Color = if (n > 0) P.up else if (n < 0) P.down else P.muted

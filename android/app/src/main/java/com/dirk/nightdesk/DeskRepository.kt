@@ -744,6 +744,22 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** v13.30 trading engine switch and active variants. The desk answers with the new scorecard. */
+    /** v13.32 wipe the shadow books. The main paper book is untouched. */
+    suspend fun resetStrategy(): DeskNotice = withContext(Dispatchers.IO) {
+        val base = link.baseUrl
+        if (base.isBlank()) {
+            val notice = DeskNotice(false, "No desk URL")
+            _notice.value = notice
+            return@withContext notice
+        }
+        val notice = post("$base/api/strategy/reset", JSONObject().put("confirm", true).toString()).fold(
+            onSuccess = { DeskNotice(true, "Scorecard reset. Every shadow book is back to its starting balance.") },
+            onFailure = { err -> DeskNotice(false, err.message ?: "Scorecard reset refused.") }
+        )
+        _notice.value = notice
+        notice
+    }
+
     suspend fun saveStrategy(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) {
