@@ -96,6 +96,11 @@ describe("strategy engine", () => {
     again.reset();
     expect(store.all()).toEqual([]);
     expect(again.scorecard().variants.every((v) => v.trades === 0)).toBe(true);
+    expect(engine.stats.signals.launch).toBeGreaterThan(0);
+    expect(engine.stats.shadowCloses).toBeGreaterThan(0);
+    engine.reset();
+    expect(engine.scorecard().stats).toMatchObject({ watched: 0, signals: { launch: 0, momentum: 0 }, shadowOpens: 0, shadowCloses: 0, errors: 0, lastError: null });
+    expect(engine.scorecard().variants.every((v) => v.trades === 0)).toBe(true);
   });
 
   it("a shadow book that throws is counted and does not stop the signal or the other books", () => {

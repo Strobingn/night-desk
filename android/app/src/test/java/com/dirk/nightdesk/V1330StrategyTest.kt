@@ -83,7 +83,9 @@ class V1330StrategyTest {
     @Test
     fun engineStopCountsAsAStopForAlerts() {
         assertTrue(OneTap.isStopExit("STRATEGY_STOP"))
+        assertTrue(OneTap.isStopExit("BREAKEVEN_STOP"))
         assertFalse(OneTap.isStopExit("TAKE_PROFIT"))
+        assertFalse(OneTap.isStopExit("TIME_LIMIT"))
         assertEquals("take-profit", OneTap.exitLabel("TAKE_PROFIT"))
         assertEquals("time limit", OneTap.exitLabel("TIME_LIMIT"))
     }

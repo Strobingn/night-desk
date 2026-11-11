@@ -173,6 +173,28 @@ describe("trading engine on the desk", () => {
     }
   });
 
+  it("holds two engine positions at most even when several coins signal in one pass", async () => {
+    const desk = engineDesk({ tradeUsd: 5 });
+    try {
+      const mints = [1, 2, 3].map((n) => `EngineRace${n}1111111111111111111111111111`);
+      for (const [i, mint] of mints.entries()) {
+        const token = young({ mint, symbol: `R${i + 1}`, priceUsd: 0.001 });
+        await desk.submitCandidate(token);
+        const t = Date.now();
+        await desk.submitStrategyQuote(mint, quote(t + 10_000, token.priceUsd * 1.01), t + 10_000);
+        expect(desk.book.positions.has(mint)).toBe(false);
+      }
+      const t = Date.now();
+      const fired = quote(t + 22_000, 0.001 * 1.025);
+      for (const mint of mints) desk.strategyQuote(mint, fired, t + 22_000);
+      await desk.submitStrategyQuote(mints[0]!, fired, t + 22_000);
+      expect([...desk.book.positions.values()].filter((p) => p.strategy).length).toBe(2);
+      expect(codes(desk)).toContain("MAX_OPEN_POSITIONS");
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("holds two engine positions at most", async () => {
     const desk = engineDesk();
     try {

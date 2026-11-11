@@ -307,13 +307,21 @@ export class StrategyEngine {
     };
   }
 
-  /** Wipe every shadow book and its saved trades. The watch list is kept. */
+  /** Wipe every shadow book, its saved trades, and the session counters. The watch list is kept. */
   reset(): void {
     try {
       this.store?.clear();
     } catch (err) {
       this.fail("clear", err);
+      return;
     }
+    this.stats.watched = 0;
+    this.stats.signals.launch = 0;
+    this.stats.signals.momentum = 0;
+    this.stats.shadowOpens = 0;
+    this.stats.shadowCloses = 0;
+    this.stats.errors = 0;
+    this.stats.lastError = null;
     this.loadBooks();
   }
 }

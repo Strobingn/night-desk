@@ -175,7 +175,7 @@ object OneTap {
     }
 
     /** Stop-type exits that should ping when Stops alerts are on. */
-    fun isStopExit(code: String?): Boolean = code == "STOP_LOSS" || code == "TRAIL_STOP" || code == "GAP_RUG" || code == "STRATEGY_STOP"
+    fun isStopExit(code: String?): Boolean = code == "STOP_LOSS" || code == "TRAIL_STOP" || code == "GAP_RUG" || code == "STRATEGY_STOP" || code == "BREAKEVEN_STOP"
 
     private fun signed(n: Double): String = (if (n > 0) "+" else if (n < 0) "−" else "") + formatUsd(kotlin.math.abs(n))
     private fun pct(f: Double): String = (if (f > 0) "+" else if (f < 0) "−" else "") + "%.2f".format(java.util.Locale.US, kotlin.math.abs(f * 100)) + "%"

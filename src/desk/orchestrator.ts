@@ -341,6 +341,8 @@ export class Desk {
   /** Price feed each watched coin is anchored to. A quote from another feed is not used. */
   private strategyFeed = new BoundedMap<string, string | undefined>(400);
   private strategyExitRetryAt = new Map<string, number>();
+  /** Engine buys that passed the cap and have not filled yet. Counted with open positions so one quote pass cannot slip past maxOpen. */
+  private readonly strategyOpening = new Set<string>();
   readonly latency = new LatencyStats();
   private candidateAt = new BoundedMap<string, number>(2_000);
   private watchAt = new BoundedMap<string, number>(400);
@@ -1267,7 +1269,12 @@ export class Desk {
       this.pipeline.executorSkips += 1;
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Executor skipped ${token.symbol}. ${message}` });
     };
-    const open = [...this.book.positions.values()].filter((pos) => pos.strategy && !pos.closing).length;
+    // Reserve before the first await. strategyPass starts every signalling mint in one turn, and tokenSafety yields.
+    if (this.strategyOpening.has(token.mint)) {
+      skip("MAX_OPEN_POSITIONS", `The engine already has a buy in progress for ${token.symbol}. It holds ${this.strategy.settings.maxOpen} at most.`);
+      return;
+    }
+    const open = [...this.book.positions.values()].filter((pos) => pos.strategy && !pos.closing).length + this.strategyOpening.size;
     if (open >= this.strategy.settings.maxOpen) {
       skip("MAX_OPEN_POSITIONS", `The engine already has ${open} open. It holds ${this.strategy.settings.maxOpen} at most.`);
       return;
@@ -1277,8 +1284,13 @@ export class Desk {
       skip("DAILY_LOSS", `The paper book is ${money(net)} on the day, past the engine's $${STRATEGY.dailyMaxLossUsd.toFixed(0)} pause. It resumes on the next UTC day.`);
       return;
     }
-    await this.buyIfSafe({ token, score, breakdown: [], decision: "trade" }, { sizeUsd: this.strategy.settings.tradeUsd, tag: fired.signal.signal, meta });
-    if (this.book.positions.get(token.mint)?.strategy) this.latency.record("signalToFill", Date.now() - startedAt);
+    this.strategyOpening.add(token.mint);
+    try {
+      await this.buyIfSafe({ token, score, breakdown: [], decision: "trade" }, { sizeUsd: this.strategy.settings.tradeUsd, tag: fired.signal.signal, meta });
+      if (this.book.positions.get(token.mint)?.strategy) this.latency.record("signalToFill", Date.now() - startedAt);
+    } finally {
+      this.strategyOpening.delete(token.mint);
+    }
   }
 
   /** Today's paper result (UTC day): closed trades plus what the open positions are showing. */
