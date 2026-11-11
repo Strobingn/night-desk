@@ -76,7 +76,7 @@
     "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current.",
     "13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard ready flag arms nothing.",
     "13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5/$20 limits.",
-    "13.32: an explicit manual paper or live buy bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path."
+    "13.32: an explicit manual paper or live buy (POST /api/positions/buy) bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. A resting limit fill does not skip that ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path."
   ],
   "manualOverride": {
     "version": "13.32",
@@ -84,7 +84,8 @@
     "route": "POST /api/positions/buy",
     "source": "manual",
     "books": ["paper", "live"],
-    "bypasses": ["engine watch / SIGNAL_WATCH", "analyst score", "soft filter", "hard-stop ban"],
+    "bypasses": ["engine watch / SIGNAL_WATCH", "analyst score", "soft filter", "hard-stop ban on POST /api/positions/buy only"],
+    "limitFills": "A resting limit buy calls manualBuy without ignoreCooldown, so a hard-stop ban still refuses it.",
     "stillHeld": "HARD_KILL until confirmHardKill (mint authority, dev rug, token safety blocked). The confirm may be live.",
     "logCode": "MANUAL_OVERRIDE",
     "engineAndAi": "paper only. strategyBuy never names the live book. source analyst plus book live returns LIVE_AI_BLOCKED. POST /api/settings liveAutoBuy true is refused."

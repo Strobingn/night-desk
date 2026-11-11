@@ -2330,6 +2330,7 @@ export class Desk {
     // Opinion gates (engine watch, analyst line, soft filter, hard-stop ban) warn and do not refuse.
     // Hard kills still use Buy anyway: the first tap is held, the confirm buys.
     const notes: string[] = [];
+    let heldByBan = false;
     if (!this.bk(kind).positions.has(token.mint)) {
       const rug = await this.rugs.lookup(token.devWallet);
       const failed = evaluateFilter(token, rug, this.config.rules, {
@@ -2367,12 +2368,15 @@ export class Desk {
       }
       if (soft.length) notes.push(`Filter killed ${token.symbol}. ${soft.map((check) => check.message).join(" ")}`);
       const until = this.cooldowns.get(bookKey(kind, token.mint)) ?? 0;
-      if (until > Date.now()) {
+      const banned = until > Date.now();
+      // Only an explicit tap sets ignoreCooldown. A limit fill does not, so the ban still refuses it.
+      if (banned && opts?.ignoreCooldown === true) {
         const mins = Math.ceil((until - Date.now()) / 60_000);
         notes.push(`Mint is banned after a hard stop. Cooldown has about ${mins} minute(s) left. Auto buys stay blocked.`);
-      }
+      } else if (banned) heldByBan = true;
     }
-    const warning = notes.length ? `${notes.join(" ")} Manual ${kind} buy goes through.` : undefined;
+    const bypassBan = opts?.ignoreCooldown === true;
+    const warning = notes.length && !heldByBan ? `${notes.join(" ")} Manual ${kind} buy goes through.` : undefined;
     if (warning) {
       this.log({
         stage: "system",
@@ -2384,8 +2388,8 @@ export class Desk {
       });
     }
     const tag = looked ? positionTag(looked.platform) : undefined;
-    // A manual buy is Dirk's call, including past a hard-stop ban. Analyst and engine buys do not set this.
-    return this.executeBuy(token, score, sizeUsd, "manual", true, {
+    // Explicit taps pass ignoreCooldown. Limit fills do not, so a hard-stop ban still blocks them.
+    return this.executeBuy(token, score, sizeUsd, "manual", bypassBan, {
       confirmSize: opts?.confirmSize === true,
       tag,
       book: kind,

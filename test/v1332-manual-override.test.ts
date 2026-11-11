@@ -195,6 +195,40 @@ describe("v13.32 manual live override", () => {
     }
   });
 
+  it("keeps a hard-stop ban on a resting limit buy and still lets an explicit tap through", async () => {
+    const desk = armed();
+    desk.updateSettings({ cooldownHours: 1, autoBuy: false });
+    const mint = "BanMint111111111111111111111111111111111";
+    try {
+      await desk.submitCandidate(makeToken({ mint, symbol: "BAN", priceUsd: 1, liquidityUsd: 180_000 }));
+      const opened = await desk.manualBuy(mint, 5, { book: "paper", ignoreCooldown: true });
+      expect(opened.ok).toBe(true);
+      await desk.markPrice(mint, 0.93);
+      expect(desk.book.positions.has(mint)).toBe(false);
+
+      const blocked = await desk.manualBuy(mint, 5, { book: "paper" });
+      expect(blocked).toMatchObject({ ok: false, code: "REVENGE_COOLDOWN" });
+
+      const placed = desk.placeOrder({ side: "limit_buy", mint, basis: "price", value: 0.5, sizeUsd: 5, book: "paper" });
+      expect(placed.ok).toBe(true);
+      await desk.markPrice(mint, 0.5);
+      await desk.ordersSettled();
+      expect(desk.book.positions.has(mint)).toBe(false);
+      const resting = desk.snapshot().orders?.find((order) => order.mint === mint && order.side === "limit_buy");
+      expect(resting?.status).not.toBe("filled");
+      expect(resting?.note ?? "").toMatch(/banned|Cooldown/i);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 61_000);
+      const explicit = await desk.manualBuy(mint, 5, { book: "paper", ignoreCooldown: true });
+      expect(explicit.ok).toBe(true);
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      desk.stop();
+    }
+  });
+
   it("still stops at the $20 live daily cap", async () => {
     const desk = armed();
     desk.setOperatorReady(true);
