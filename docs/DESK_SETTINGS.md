@@ -1,8 +1,8 @@
 # Night Desk settings
 
-Last updated: 2026-11-11 1:52 PM ET
+Last updated: 2026-11-11 2:33 PM ET (13.31). Live prefs and rules are the 1:46 PM ET pull.
 
-These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). This note adds **13.30**: the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback. Those engine numbers are the 13.30 code (`src/strategy/config.ts`), not a second live pull. Oracle does not serve them until this release is deployed.
+These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
 **Every Night Desk release must update both files in the same PR.** Re-pull live settings, and add any new endpoints, env names, or controls the release introduces. Never put token values, private keys, or RPC URLs that carry an API key (path or query) in this repo. Hostnames only. A wallet pubkey is fine.
 
@@ -15,6 +15,8 @@ Machine-readable copy: [`docs/desk-settings.json`](desk-settings.json).
 - Never drop the v13.11 baseline controls (paper and live limit / take-profit / stop orders, and the rest of that book and ticket UI).
 - Bogus-price rejection stays on (`src/market/mark-guard.ts`). Non-finite or non-positive prints are rejected. Implausible upward jumps and unit / decimal or SOL-vs-USD mix-ups (including a rise of 25× or more) do not update equity or stops unless confirmed. A genuine crash is never rejected by this guard, so the hard stop can still fire.
 - The hard stop cannot be loosened past 6%. `LIVE_TRADING`, the wallet secret, and mode cannot be changed from the API.
+- 13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard `ready` flag arms nothing.
+- 13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5 / $20 limits.
 - Leave live trade size at $5 and the daily cap at $20, exit slippage at 6%, cooldown at 0, and the Helius lane caps (10 read + 8 exec, combined `reqLastMin` never above 18) unless Dirk approves a change.
 
 ## Backend
@@ -56,10 +58,10 @@ A first visit may carry `?token=`. The page copies it into `sessionStorage` key 
 | Method | Path | Key response fields |
 |---|---|---|
 | GET | `/api/health` | `ok`, `mode`, `now`, `publicUrl` (null on the Caddy host) |
-| GET | `/api/state` | `appVersion`, `mode`, `liveScope`, `liveBook`, `wallet`, `readiness`, `cashUsd`, `equityUsd`, `startingBalanceUsd`, `sessionPnlUsd`, `prefs`, `rules`, `positions`, `closed`, `orders`, `strategy`, `perf`, `feed`, `pipeline`, `killReasons`, `recheck`, `enrich`, `events`, `advice`, `watchlist`, `exposureUsd`, `positionCapUsd`, `cooldowns`, `rawTape`, `tapeQuotes`, `markLoop`, `safetyChips`, `lastClientCrash`, `now` |
-| GET | `/api/strategy/scorecard` | `ok`, `strategy` (same scorecard as `state.strategy`: switch, sizes, active variants, shadow-book rows) |
-| POST | `/api/strategy/settings` | `ok`, `strategy`, `error`. Body may set `enabled`, `tradeUsd` ($5–$500), `targetNetUsd` ($0.25–$50), `maxOpen` (1–6), and `active.launch` / `active.momentum` (`launch-1`, `launch-3`, `launch-6`, `momentum-1`, `momentum-3`, `momentum-6`). Saved in SQLite KV key `strategy`. Does not arm live trading. |
-| POST | `/api/strategy/reset` | Wipes the shadow books when the body is `{"confirm":true}`. The main paper book is not touched. |
+| GET | `/api/state` | `appVersion`, `mode`, `liveScope`, `liveBook`, `wallet`, `readiness`, `cashUsd`, `equityUsd`, `startingBalanceUsd`, `sessionPnlUsd`, `prefs`, `rules`, `positions`, `closed`, `orders`, `feed`, `pipeline`, `killReasons`, `recheck`, `enrich`, `events`, `advice`, `watchlist`, `exposureUsd`, `positionCapUsd`, `cooldowns`, `rawTape`, `tapeQuotes`, `markLoop`, `safetyChips`, `lastClientCrash`, `strategy`, `perf`, `now` |
+| GET | `/api/strategy/scorecard` | `ok`, `strategy` (same scorecard as `state.strategy`): engine settings, watch count, six shadow-book rows (`trades`, `wins`, `winRate`, `avgWinUsd`, `avgLossUsd`, `netUsd`, `avgNetUsd`, `maxDrawdownUsd`, `open`, `active`, `ready`), `stats`, `note`. Paper only. |
+| POST | `/api/strategy/settings` | `ok`, `strategy`, `error`. Body may set `enabled`, `tradeUsd` ($5–$500), `targetNetUsd` ($0.25–$50), `maxOpen` (1–6), and `active` (`{launch, momentum}` variant ids: `launch-1`, `launch-3`, `launch-6`, `momentum-1`, `momentum-3`, `momentum-6`). Saved in SQLite KV key `strategy`. Cannot arm live. |
+| POST | `/api/strategy/reset` | Requires `confirm: true`. Wipes the shadow books and `shadow_trades`. The main paper book is not touched. |
 | GET | `/api/events` | `events` (query: `limit`, `stage`, `before`) |
 | POST | `/api/settings` | `ok`, `settings`, `error`. Body is a partial object of allowed keys only. `liveAutoBuy: true` is refused. Wallet secrets, `LIVE_TRADING`, and `mode` are blocked. |
 | POST | `/api/positions/buy` | `ok`, `error`, `code`, `ms`, `replayed`. Body: `mint`, optional `sizeUsd`, `book`, `idemKey`, confirm flags. On an armed desk the client must name `book` (`paper` or `live`); omitted is refused, not live. |
@@ -83,9 +85,9 @@ Allowed `POST /api/settings` keys: `liveTradeUsd`, `liveDailyCapUsd`, `liveTrail
 
 `scoutPump` is display-only and always on.
 
-## Trading engine (13.30)
+## Trading engine (13.31, same behavior as 13.30)
 
-On for a live feed. `strategyEngine` defaults on when `FEED_MODE=live` and the demo tape is off. Production has `FEED_MODE=live` and `DEMO_FEED=0`, and it does not set `STRATEGY_ENGINE`, so a 13.30 boot turns the engine on. `STRATEGY_ENGINE=0` would turn that default off. A saved Settings → Trading engine switch (SQLite key `strategy`) wins after boot. Dirk approved leaving that default-on logic as it is, including the $10 UTC-day paper-loss pause.
+On for a live feed. `strategyEngine` defaults on when `FEED_MODE=live` and the demo tape is off. Production has `FEED_MODE=live` and `DEMO_FEED=0`, and it does not set `STRATEGY_ENGINE`, so a 13.31 boot turns the engine on. `STRATEGY_ENGINE=0` would turn that default off. A saved Settings → Trading engine switch (SQLite key `strategy`) wins after boot. Dirk approved leaving that default-on logic as it is, including the $10 UTC-day paper-loss pause.
 
 The $10 pause is a code constant (`STRATEGY.dailyMaxLossUsd` in `src/strategy/config.ts`). It is not a `POST /api/strategy/settings` field. New engine buys stop for the rest of the UTC day once today's paper result is $10 down. Shadow books use the same pause. It does not change the live $5 / $20 caps.
 
@@ -146,6 +148,21 @@ Pulled 2026-11-11 1:46 PM ET (prefs / rules on `/api/state`). Percents are shown
 | Daily max loss $ | 0 (off) |
 | Paper reset $ | $100 |
 | Position price refresh | 1 s |
+
+### Trading engine defaults (13.31)
+
+Stored in SQLite KV key `strategy`, not in `prefs`. Code defaults below; re-pull after deploy.
+
+| Setting | Default | Notes |
+|---|---|---|
+| Engine | **on** for live feeds | `FEED_MODE=live` and `DEMO_FEED=0` on this host, so on unless a saved switch says off. `STRATEGY_ENGINE=0` makes the default off. |
+| Take-profit | $3.00 net | After modeled fees and slippage. |
+| Trade size | $50 | Paper. Under the 50% auto ceiling and the exposure cap. |
+| Max open | 2 | Engine positions. `maxOpenPositions` still caps the book. |
+| Active variants | `launch-1`, `momentum-1` | 1% stop. Production's hard stop is 2.5% (tighter than the −6% floor) and is checked first, so a 3% or 6% active variant never reaches its own stop on the main book. |
+| Daily pause | $10 down on the UTC day | Fixed in `src/strategy/config.ts`. |
+| Time limits | 10 min Launch, 30 min Momentum | Fixed in code. |
+| Shadow books | six, $100 each | `shadow_trades` table. Open shadow positions are dropped on restart. Ready = 200 trades with a net profit; information only. |
 
 ### Live caps
 
@@ -229,8 +246,9 @@ Production file: `/etc/night-desk/night-desk.env` (mode 0600). Names only follow
 | `LOG_FILE` | `/var/lib/night-desk/desk.log` |
 | `ADVISOR_PATH` | `/var/lib/night-desk/advisor.json` |
 | `NODE_OPTIONS` | `--max-old-space-size=384` |
+| `STRATEGY_ENGINE` | not set (optional; `1`/`0` sets the engine default). Unset, a 13.31 boot turns the engine on. |
 
-**Present in code, not in the production env file:** `STRATEGY_ENGINE`. Unset, a live feed (`FEED_MODE=live`, `DEMO_FEED=0`) boots the trading engine on. `1` / `true` / `on` forces it on. `0` / `false` / `off` forces it off. The saved phone switch wins after that.
+**Present in code, not in the production env file:** `STRATEGY_ENGINE`. Unset, a live feed (`FEED_MODE=live`, `DEMO_FEED=0`) boots the trading engine on (13.31 included). `1` / `true` / `on` forces it on. `0` / `false` / `off` forces it off. The saved phone switch wins after that.
 
 **Present in `.env.example` but not in the production env file** (code defaults apply): `PAPER_RESET`, `SCOUT_ENRICH_CONCURRENCY` (8), `SCOUT_ENRICH_QUEUE` (160), `OPENAI_MODEL` (`gpt-4o-mini`), `PUMP_WS_URL` (`wss://pumpportal.fun/api/data`), `RUGCHECK_API_URL` (`https://api.rugcheck.xyz/v1`), `JUPITER_QUOTE_URL` / `JUPITER_SWAP_URL` (lite-api.jup.ag), `RUG_WALLETS_FILE`. `STRATEGY_ENGINE` is not in `.env.example`.
 
@@ -240,9 +258,10 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.30** (`APP_VERSION` in `src/desk/crash-card.ts`). Not deployed at the 1:46 PM ET pull. |
+| Code version | **13.31** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.31, `versionCode` 1331, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. |
+| Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
-| Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.30 boots the engine on. |
+| Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
 
 Standing release pipeline:
 
