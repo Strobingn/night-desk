@@ -113,6 +113,19 @@ export function startServer(
         if (!result.ok) return json(res, 400, result);
         return json(res, 200, { ok: true, ...result.settings, settings: result.settings });
       }
+      if (url.pathname === "/api/strategy/scorecard" && req.method === "GET") {
+        return json(res, 200, { ok: true, strategy: desk.strategyView() });
+      }
+      if (url.pathname === "/api/strategy/settings" && req.method === "POST") {
+        const result = desk.updateStrategy(await readJson(req));
+        return json(res, result.ok ? 200 : 400, result);
+      }
+      if (url.pathname === "/api/strategy/reset" && req.method === "POST") {
+        const body = await readJson(req);
+        const confirm = Boolean(body && typeof body === "object" && (body as { confirm?: unknown }).confirm === true);
+        const result = desk.resetStrategy(confirm);
+        return json(res, result.ok ? 200 : 400, result);
+      }
       if (url.pathname === "/api/paper/reset" && req.method === "POST") {
         const body = await readJson(req);
         const confirm = Boolean(body && typeof body === "object" && "confirm" in body && (body as { confirm?: unknown }).confirm === true);

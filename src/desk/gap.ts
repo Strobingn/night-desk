@@ -60,6 +60,14 @@ export function exitLabel(code: string): string {
       return "manual sell";
     case "PARTIAL_SELL":
       return "partial sell";
+    case "TAKE_PROFIT":
+      return "take-profit";
+    case "STRATEGY_STOP":
+      return "engine stop";
+    case "BREAKEVEN_STOP":
+      return "breakeven";
+    case "TIME_LIMIT":
+      return "time limit";
     default:
       return code.toLowerCase().replace(/_/g, " ");
   }
