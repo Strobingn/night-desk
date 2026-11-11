@@ -334,6 +334,8 @@ export class Scout {
       const token = await enrichSighting(raw, {
         rpcUrl: this.opts.rpcUrl,
         fetchImpl: this.enrichFetch,
+        // Alchemy and every other non-Helius host stay on the top-20 read. A full page of
+        // real holders is reported as 20 or more. DAS pages stay on Helius only.
         holderPagesMax: this.isHeliusEnrich() ? this.opts.holderPagesMax : 0,
         meter: this.meter,
         dexLookup: this.batcher ? (mint) => this.batcher!.get(mint) : undefined

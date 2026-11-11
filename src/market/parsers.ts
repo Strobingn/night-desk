@@ -1,5 +1,16 @@
 import { isReserveHolder, pumpReserveAddresses } from "./exclusions.js";
 
+/** getTokenLargestAccounts returns at most this many accounts. */
+export const LARGEST_HOLDER_CAP = 20;
+
+/** A share above 100% is a bad supply, not a real concentration. Null fails closed. */
+function shareOf(sum: number, supplyUi: number): number | null {
+  const pct = sum / supplyUi;
+  if (!Number.isFinite(pct) || pct < 0) return null;
+  if (pct > 1 + 1e-8) return null;
+  return Math.min(1, pct);
+}
+
 export interface ParsedMint {
   mintAuthorityRevoked: boolean | null;
   freezeAuthorityRevoked: boolean | null;
@@ -96,19 +107,59 @@ export function parseTop10Pct(
   result: unknown,
   supplyUi: number | null,
   exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {}
-): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number } {
+): { top10HolderPct: number | null; holderCount: number | null; excludedReserves: number; holderCountAtLeast: boolean } {
+  const empty = { top10HolderPct: null, holderCount: null, excludedReserves: 0, holderCountAtLeast: false };
   const rows = (result as { value?: LargestHolderRow[] })?.value;
-  if (!Array.isArray(rows) || !(supplyUi && supplyUi > 0)) {
-    return { top10HolderPct: null, holderCount: null, excludedReserves: 0 };
-  }
-  if (rows.length === 0) {
-    return { top10HolderPct: null, holderCount: null, excludedReserves: 0 };
-  }
+  if (!Array.isArray(rows) || !(supplyUi && supplyUi > 0)) return empty;
+  if (rows.length === 0) return empty;
   const retail = rows.filter((row) => !isReserveRow(row, exclude));
   const excludedReserves = rows.length - retail.length;
   const amounts = retail.slice(0, 10).map(rowAmount);
   const sum = amounts.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: retail.length, excludedReserves };
+  // A full page of 20 real holders is the RPC cap, not the whole set. Count it as 20+.
+  const holderCountAtLeast = rows.length >= LARGEST_HOLDER_CAP && excludedReserves === 0 && retail.length >= LARGEST_HOLDER_CAP;
+  return {
+    top10HolderPct: shareOf(sum, supplyUi),
+    holderCount: retail.length,
+    excludedReserves,
+    holderCountAtLeast
+  };
+}
+
+export interface DevShare {
+  /** Fraction of supply. Null when no bound can be computed, including a share above 100%. */
+  pct: number | null;
+  /** True when the dev was absent from a full top 20 and pct is the 20th account's share. */
+  upperBound: boolean;
+}
+
+/**
+ * Dev share from getTokenLargestAccounts.
+ * A matching owner (or the wallet as the account address) is an exact share.
+ * Missing from a full top 20 means the dev holds at most the smallest of those balances.
+ * Missing from a shorter list means the dev holds none of the supply. No rows, no wallet,
+ * or a share above 100% stays null so the dev gate can fail closed.
+ */
+export function devShareFromLargest(result: unknown, supplyUi: number | null, devWallet: string | null | undefined): DevShare {
+  const none: DevShare = { pct: null, upperBound: false };
+  if (!devWallet || !(supplyUi && supplyUi > 0)) return none;
+  const rows = (result as { value?: LargestHolderRow[] })?.value;
+  if (!Array.isArray(rows) || rows.length === 0) return none;
+  const owned = rows.filter((row) => row.owner === devWallet || row.address === devWallet);
+  let raw: number;
+  let upperBound = false;
+  if (owned.length > 0) {
+    raw = owned.reduce((sum, row) => sum + rowAmount(row), 0);
+  } else if (rows.length >= LARGEST_HOLDER_CAP) {
+    raw = rows.reduce((min, row) => Math.min(min, rowAmount(row)), Number.POSITIVE_INFINITY);
+    upperBound = true;
+  } else {
+    raw = 0;
+  }
+  if (!Number.isFinite(raw) || raw < 0) return none;
+  const pct = shareOf(raw, supplyUi);
+  if (pct == null) return none;
+  return { pct, upperBound };
 }
 
 export interface TokenAccountRow {
@@ -148,7 +199,7 @@ export function parseHolderAccounts(
   }
   const top10 = [...byOwner.values()].sort((a, b) => b - a).slice(0, 10);
   const sum = top10.reduce((a, b) => a + b, 0);
-  return { top10HolderPct: sum / supplyUi, holderCount: byOwner.size, excludedReserves, truncated };
+  return { top10HolderPct: shareOf(sum, supplyUi), holderCount: byOwner.size, excludedReserves, truncated };
 }
 
 function rowAmount(row: LargestHolderRow): number {
@@ -197,7 +248,7 @@ export interface ParsedRugcheck {
  * Supplemental public RugCheck report. Only positive, explicit fields are trusted.
  * A missing report leaves nulls so Filter can fail closed via on-chain data or rejection.
  */
-export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugcheck {
+export function parseRugcheckReport(report: unknown, mint?: string, extraAddresses?: readonly string[]): ParsedRugcheck {
   const data = (report ?? {}) as {
     risks?: Array<{ name?: string; level?: string; description?: string }>;
     markets?: Array<{ lp?: { lpLockedPct?: number }; lpLockedPct?: number }>;
@@ -240,7 +291,8 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
     lpLockedOrBurned = false;
   }
 
-  const holderRead = retailPctFromRugcheck(data.topHolders ?? [], mint ? new Set(pumpReserveAddresses(mint)) : undefined);
+  const reserves = new Set<string>([...(mint ? pumpReserveAddresses(mint) : []), ...(extraAddresses ?? [])]);
+  const holderRead = retailPctFromRugcheck(data.topHolders ?? [], reserves);
   const top10HolderPct = holderRead.top10HolderPct;
   const holdersExcludeReserves = holderRead.excludedReserves;
 
@@ -249,7 +301,8 @@ export function parseRugcheckReport(report: unknown, mint?: string): ParsedRugch
   if (devWallet && Array.isArray(data.topHolders)) {
     const hit = data.topHolders.find((holder) => holder.address === devWallet || holder.owner === devWallet);
     if (hit && typeof hit.pct === "number" && Number.isFinite(hit.pct)) {
-      devHoldingPct = hit.pct > 1 ? hit.pct / 100 : hit.pct;
+      const fraction = hit.pct > 1 ? hit.pct / 100 : hit.pct;
+      devHoldingPct = fraction > 1 ? null : fraction;
     }
   }
   const rugRisk = names.some((n) => /creator|deployer|dev/.test(n) && /rug|scam/.test(n));
@@ -287,7 +340,20 @@ export function retailPctFromRugcheck(
   const slice = retail.slice(0, 10);
   const usesPercent = slice.some((holder) => (holder.pct ?? 0) > 1) || holders.some((holder) => (holder.pct ?? 0) > 1);
   const sum = slice.reduce((total, holder) => total + (typeof holder.pct === "number" ? holder.pct : 0), 0);
-  return { top10HolderPct: usesPercent ? sum / 100 : sum, excludedReserves };
+  const fraction = usesPercent ? sum / 100 : sum;
+  return { top10HolderPct: fraction > 1 + 1e-8 ? null : Math.min(1, fraction), excludedReserves };
+}
+
+/** Every Solana pair address DexScreener returned for this mint. Pool vaults sit on these accounts. */
+export function dexPairAddresses(payload: unknown, mint: string): string[] {
+  const pairs = (payload as { pairs?: Array<Record<string, unknown>> })?.pairs ?? [];
+  const out: string[] = [];
+  for (const pair of pairs) {
+    const base = pair.baseToken as { address?: string } | undefined;
+    if (pair.chainId !== "solana" || base?.address !== mint) continue;
+    if (typeof pair.pairAddress === "string" && pair.pairAddress) out.push(pair.pairAddress);
+  }
+  return out;
 }
 
 export function parseDexPair(payload: unknown, mint: string): {

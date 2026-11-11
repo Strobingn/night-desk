@@ -7,20 +7,52 @@ import { PublicKey } from "@solana/web3.js";
  *
  * - Pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
  * - Pump AMM (PumpSwap) program: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+ * - PumpSwap pool authority PDA ("pool-authority")
  * - Raydium AMM v4 program: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
  * - Raydium AMM v4 vault authority: 5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1
  * - Raydium CPMM program: CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C
  * - Raydium CPMM vault authority: GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL
+ * - Raydium CLMM program: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK
+ *   (each CLMM pool owns its vaults; the pool address comes from DexScreener)
+ * - Raydium LaunchLab program and its vault / fee authorities
+ * - Meteora DLMM, DAMM v2, and DBC programs, plus their pool-authority PDAs
  * - SPL burn incinerator: 1nc1nerator11111111111111111111111111111111
  */
+const PUMP_AMM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+const METEORA_DLMM = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+const METEORA_DAMM_V2 = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG";
+const METEORA_DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
+const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+const RAYDIUM_LAUNCHLAB = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
+
+function authorityPda(program: string, seed: string): string {
+  return PublicKey.findProgramAddressSync([Buffer.from(seed)], new PublicKey(program))[0].toBase58();
+}
+
+/** Programs and the global PDAs that own pool token vaults. Per-pool addresses are added per mint. */
+export const POOL_AUTHORITY_OWNERS = [
+  PUMP_AMM,
+  authorityPda(PUMP_AMM, "pool-authority"),
+  METEORA_DLMM,
+  METEORA_DAMM_V2,
+  authorityPda(METEORA_DAMM_V2, "pool_authority"),
+  METEORA_DBC,
+  authorityPda(METEORA_DBC, "pool_authority"),
+  RAYDIUM_CLMM,
+  RAYDIUM_LAUNCHLAB,
+  authorityPda(RAYDIUM_LAUNCHLAB, "vault_auth_seed"),
+  authorityPda(RAYDIUM_LAUNCHLAB, "platform_fee_vault_auth_seed"),
+  authorityPda(RAYDIUM_LAUNCHLAB, "creator_fee_vault_auth_seed")
+] as const;
+
 export const RESERVE_OWNERS = [
   "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-  "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
   "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
   "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
   "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
   "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
-  "1nc1nerator11111111111111111111111111111111"
+  "1nc1nerator11111111111111111111111111111111",
+  ...POOL_AUTHORITY_OWNERS
 ] as const;
 
 export const RESERVE_OWNER_SET = new Set<string>(RESERVE_OWNERS);
@@ -56,6 +88,22 @@ export function pumpReserveAddresses(mint: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Addresses and owners dropped before a holder count or top-10 share.
+ * `poolAddresses` is every DexScreener pair for the mint (the pool itself owns the vault,
+ * and on PumpSwap the pool account can be the largest token account).
+ */
+export function holderExclusions(mint: string, poolAddresses: readonly string[] = []): {
+  addresses: Set<string>;
+  owners: Set<string>;
+} {
+  const pools = poolAddresses.filter((address) => address.length > 0);
+  return {
+    addresses: new Set<string>([...pumpReserveAddresses(mint), ...RESERVE_OWNER_SET, ...pools]),
+    owners: new Set<string>([...RESERVE_OWNER_SET, ...pools])
+  };
 }
 
 export function isReserveHolder(holder: HolderLike, extraAddresses?: ReadonlySet<string>): boolean {

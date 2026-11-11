@@ -159,6 +159,7 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
         }
     }
     val dirty = draft != saved
+    val holderSlider = holderSliderSpec(snap?.enrichHost)
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -231,7 +232,10 @@ fun SettingsScreen(snap: DeskSnapshot?, oneTap: OneTapUi? = null, onSave: (Map<S
             ExactSlider("Min liquidity $", draft.liquidity, 0f..200_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(liquidity = it) }
             ExactSlider("Min age min", draft.minAge, 0f..1440f, 5f, { "%.0f".format(it) }) { draft = draft.copy(minAge = it) }
             ExactSlider("Max age min", draft.maxAge, 0f..10080f, 30f, { "%.0f".format(it) }) { draft = draft.copy(maxAge = it) }
-            ExactSlider("Min holders", draft.holders, 0f..2000f, 10f, { "%.0f".format(it) }) { draft = draft.copy(holders = it) }
+            ExactSlider(holderSlider.label, draft.holders, 0f..holderSlider.max, holderSlider.step, { "%.0f".format(it) }) {
+                draft = draft.copy(holders = it)
+            }
+            if (holderSlider.max <= 20f) Text("Of the top 20 accounts. A full list counts as 20 or more.", color = Dim, fontSize = 12.sp)
             ExactSlider("Max dev holding %", draft.dev, 0f..50f, 1f, { "%.0f".format(it) }) { draft = draft.copy(dev = it) }
             ToggleRow("Allow unlocked LP", draft.unlocked) { draft = draft.copy(unlocked = it) }
             Text("0 on a floor turns that extra gate off. Mint authority and dev rugs stay hard kills.", color = Dim, fontSize = 12.sp)
@@ -420,6 +424,15 @@ private fun AppearanceGroup() {
             fontSize = 12.sp
         )
     }
+}
+
+internal data class HolderSliderSpec(val label: String, val max: Float, val step: Float)
+
+/** Off Helius the desk only counts the top 20 accounts, so the slider stops at 20. */
+internal fun holderSliderSpec(enrichHost: String?): HolderSliderSpec {
+    val host = enrichHost?.lowercase().orEmpty()
+    val helius = host.endsWith("helius-rpc.com") || host.endsWith("helius.xyz")
+    return if (helius) HolderSliderSpec("Min holders", 2000f, 10f) else HolderSliderSpec("Min holders of top 20", 20f, 1f)
 }
 
 @Composable
