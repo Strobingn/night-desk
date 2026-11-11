@@ -100,6 +100,27 @@ export const SETTINGS_FIELDS: SettingField[] = [
 /** Keys the desk saves. scoutPump is display-only (always on). */
 export const SAVED_KEYS = SETTINGS_FIELDS.filter((f) => !(f.kind === "toggle" && f.locked)).map((f) => f.key);
 
+/** Enrich on Helius can page holders. Every other host only sees the top 20. */
+export function enrichUsesTop20(host: string | null | undefined): boolean {
+  if (!host) return true;
+  const name = host.toLowerCase();
+  return !(name.endsWith("helius-rpc.com") || name.endsWith("helius.xyz"));
+}
+
+/** Same min-holder control, capped at 20 and labeled while enrich is off Helius. */
+export function minHolderControl(host: string | null | undefined): SliderField {
+  const base = SETTINGS_FIELDS.find((field) => field.key === "minHolderCount");
+  if (!base || base.kind !== "slider") throw new Error("min holders setting missing");
+  if (!enrichUsesTop20(host)) return base;
+  return {
+    ...base,
+    max: 20,
+    step: 1,
+    label: "Min holders of top 20",
+    hint: "Of the 20 largest accounts while enrich is off Helius. A full list of 20 counts as 20 or more. 0 = off."
+  };
+}
+
 type StateLike = { rules: Record<string, unknown>; prefs: Record<string, unknown> };
 
 /** Raw value from /api/state, in the desk's own units (fractions, dollars, booleans). */

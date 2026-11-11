@@ -95,6 +95,8 @@ export interface CandidateToken {
   ageSeconds: number;
   /** null = could not verify. Treated as not revoked. */
   mintAuthorityRevoked: boolean | null;
+  /** null = could not verify. A known active freeze is a hard rug and is not rechecked. */
+  freezeAuthorityRevoked?: boolean | null;
   /**
    * null = could not verify.
    * Fail closed, except while `onBondingCurve` is true (no pool LP exists yet).
@@ -104,11 +106,22 @@ export interface CandidateToken {
   /** Pump mint still on the bonding curve, with no AMM pool LP to lock. */
   onBondingCurve?: boolean;
   lpLockPct?: number | null;
-  /** Fraction of supply, 0–1. null = could not verify. */
+  /** Fraction of supply, 0–1. null = could not verify. A share above 100% is stored as null. */
   top10HolderPct: number | null;
   holderCount: number | null;
+  /** True when holderCount is the top-20 cap: the real count is at least that. */
+  holderCountAtLeast?: boolean;
   /** Fraction of supply the dev wallet holds. null = not verified. */
   devHoldingPct?: number | null;
+  /** True when devHoldingPct is an upper bound (dev was not in the top 20). */
+  devHoldingUpperBound?: boolean;
+  /** DexScreener pair addresses for this mint. Their vaults are not holders. */
+  poolAddresses?: string[];
+  /** Top accounts kept so a creator learned from RugCheck can still bound dev share. */
+  holderSample?: {
+    supplyUi: number | null;
+    rows: Array<{ address?: string; owner?: string | null; uiAmount?: number | null; amount?: string; decimals?: number }>;
+  };
   devWallet?: string | null;
   /** Populated when an upstream report already links the deployer to rugs. */
   devRug?: { rugged: boolean; evidence?: string } | null;
@@ -718,6 +731,11 @@ export interface DeskSnapshot {
    * `callsPerMin` is enrich reads in the last minute. No URL and no key.
    */
   enrich?: { host: string | null; callsPerMin: number };
+  /**
+   * v13.29 soft-gate rechecks. `pending` is queued, `ran` finished, `dropped` was evicted
+   * to keep the queue at 300. Rechecks share the enrich RPC budget and never use Helius.
+   */
+  recheck?: { pending: number; ran: number; dropped: number };
   /** v13.24 installed release. The Home crash card compares a report to this. */
   appVersion?: string;
   /** v12. Last crash the phone reported (POST /api/client-crash). Kept after Dismiss. */

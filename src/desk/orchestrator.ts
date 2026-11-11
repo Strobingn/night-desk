@@ -17,7 +17,8 @@ import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd
 import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
 import { resolveCoinMint } from "../market/coin-lookup.js";
 import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
-import { applyRugcheck, enrichSighting, needsFilterRugcheck } from "../market/enrich.js";
+import { EnrichDeferred, applyRugcheck, enrichSighting, isHeliusUrl, needsFilterRugcheck } from "../market/enrich.js";
+import { RecheckQueue, recheckToken } from "../market/recheck.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
 import { RawTape, draftFromRaw, rawCandidate } from "./raw-tape.js";
@@ -287,6 +288,10 @@ export class Desk {
   private maxTokenAgeMin = 0;
   private minHolderCount = 0;
   private maxDevHoldingPct = 0;
+  /** v13.29 one later enrich for coins that missed only soft gates. */
+  private readonly rechecks = new RecheckQueue();
+  private recheckTimer: NodeJS.Timeout | null = null;
+  private recheckBusy = false;
   private maxTradesPerHour = 0;
   private dailyMaxLossUsd = 0;
   private trailTakeProfit = false;
@@ -791,6 +796,8 @@ export class Desk {
     if (this.orderTimer) clearInterval(this.orderTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
     if (this.solTimer) clearInterval(this.solTimer);
+    if (this.recheckTimer) clearTimeout(this.recheckTimer);
+    this.recheckTimer = null;
     this.persist();
     this.advisor.save();
     this.store.close();
@@ -1830,7 +1837,7 @@ export class Desk {
     if (this.config.rpcUrl || this.config.rugcheckUrl) {
       const chain = await takeFirst(
         enrichSighting(
-          { mint, source: token.source === "pumpfun" ? "pumpfun" : "raydium", observedAt: Date.now(), symbol: token.symbol, name: token.name },
+          { mint, source: token.source === "pumpfun" ? "pumpfun" : "raydium", observedAt: Date.now(), symbol: token.symbol, name: token.name, devWallet: token.devWallet ?? undefined },
           { rpcUrl: this.config.rpcUrl || undefined, rugcheckUrl: this.config.rugcheckUrl || undefined, fetchImpl: this.lookupFetch, holderPagesMax: 0 }
         ),
         LOOKUP_CHAIN_MS,
@@ -1840,10 +1847,15 @@ export class Desk {
         token.mintAuthorityRevoked = chain.mintAuthorityRevoked;
         token.top10HolderPct = chain.top10HolderPct;
         token.holderCount = chain.holderCount;
+        token.holderCountAtLeast = chain.holderCountAtLeast;
+        token.freezeAuthorityRevoked = chain.freezeAuthorityRevoked;
         token.lpLockedOrBurned = chain.lpLockedOrBurned;
         token.lpLockPct = chain.lpLockPct;
         token.devWallet = token.devWallet ?? chain.devWallet;
         token.devHoldingPct = chain.devHoldingPct;
+        token.devHoldingUpperBound = chain.devHoldingUpperBound;
+        token.poolAddresses = chain.poolAddresses;
+        token.holderSample = chain.holderSample;
         token.devRug = chain.devRug;
         token.decimals = token.decimals ?? chain.decimals;
         token.onBondingCurve = chain.onBondingCurve;
@@ -2299,6 +2311,7 @@ export class Desk {
       manualMaxUsd: this.positionCapUsd(riskEquityUsd, SIZING_BAND.manualMaxPct),
       capWhy: this.capWhy(riskEquityUsd),
       enrich: this.scout.enrichStatus(),
+      recheck: this.rechecks.counts(),
       appVersion: APP_VERSION,
       lastClientCrash: this.lastClientCrash,
       markLoop: this.markLoopView(),
@@ -2445,7 +2458,7 @@ export class Desk {
     token: CandidateToken,
     prior: { priceUsd: number; volume1hUsd: number } | null
   ): Promise<void> {
-    if (needsFilterRugcheck(token, this.config.rules.minVolume1hUsd)) {
+    if (needsFilterRugcheck(token, this.config.rules.minVolume1hUsd, this.maxDevHoldingPct)) {
       token = await applyRugcheck(token, { rugcheckUrl: this.config.rugcheckUrl, fetchImpl: this.net.fetchAt(1) });
     }
     const rug = await this.rugs.lookup(token.devWallet);
@@ -2457,8 +2470,48 @@ export class Desk {
       minHolderCount: this.minHolderCount,
       maxDevHoldingPct: this.maxDevHoldingPct
     });
-    if (result.decision === "reject") this.considerNearMiss(result, prior);
+    if (result.decision === "reject") {
+      this.considerNearMiss(result, prior);
+      if (this.rechecks.offer(result.token, result.reasons, Date.now())) this.armRechecks();
+    }
     this.bus.emit("filter.result", result);
+  }
+
+  /** Next soft-gate recheck. Shares the enrich limiter inside recheckToken. */
+  private armRechecks(now = Date.now()): void {
+    if (this.recheckTimer) {
+      clearTimeout(this.recheckTimer);
+      this.recheckTimer = null;
+    }
+    const wait = this.rechecks.msUntilNext(now);
+    if (wait == null) return;
+    this.recheckTimer = setTimeout(() => {
+      this.recheckTimer = null;
+      void this.drainRechecks();
+    }, wait);
+    this.recheckTimer.unref?.();
+  }
+
+  private async drainRechecks(): Promise<void> {
+    if (this.recheckBusy) return;
+    this.recheckBusy = true;
+    try {
+      const due = this.rechecks.due(Date.now());
+      for (const token of due) {
+        try {
+          const rpc = this.config.rpcUrl && !isHeliusUrl(this.config.rpcUrl) ? this.config.rpcUrl : undefined;
+          const next = await recheckToken(token, { rpcUrl: rpc, fetchImpl: this.net.fetchAt(1), holderPagesMax: 0 });
+          this.rechecks.noteRan();
+          this.scout.publish(next);
+        } catch (err) {
+          if (err instanceof EnrichDeferred) this.rechecks.pushBack(token, Date.now() + err.retryMs);
+          else this.rechecks.noteRan();
+        }
+      }
+    } finally {
+      this.recheckBusy = false;
+      this.armRechecks();
+    }
   }
 
   /**

@@ -172,20 +172,22 @@ export function evaluateFilter(
 
   const minHolders = options?.minHolderCount ?? 0;
   if (minHolders > 0) {
+    const countLabel =
+      typeof token.holderCount === "number" ? (token.holderCountAtLeast ? `${token.holderCount}+` : String(token.holderCount)) : null;
     if (!(typeof token.holderCount === "number" && token.holderCount >= minHolders)) {
       checks.push({
         code: "HOLDER_COUNT",
         pass: false,
         message:
-          token.holderCount == null
+          countLabel == null
             ? "Holder count could not be verified. Fail closed."
-            : `Holder count is ${token.holderCount} (minimum ${minHolders}).`
+            : `Holder count is ${countLabel} (minimum ${minHolders}).`
       });
     } else {
       checks.push({
         code: "HOLDER_COUNT",
         pass: true,
-        message: `Holder count is ${token.holderCount}.`
+        message: `Holder count is ${countLabel}.`
       });
     }
   }
@@ -193,20 +195,23 @@ export function evaluateFilter(
   const maxDev = options?.maxDevHoldingPct ?? 0;
   if (maxDev > 0) {
     const held = token.devHoldingPct;
+    const bound = token.devHoldingUpperBound === true;
     if (!(typeof held === "number" && Number.isFinite(held) && held <= maxDev)) {
       checks.push({
         code: "DEV_HOLDING",
         pass: false,
         message:
           typeof held === "number" && Number.isFinite(held)
-            ? `Dev wallet holds ${pct(held)} (limit ${pct(maxDev)}).`
+            ? bound
+              ? `Dev wallet holds at most ${pct(held)} (limit ${pct(maxDev)}).`
+              : `Dev wallet holds ${pct(held)} (limit ${pct(maxDev)}).`
             : "Dev holding could not be verified. Fail closed."
       });
     } else {
       checks.push({
         code: "DEV_HOLDING",
         pass: true,
-        message: `Dev wallet holds ${pct(held)}.`
+        message: bound ? `Dev wallet holds at most ${pct(held)}.` : `Dev wallet holds ${pct(held)}.`
       });
     }
   }

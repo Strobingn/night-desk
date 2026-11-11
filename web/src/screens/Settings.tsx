@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { usd } from "../format";
-import { SETTINGS_FIELDS, SETTING_GROUPS, changedPatch, draftFrom, type Draft, type SettingField, type SliderField } from "../settingsSchema";
+import { SETTINGS_FIELDS, SETTING_GROUPS, changedPatch, draftFrom, enrichUsesTop20, minHolderControl, type Draft, type SettingField, type SliderField } from "../settingsSchema";
 import type { DeskSnapshot } from "../types";
 import type { DeskActions } from "../App";
 import { Icon } from "../ui";
@@ -33,7 +33,11 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
   const changed = Object.keys(patch);
 
   function set(key: string, value: number | boolean | null) {
-    setDraft((prev) => ({ ...prev, [key]: value }));
+    const next =
+      key === "minHolderCount" && typeof value === "number" && enrichUsesTop20(snap.enrich?.host)
+        ? Math.min(20, Math.max(0, Math.round(value)))
+        : value;
+    setDraft((prev) => ({ ...prev, [key]: next }));
     setDirty(true);
   }
 
@@ -135,7 +139,13 @@ export function SettingsScreen({ snap, actions }: { snap: DeskSnapshot; actions:
             </p>
           ) : null}
           {SETTINGS_FIELDS.filter((field) => field.group === group).map((field) => (
-            <Field key={field.key} field={field} value={draft[field.key]} savedValue={saved[field.key]} onChange={(v) => set(field.key, v)} />
+            <Field
+              key={field.key}
+              field={field.key === "minHolderCount" ? minHolderControl(snap.enrich?.host) : field}
+              value={draft[field.key]}
+              savedValue={saved[field.key]}
+              onChange={(v) => set(field.key, v)}
+            />
           ))}
           {group === "Exits / stops" ? (
             <p className="hard-stop">

@@ -131,7 +131,7 @@ describe("v13.28 enrich lane stays off Helius", () => {
 });
 
 describe("v13.28 enrich calls", () => {
-  it("skips getAccountInfo when dex already has mint, freeze, and supply", async () => {
+  it("prefers on-chain mint supply over a market-cap estimate", async () => {
     const methods: string[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -153,8 +153,13 @@ describe("v13.28 enrich calls", () => {
       }
       const method = (JSON.parse(String(init?.body)) as { method: string }).method;
       methods.push(method);
+      if (method === "getAccountInfo") {
+        return Response.json({
+          result: { value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, supply: "100000000", decimals: 6 } } } } }
+        });
+      }
       if (method === "getTokenLargestAccounts") {
-        return Response.json({ result: { value: [{ address: "Acct", uiAmount: 100, amount: "100", decimals: 6 }] } });
+        return Response.json({ result: { value: [{ address: "Acct", uiAmount: 50, amount: "50000000", decimals: 6 }] } });
       }
       return Response.json({ result: { value: [{ data: { parsed: { info: { owner: "Owner" } } } }] } });
     };
@@ -162,10 +167,11 @@ describe("v13.28 enrich calls", () => {
       { mint: MINT, source: "raydium", observedAt: 1 },
       { rpcUrl: ALCHEMY, fetchImpl }
     );
-    expect(methods).not.toContain("getAccountInfo");
+    expect(methods).toContain("getAccountInfo");
     expect(methods).toContain("getTokenLargestAccounts");
     expect(token.mintAuthorityRevoked).toBe(true);
-    expect(token.top10HolderPct).not.toBeNull();
+    // mcap/price would be 1,000,000 and a 50-token holder would look like 0.005%. Chain supply is 100.
+    expect(token.top10HolderPct).toBeCloseTo(0.5, 6);
   });
 
   it("skips DAS pages unless the enrich RPC is Helius", async () => {

@@ -1,15 +1,18 @@
 import type { CandidateToken, RawSighting } from "../types.js";
-import { inferOnBondingCurve, pumpReserveAddresses, RESERVE_OWNER_SET } from "./exclusions.js";
+import { holderExclusions, inferOnBondingCurve } from "./exclusions.js";
 import { ENRICH_CIRCUIT_MS } from "./net.js";
 import {
   attachTokenOwners,
   authorityHints,
+  devShareFromLargest,
+  dexPairAddresses,
   parseDexPair,
   parseHolderAccounts,
   parseMintAccount,
   parseRugcheckReport,
   parseTop10Pct,
   type AuthorityHints,
+  type LargestHolderRow,
   type ParsedMint,
   type TokenAccountRow
 } from "./parsers.js";
@@ -161,25 +164,28 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
   const rugHints = report ? authorityHints(report) : emptyHints;
   const knownMint = rugHints.mintAuthorityRevoked ?? dexHints.mintAuthorityRevoked;
   const knownFreeze = rugHints.freezeAuthorityRevoked ?? dexHints.freezeAuthorityRevoked;
+  // On-chain mint supply wins. A Dex market-cap / price guess is not a supply.
   const knownSupply = rugHints.supplyUi ?? dexHints.supplyUi;
   const knownDecimals = rugHints.decimals ?? dexHints.decimals;
-  const skipMint = urls.length > 0 && knownMint != null && knownFreeze != null && knownSupply != null && knownSupply > 0;
 
   let mint: ParsedMint = { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
-  if (urls.length > 0 && !skipMint) {
+  if (urls.length > 0) {
     const mintInfo = await rpc(fetchImpl, urls, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }], deps.meter);
     mint = parseMintAccount(mintInfo);
   }
   if (mint.mintAuthorityRevoked == null && knownMint != null) mint.mintAuthorityRevoked = knownMint;
   if (mint.freezeAuthorityRevoked == null && knownFreeze != null) mint.freezeAuthorityRevoked = knownFreeze;
-  if (mint.supplyUi == null && knownSupply != null && knownSupply > 0) mint.supplyUi = knownSupply;
+  if (!(mint.supplyUi != null && mint.supplyUi > 0) && knownSupply != null && knownSupply > 0) mint.supplyUi = knownSupply;
   if (mint.decimals == null && knownDecimals != null) mint.decimals = knownDecimals;
   if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
+  if (mint.freezeAuthorityRevoked != null) token.freezeAuthorityRevoked = mint.freezeAuthorityRevoked;
   if (mint.decimals != null) token.decimals = mint.decimals;
 
+  const pools = dex ? dexPairAddresses(dex, raw.mint) : [];
+  if (pools.length) token.poolAddresses = pools;
+  const holderSample: { current: { supplyUi: number | null; rows: LargestHolderRow[] } | null } = { current: null };
   if (urls.length > 0) {
-    const reserves = new Set([...pumpReserveAddresses(raw.mint), ...RESERVE_OWNER_SET]);
-    const exclude = { addresses: reserves, owners: RESERVE_OWNER_SET };
+    const exclude = holderExclusions(raw.mint, pools);
     const readLargest = async () => {
       const largest = await rpc(fetchImpl, urls, "getTokenLargestAccounts", [raw.mint], deps.meter);
       const addresses = largestAddresses(largest);
@@ -187,22 +193,31 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
         addresses.length > 0
           ? await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter)
           : null;
-      return parseTop10Pct(attachTokenOwners(largest, multiple), mint.supplyUi, exclude);
+      const attached = attachTokenOwners(largest, multiple);
+      const rows = (attached as { value?: LargestHolderRow[] })?.value;
+      holderSample.current = { supplyUi: mint.supplyUi, rows: Array.isArray(rows) ? rows : [] };
+      return parseTop10Pct(attached, mint.supplyUi, exclude);
     };
 
-    let holders: { top10HolderPct: number | null; holderCount: number | null } | null = null;
+    let holders: { top10HolderPct: number | null; holderCount: number | null; holderCountAtLeast?: boolean } | null = null;
     const pages = deps.holderPagesMax ?? 0;
     const heliusPrimary = urls[0] && isHeliusUrl(urls[0]) ? urls[0] : "";
     if (pages > 0 && heliusPrimary) {
       const full = await readAllHolders(fetchImpl, heliusPrimary, raw.mint, pages, deps.dasGapMs ?? 500, deps.meter);
       if (full) {
         const parsedFull = parseHolderAccounts(full.accounts, mint.supplyUi, mint.decimals, exclude, full.truncated);
-        if (parsedFull.top10HolderPct != null) {
+        if (parsedFull.top10HolderPct != null || parsedFull.holderCount != null) {
           if (parsedFull.truncated) {
             const top = await readLargest();
             holders = {
-              top10HolderPct: top.top10HolderPct == null ? null : Math.max(parsedFull.top10HolderPct, top.top10HolderPct),
-              holderCount: parsedFull.holderCount
+              top10HolderPct:
+                top.top10HolderPct == null
+                  ? parsedFull.top10HolderPct
+                  : parsedFull.top10HolderPct == null
+                    ? top.top10HolderPct
+                    : Math.max(parsedFull.top10HolderPct, top.top10HolderPct),
+              holderCount: parsedFull.holderCount,
+              holderCountAtLeast: false
             };
           } else {
             holders = parsedFull;
@@ -212,14 +227,19 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     }
     if (!holders) holders = await readLargest();
     if (holders.top10HolderPct != null) token.top10HolderPct = holders.top10HolderPct;
-    if (holders.holderCount != null) token.holderCount = holders.holderCount;
+    if (holders.holderCount != null) {
+      token.holderCount = holders.holderCount;
+      token.holderCountAtLeast = holders.holderCountAtLeast === true;
+    }
   }
+  if (holderSample.current) token.holderSample = holderSample.current;
 
   let riskText = "";
   if (report) {
-    riskText = parseRugcheckReport(report, raw.mint).riskText;
-    mergeRug(token, report, raw.mint);
+    riskText = parseRugcheckReport(report, raw.mint, pools).riskText;
+    mergeRug(token, report, raw.mint, pools);
   }
+  fillDevShare(token);
   token.onBondingCurve = inferOnBondingCurve({ source: token.source, dex: token.dex, riskText });
   return token;
 }
@@ -234,10 +254,14 @@ async function rugSlot(): Promise<void> {
   if (at > now) await new Promise((resolve) => setTimeout(resolve, at - now));
 }
 
-/** True when a sighting is past the volume floor and still missing a RugCheck field the filter needs. */
-export function needsFilterRugcheck(token: CandidateToken, minVolume1hUsd: number): boolean {
+/**
+ * True when a sighting is past the volume floor and still missing a RugCheck field the filter needs.
+ * A dev limit with no share (and no top-20 bound) is one of those fields.
+ */
+export function needsFilterRugcheck(token: CandidateToken, minVolume1hUsd: number, maxDevHoldingPct = 0): boolean {
   if (!(token.volume1hUsd >= minVolume1hUsd)) return false;
-  return token.mintAuthorityRevoked == null || token.lpLockedOrBurned == null || token.top10HolderPct == null;
+  const devMissing = maxDevHoldingPct > 0 && !(typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct));
+  return token.mintAuthorityRevoked == null || token.lpLockedOrBurned == null || token.top10HolderPct == null || devMissing;
 }
 
 /** One RugCheck report for a coin that reached the filter. Failures leave the token unchanged. */
@@ -250,14 +274,24 @@ export async function applyRugcheck(
   const url = `${deps.rugcheckUrl.replace(/\/$/, "")}/tokens/${token.mint}/report`;
   const report = await fetchJson(deps.fetchImpl ?? fetch, url);
   if (!report) return token;
-  mergeRug(token, report, token.mint);
-  const rug = parseRugcheckReport(report, token.mint);
+  mergeRug(token, report, token.mint, token.poolAddresses);
+  fillDevShare(token);
+  const rug = parseRugcheckReport(report, token.mint, token.poolAddresses);
   token.onBondingCurve = inferOnBondingCurve({ source: token.source, dex: token.dex, riskText: rug.riskText });
   return token;
 }
 
-function mergeRug(token: CandidateToken, report: unknown, mint: string): void {
-  const rug = parseRugcheckReport(report, mint);
+function fillDevShare(token: CandidateToken): void {
+  if (typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct)) return;
+  if (!token.devWallet || !token.holderSample) return;
+  const share = devShareFromLargest({ value: token.holderSample.rows }, token.holderSample.supplyUi, token.devWallet);
+  if (share.pct == null) return;
+  token.devHoldingPct = share.pct;
+  token.devHoldingUpperBound = share.upperBound;
+}
+
+function mergeRug(token: CandidateToken, report: unknown, mint: string, pools?: readonly string[]): void {
+  const rug = parseRugcheckReport(report, mint, pools);
   if (token.mintAuthorityRevoked == null && rug.mintAuthorityRevoked != null) {
     token.mintAuthorityRevoked = rug.mintAuthorityRevoked;
   }
@@ -267,7 +301,10 @@ function mergeRug(token: CandidateToken, report: unknown, mint: string): void {
     token.top10HolderPct = token.top10HolderPct == null ? rug.top10HolderPct : Math.max(token.top10HolderPct, rug.top10HolderPct);
   }
   if (!token.devWallet && rug.devWallet) token.devWallet = rug.devWallet;
-  if (rug.devHoldingPct != null) token.devHoldingPct = rug.devHoldingPct;
+  if (rug.devHoldingPct != null) {
+    token.devHoldingPct = rug.devHoldingPct;
+    token.devHoldingUpperBound = false;
+  }
   if (rug.devRug) token.devRug = rug.devRug;
 }
 
@@ -284,13 +321,9 @@ function hintsFromDex(payload: unknown, mint: string): AuthorityHints {
     return lb - la;
   });
   const best = matching[0]!;
-  const hinted = authorityHints(best);
-  if (!(hinted.supplyUi != null && hinted.supplyUi > 0)) {
-    const price = Number(best.priceUsd ?? 0) || 0;
-    const cap = Number(best.marketCap ?? 0) || 0;
-    if (price > 0 && cap > 0) hinted.supplyUi = cap / price;
-  }
-  return hinted;
+  // Market cap / price is not a mint supply. It has produced shares above 100%.
+  // On-chain getAccountInfo supply is used instead, and only an explicit supply field is a fallback.
+  return authorityHints(best);
 }
 
 async function readAllHolders(
