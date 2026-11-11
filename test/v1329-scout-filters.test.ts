@@ -4,10 +4,10 @@ import { Desk } from "../src/desk/orchestrator.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { testConfig } from "./helpers.js";
 import { POOL_AUTHORITY_OWNERS, RESERVE_OWNER_SET, holderExclusions } from "../src/market/exclusions.js";
-import { enrichSighting, needsFilterRugcheck } from "../src/market/enrich.js";
+import { applyRugcheck, enrichSighting, needsFilterRugcheck } from "../src/market/enrich.js";
 import { ENRICH_CALLS_PER_MIN_DEFAULT, ENRICH_RPS_CAP, NetLimiter } from "../src/market/net.js";
 import { LARGEST_HOLDER_CAP, devShareFromLargest, dexPairAddresses, parseTop10Pct } from "../src/market/parsers.js";
-import { RECHECK_DELAY_MAX_MS, RECHECK_DELAY_MIN_MS, RECHECK_QUEUE_MAX, RecheckQueue, recheckDelayMs, recheckEligible, recheckToken } from "../src/market/recheck.js";
+import { RECHECK_DELAY_MAX_MS, RECHECK_DELAY_MIN_MS, RECHECK_QUEUE_MAX, RecheckQueue, mergeRecheck, recheckDelayMs, recheckEligible, recheckToken } from "../src/market/recheck.js";
 import { minHolderControl } from "../web/src/settingsSchema.js";
 import { resolveRules } from "../src/rules.js";
 
@@ -96,6 +96,49 @@ describe("v13.29 dev share from the top 20", () => {
     const unknown = evaluateFilter(makeToken({ devHoldingPct: null }), { status: "clean" }, rules, { maxDevHoldingPct: 0.05 });
     expect(unknown.reasons.map((reason) => reason.code)).toContain("DEV_HOLDING");
     expect(unknown.reasons.find((reason) => reason.code === "DEV_HOLDING")?.message).toMatch(/Fail closed/);
+  });
+
+  it("reads an exact dev share from a complete Helius holder page, including zero", async () => {
+    const dev = "DevWallet11111111111111111111111111111111";
+    const fetchImpl = dasFetch([
+      { address: "DevAta", owner: dev, amount: 100_000 },
+      { address: "OtherAta", owner: "SomeoneElse111111111111111111111111111", amount: 50_000 }
+    ]);
+    const hit = await enrichSighting(
+      { mint: MINT, source: "pumpfun", devWallet: dev, observedAt: 1 },
+      { rpcUrl: HELIUS, holderPagesMax: 1, dasGapMs: 0, fetchImpl }
+    );
+    expect(hit.devHoldingPct).toBeCloseTo(0.1, 6);
+    expect(hit.devHoldingUpperBound).toBe(false);
+    expect(hit.holderCount).toBe(2);
+
+    const miss = await enrichSighting(
+      { mint: MINT, source: "pumpfun", devWallet: dev, observedAt: 1 },
+      { rpcUrl: HELIUS, holderPagesMax: 1, dasGapMs: 0, fetchImpl: dasFetch([{ address: "OtherAta", owner: "SomeoneElse111111111111111111111111111", amount: 50_000 }]) }
+    );
+    expect(miss.devHoldingPct).toBe(0);
+    expect(miss.devHoldingUpperBound).toBe(false);
+  });
+
+  it("bounds a creator learned from RugCheck against the holder page already fetched", async () => {
+    const dev = "Creator111111111111111111111111111111111";
+    const token = await enrichSighting(
+      { mint: MINT, source: "pumpfun", observedAt: 1 },
+      {
+        rpcUrl: HELIUS,
+        holderPagesMax: 1,
+        dasGapMs: 0,
+        fetchImpl: dasFetch([{ address: "DevAta", owner: dev, amount: 250_000 }])
+      }
+    );
+    expect(token.devHoldingPct == null).toBe(true);
+    await applyRugcheck(token, {
+      rugcheckUrl: "https://rug.test",
+      fetchImpl: async () => Response.json({ creator: dev, topHolders: [] })
+    });
+    expect(token.devWallet).toBe(dev);
+    expect(token.devHoldingPct).toBeCloseTo(0.25, 6);
+    expect(token.devHoldingUpperBound).toBe(false);
   });
 });
 
@@ -272,4 +315,64 @@ describe("v13.29 soft-gate recheck", () => {
       desk.stop();
     }
   });
+
+  it("keeps verified mint, LP, freeze, and holders when a Helius recheck cannot re-read them", async () => {
+    const prior = makeToken({
+      mint: MINT,
+      source: "pumpfun",
+      volume1hUsd: 0,
+      liquidityUsd: 500,
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      lpLockedOrBurned: true,
+      top10HolderPct: 0.08,
+      holderCount: 12,
+      devHoldingPct: 0.02
+    });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      expect(url.includes("helius")).toBe(false);
+      if (init?.method === "POST") return Response.json({ result: { value: null } });
+      return Response.json({
+        pairs: [
+          {
+            chainId: "solana",
+            dexId: "pumpswap",
+            pairAddress: POOL,
+            priceUsd: "0.01",
+            baseToken: { address: MINT, symbol: "RE", name: "Recheck" },
+            liquidity: { usd: 8_000 },
+            volume: { h1: 40_000 }
+          }
+        ]
+      });
+    };
+    const next = await recheckToken(prior, { rpcUrl: HELIUS, fetchImpl });
+    expect(next.volume1hUsd).toBe(40_000);
+    expect(next.liquidityUsd).toBe(8_000);
+    expect(next.mintAuthorityRevoked).toBe(true);
+    expect(next.freezeAuthorityRevoked).toBe(true);
+    expect(next.lpLockedOrBurned).toBe(true);
+    expect(next.top10HolderPct).toBeCloseTo(0.08, 6);
+    expect(next.holderCount).toBe(12);
+    expect(next.devHoldingPct).toBeCloseTo(0.02, 6);
+    const unlocked = mergeRecheck(prior, { ...next, lpLockedOrBurned: false });
+    expect(unlocked.lpLockedOrBurned).toBe(false);
+  });
 });
+
+function dasFetch(accounts: Array<{ address: string; owner: string; amount: number }>): typeof fetch {
+  return async (input, init) => {
+    const url = String(input);
+    if (url.includes("dexscreener")) return Response.json({ pairs: [] });
+    const method = (JSON.parse(String(init?.body)) as { method: string }).method;
+    if (method === "getAccountInfo") {
+      return Response.json({
+        result: { value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, supply: "1000000", decimals: 6 } } } } }
+      });
+    }
+    if (method === "getTokenAccounts") return Response.json({ result: { token_accounts: accounts } });
+    if (method === "getTokenLargestAccounts") return Response.json({ result: { value: [] } });
+    return Response.json({ result: { value: [] } });
+  };
+}

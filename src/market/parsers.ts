@@ -162,6 +162,40 @@ export function devShareFromLargest(result: unknown, supplyUi: number | null, de
   return { pct, upperBound };
 }
 
+/**
+ * Dev share from a Helius token-account page.
+ * A complete list is exact: the dev's summed balance, or 0 when that wallet is absent.
+ * A truncated list only reports an exact share when the dev is present. It does not invent a ceiling.
+ */
+export function devShareFromAccounts(
+  accounts: TokenAccountRow[],
+  supplyUi: number | null,
+  decimals: number | null,
+  devWallet: string | null | undefined,
+  exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> } = {},
+  complete = false
+): DevShare {
+  const none: DevShare = { pct: null, upperBound: false };
+  if (!devWallet || !(supplyUi && supplyUi > 0) || decimals == null) return none;
+  if (!complete && accounts.length === 0) return none;
+  const scale = 10 ** decimals;
+  let owned = 0;
+  let saw = false;
+  for (const account of accounts) {
+    if (isReserveRow({ address: account.address, owner: account.owner ?? null }, exclude)) continue;
+    const raw = Number(account.amount);
+    if (!(raw > 0) || !Number.isFinite(raw)) continue;
+    if (account.owner === devWallet || account.address === devWallet) {
+      owned += raw / scale;
+      saw = true;
+    }
+  }
+  if (!saw) return complete ? { pct: 0, upperBound: false } : none;
+  const pct = shareOf(owned, supplyUi);
+  if (pct == null) return none;
+  return { pct, upperBound: false };
+}
+
 export interface TokenAccountRow {
   address?: string;
   owner?: string | null;

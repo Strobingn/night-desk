@@ -1,5 +1,5 @@
 import type { CandidateToken, Rejection } from "../types.js";
-import { isHeliusUrl, enrichSighting, type EnrichDeps } from "./enrich.js";
+import { carryHolderLedger, isHeliusUrl, enrichSighting, type EnrichDeps } from "./enrich.js";
 
 /** One soft-fail recheck lands in this window. */
 export const RECHECK_DELAY_MIN_MS = 3 * 60_000;
@@ -103,6 +103,7 @@ export class RecheckQueue {
  * Re-read a soft-failed coin on the enrich RPC only.
  * A Helius URL is dropped, and a fetch that still points at Helius is not sent.
  * Holder pages stay off so this cannot open a Helius DAS lane.
+ * Fields the new read does not verify are kept from the first pass.
  */
 export async function recheckToken(token: CandidateToken, deps: EnrichDeps): Promise<CandidateToken> {
   const rpcUrl = deps.rpcUrl && !isHeliusUrl(deps.rpcUrl) ? deps.rpcUrl : undefined;
@@ -114,7 +115,7 @@ export async function recheckToken(token: CandidateToken, deps: EnrichDeps): Pro
         return inner(input, init);
       }
     : undefined;
-  return enrichSighting(
+  const next = await enrichSighting(
     {
       mint: token.mint,
       symbol: token.symbol,
@@ -128,4 +129,40 @@ export async function recheckToken(token: CandidateToken, deps: EnrichDeps): Pro
     },
     { ...deps, rpcUrl, fetchImpl, holderPagesMax: 0 }
   );
+  return mergeRecheck(token, next);
+}
+
+/**
+ * Soft fields from the new read win when they are present.
+ * Mint, freeze, LP, holders, and dev share stay when the recheck could not re-verify them.
+ * A new explicit value, including an unlocked LP, replaces the old one.
+ */
+export function mergeRecheck(prior: CandidateToken, next: CandidateToken): CandidateToken {
+  const merged: CandidateToken = { ...next, social: { ...next.social } };
+  if (merged.mintAuthorityRevoked == null && prior.mintAuthorityRevoked != null) merged.mintAuthorityRevoked = prior.mintAuthorityRevoked;
+  if (merged.freezeAuthorityRevoked == null && prior.freezeAuthorityRevoked != null) merged.freezeAuthorityRevoked = prior.freezeAuthorityRevoked;
+  if (merged.lpLockedOrBurned == null && prior.lpLockedOrBurned != null) {
+    merged.lpLockedOrBurned = prior.lpLockedOrBurned;
+    if (merged.lpLockPct == null) merged.lpLockPct = prior.lpLockPct;
+  }
+  if (merged.top10HolderPct == null && prior.top10HolderPct != null) merged.top10HolderPct = prior.top10HolderPct;
+  if (merged.holderCount == null && prior.holderCount != null) {
+    merged.holderCount = prior.holderCount;
+    merged.holderCountAtLeast = prior.holderCountAtLeast;
+  }
+  if (!(typeof merged.devHoldingPct === "number" && Number.isFinite(merged.devHoldingPct)) && prior.devHoldingPct != null) {
+    merged.devHoldingPct = prior.devHoldingPct;
+    merged.devHoldingUpperBound = prior.devHoldingUpperBound;
+  }
+  if (!merged.devWallet && prior.devWallet) merged.devWallet = prior.devWallet;
+  if (!merged.devRug && prior.devRug) merged.devRug = prior.devRug;
+  if (!(merged.volume1hUsd > 0) && prior.volume1hUsd > 0) merged.volume1hUsd = prior.volume1hUsd;
+  if (!(merged.liquidityUsd > 0) && prior.liquidityUsd > 0) merged.liquidityUsd = prior.liquidityUsd;
+  if (!(merged.priceUsd > 0) && prior.priceUsd > 0) merged.priceUsd = prior.priceUsd;
+  if (!(merged.ageSeconds > 0) && prior.ageSeconds > 0) merged.ageSeconds = prior.ageSeconds;
+  if (!merged.holderSample && prior.holderSample) merged.holderSample = prior.holderSample;
+  if (!merged.poolAddresses?.length && prior.poolAddresses?.length) merged.poolAddresses = prior.poolAddresses;
+  carryHolderLedger(next, merged);
+  carryHolderLedger(prior, merged);
+  return merged;
 }

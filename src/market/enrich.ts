@@ -4,6 +4,7 @@ import { ENRICH_CIRCUIT_MS } from "./net.js";
 import {
   attachTokenOwners,
   authorityHints,
+  devShareFromAccounts,
   devShareFromLargest,
   dexPairAddresses,
   parseDexPair,
@@ -31,6 +32,24 @@ export interface EnrichDeps {
 }
 
 const DAS_PAGE = 1_000;
+
+interface HolderLedger {
+  accounts: TokenAccountRow[];
+  supplyUi: number | null;
+  decimals: number | null;
+  exclude: { addresses?: ReadonlySet<string>; owners?: ReadonlySet<string> };
+  complete: boolean;
+}
+
+/** Complete DAS pages, kept on the token object so a creator learned later can still be measured. */
+const fullLedgers = new WeakMap<CandidateToken, HolderLedger>();
+
+/** Move a DAS ledger onto a copied token. A ledger already on `to` wins. */
+export function carryHolderLedger(from: CandidateToken, to: CandidateToken): void {
+  if (from === to || fullLedgers.has(to)) return;
+  const ledger = fullLedgers.get(from);
+  if (ledger) fullLedgers.set(to, ledger);
+}
 let dasNextSlot = 0;
 
 async function dasSlot(gapMs: number): Promise<void> {
@@ -204,6 +223,15 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     const heliusPrimary = urls[0] && isHeliusUrl(urls[0]) ? urls[0] : "";
     if (pages > 0 && heliusPrimary) {
       const full = await readAllHolders(fetchImpl, heliusPrimary, raw.mint, pages, deps.dasGapMs ?? 500, deps.meter);
+      if (full && !full.truncated) {
+        fullLedgers.set(token, {
+          accounts: full.accounts,
+          supplyUi: mint.supplyUi,
+          decimals: mint.decimals,
+          exclude,
+          complete: true
+        });
+      }
       if (full) {
         const parsedFull = parseHolderAccounts(full.accounts, mint.supplyUi, mint.decimals, exclude, full.truncated);
         if (parsedFull.top10HolderPct != null || parsedFull.holderCount != null) {
@@ -283,6 +311,15 @@ export async function applyRugcheck(
 
 function fillDevShare(token: CandidateToken): void {
   if (typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct)) return;
+  const ledger = fullLedgers.get(token);
+  if (ledger && token.devWallet) {
+    const share = devShareFromAccounts(ledger.accounts, ledger.supplyUi, ledger.decimals, token.devWallet, ledger.exclude, ledger.complete);
+    if (share.pct != null) {
+      token.devHoldingPct = share.pct;
+      token.devHoldingUpperBound = share.upperBound;
+      return;
+    }
+  }
   if (!token.devWallet || !token.holderSample) return;
   const share = devShareFromLargest({ value: token.holderSample.rows }, token.holderSample.supplyUi, token.devWallet);
   if (share.pct == null) return;
