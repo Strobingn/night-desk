@@ -154,7 +154,8 @@ export function startServer(
             code: "POSITION_CAP"
           });
         }
-        const ignoreCooldown = record.ignoreCooldown === true;
+        // Explicit operator tap. A resting limit fill calls manualBuy without this flag, so a hard-stop ban still blocks it.
+        const ignoreCooldown = true;
         const started = Date.now();
         const job = desk
           .manualBuy(mint, sizeUsd, {

@@ -471,6 +471,11 @@ export interface ManualBuyResult {
   clampedFrom?: number;
   /** v13.3 the booked fill price (for the one-tap toast). */
   fillPriceUsd?: number;
+  /**
+   * v13.32 set when a manual buy went through a gate the engine, analyst, filter,
+   * score, watch list, or ban would have used. The buy already filled.
+   */
+  warning?: string;
 }
 
 export interface ManualBuyRefusal {

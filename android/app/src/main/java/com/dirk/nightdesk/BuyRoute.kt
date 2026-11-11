@@ -34,6 +34,12 @@ object BuyRoute {
             .put("idemKey", idemKey)
             .put("oneTap", true)
 
+    /** v13.32 Buy anyway on a live tap. Still the live book. A new idemKey, so it is not a replay of the hold. */
+    fun liveOverride(mint: String, sizeUsd: Double, idemKey: String): JSONObject =
+        liveOneTap(mint, sizeUsd, idemKey)
+            .put("confirmHardKill", true)
+            .put("ignoreCooldown", true)
+
     fun paperDialog(
         mint: String,
         sizeUsd: Double?,

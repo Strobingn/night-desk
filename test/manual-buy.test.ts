@@ -88,7 +88,9 @@ describe("manual buy and live-ready checklist", () => {
       expect(desk.snapshot().positionCapUsd).toBe(7.1);
       const bought = await desk.manualBuy(mint, 10);
       expect(bought).toMatchObject({ ok: true, symbol: "inu", sizeUsd: 7.1, mode: "paper", clampedFrom: 10 });
-      expect(formatBuyNotice(bought)).toBe("Bought inu for $7.10 (paper). Requested $10.00 was cut to the position cap.");
+      expect(formatBuyNotice(bought)).toBe(
+        "Bought inu for $7.10 (paper). Requested $10.00 was cut to the position cap. Filter killed inu. One-hour volume is $100 (minimum $10,000). Manual paper buy goes through."
+      );
       expect(desk.book.positions.get(mint)?.costUsd).toBe(7.1);
       expect(desk.snapshot().events.some((event) => event.message.includes("Refusing"))).toBe(false);
       const pos = desk.snapshot().positions[0];

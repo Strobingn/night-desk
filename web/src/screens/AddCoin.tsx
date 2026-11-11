@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { OneTapBar, TapBuyButton } from "./OneTap";
+import { LiveTapPair, OneTapBar, TapBuyButton } from "./OneTap";
 import { api } from "../api";
 import { age, compactUsd, px, signedPct, usd } from "../format";
 import type { CoinCandidate, CoinLookup, CoinLookupError, DeskSnapshot, WatchItem } from "../types";
@@ -284,6 +284,7 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
               </button>
             </div>
           )}
+          <LiveTapPair snap={snap} mint={result.mint} symbol={result.symbol} actions={actions} />
         </section>
       ) : null}
 
@@ -317,6 +318,11 @@ export function AddCoinScreen({ snap, actions, query, busy }: { snap: DeskSnapsh
                       Chart
                     </a>
                     {held ? null : <TapBuyButton mint={item.mint} symbol={item.symbol} actions={actions} className="primary sm tap-buy" />}
+                    {held ? null : (
+                      <button className="ghost buy" type="button" onClick={() => void actions.liveTapBuy?.(item.mint, item.symbol)}>
+                        LIVE
+                      </button>
+                    )}
                     <button className="ghost buy" type="button" disabled={held} onClick={() => { setInput(item.mint); void lookup(item.mint); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
                       {held ? "Open" : "Buy"}
                     </button>

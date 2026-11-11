@@ -1,6 +1,7 @@
 package com.dirk.nightdesk.pump
 
 import android.content.Context
+import com.dirk.nightdesk.LiveTap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -221,6 +222,15 @@ fun TerminalScreen() {
         Button(onClick = {
             scope.launch { note = buy(context, shown, targetSol, live, armed, wallet, cap) { solField = it } }
         }, enabled = shown != null) { Text("Buy into curve") }
+        Button(onClick = {
+            val watched = shown ?: return@Button
+            scope.launch {
+                val repo = DeskRepository.get(context)
+                val snap = repo.snapshot.value
+                val notice = repo.liveTapBuy(watched.mint, watched.mint.take(4), LiveTap.size(snap), LiveTap.block(snap))
+                if (notice != null) note = notice.text
+            }
+        }, enabled = shown != null) { Text("Desk LIVE BUY") }
         Button(onClick = {
             scope.launch {
                 val session = MwaHost.session

@@ -6,6 +6,7 @@ export interface BuyNoticeBody {
   sizeUsd?: number;
   mode?: string;
   clampedFrom?: number;
+  warning?: string;
 }
 
 export function formatBuyNotice(body: BuyNoticeBody): string {
@@ -24,5 +25,6 @@ export function formatBuyNotice(body: BuyNoticeBody): string {
     body.clampedFrom > body.sizeUsd + 0.001
       ? ` Requested $${body.clampedFrom.toFixed(2)} was cut to the position cap.`
       : "";
-  return `Bought ${symbol} for ${size} (${mode}).${clamped}`;
+  const warning = body.warning?.trim() ? ` ${body.warning.trim()}` : "";
+  return `Bought ${symbol} for ${size} (${mode}).${clamped}${warning}`;
 }

@@ -105,7 +105,12 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
           <p className="empty">Watching kills, fills, and open marks. Hard stop still fires on its own. Take profit with Sell.</p>
         ) : (
           (snap.advice ?? []).map((note) => (
-            <AdviceRow key={note.id} note={note} onBuy={(mint, symbol) => actions.askBuy({ mint, symbol, minutesLeft: null })} />
+            <AdviceRow
+              key={note.id}
+              note={note}
+              onBuy={(mint, symbol) => actions.askBuy({ mint, symbol, minutesLeft: null })}
+              onLiveBuy={(mint, symbol) => void actions.liveTapBuy?.(mint, symbol)}
+            />
           ))
         )}
       </section>
@@ -419,16 +424,21 @@ function LastCrashCard({ crash, actions }: { crash: { at: number; version: strin
   );
 }
 
-function AdviceRow({ note, onBuy }: { note: AdviceNote; onBuy: (mint: string, symbol: string) => void }) {
+function AdviceRow({ note, onBuy, onLiveBuy }: { note: AdviceNote; onBuy: (mint: string, symbol: string) => void; onLiveBuy: (mint: string, symbol: string) => void }) {
   return (
     <article className="advice-row">
       <span className={`stance ${note.stance}`}>{note.stance}</span>
       <div>
         <p>{note.text}</p>
         {note.stance === "near-miss" && note.mint ? (
-          <button className="ghost buy" type="button" onClick={() => onBuy(note.mint!, note.symbol || "this mint")}>
-            Buy
-          </button>
+          <>
+            <button className="ghost buy" type="button" onClick={() => onBuy(note.mint!, note.symbol || "this mint")}>
+              Buy
+            </button>
+            <button className="ghost buy" type="button" onClick={() => onLiveBuy(note.mint!, note.symbol || "this mint")}>
+              LIVE BUY
+            </button>
+          </>
         ) : null}
       </div>
     </article>

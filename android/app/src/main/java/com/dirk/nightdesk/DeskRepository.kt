@@ -414,7 +414,15 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** v12. A buy the desk refused as a hard kill (mint authority, dev rug). The UI asks "Buy anyway". */
-    data class HardKillAsk(val mint: String, val symbol: String, val sizeUsd: Double?, val confirmSize: Boolean, val message: String)
+    data class HardKillAsk(
+        val mint: String,
+        val symbol: String,
+        val sizeUsd: Double?,
+        val confirmSize: Boolean,
+        val message: String,
+        /** v13.32 true when the hold came from LIVE BUY. Confirm stays on the live book. */
+        val live: Boolean = false
+    )
 
     private val _hardKillAsk = MutableStateFlow<HardKillAsk?>(null)
     val hardKillAsk: StateFlow<HardKillAsk?> = _hardKillAsk
@@ -673,7 +681,48 @@ class DeskRepository private constructor(private val context: Context) {
                     val json = runCatching { JSONObject(raw) }.getOrNull()
                     val ok = code in 200..299 && json?.optBoolean("ok", false) == true
                     val refusal = json?.optString("code").orEmpty()
+                    if (refusal == "HARD_KILL" || refusal == "REVENGE_COOLDOWN") {
+                        _hardKillAsk.value = HardKillAsk(
+                            mint = mint,
+                            symbol = json?.optText("symbol").orEmpty().ifBlank { symbol },
+                            sizeUsd = sizeUsd,
+                            confirmSize = false,
+                            message = json?.optText("error").orEmpty().ifBlank { if (refusal == "HARD_KILL") "Hard kill." else "Mint is banned after a hard stop." },
+                            live = true
+                        )
+                    }
                     if (ok || (refusal.isNotEmpty() && refusal != "LIVE_UNCONFIRMED")) liveIdem.remove(mint)
+                    DeskNotice(ok, OneTap.buyText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
+                },
+                onFailure = { err ->
+                    val timedOut = err is java.io.InterruptedIOException || (err.message ?: "").contains("timeout", ignoreCase = true)
+                    DeskNotice(false, if (timedOut) BuyRoute.liveTimeoutNotice(symbol) else "$symbol: ${err.message ?: "live buy failed"}")
+                }
+            )
+            _notice.value = notice
+            refresh()
+            notice
+        } finally {
+            releaseTap(key)
+        }
+    }
+
+    /**
+     * v13.32 Buy anyway after a live tap was held. New idempotency key. Still the live book.
+     * Null = a live order for this mint is already in flight.
+     */
+    suspend fun liveOverrideBuy(mint: String, symbol: String, sizeUsd: Double): DeskNotice? = withContext(Dispatchers.IO) {
+        val key = "livebuy:$mint"
+        if (!claimTap(key)) return@withContext null
+        try {
+            val base = link.baseUrl
+            if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
+            val body = BuyRoute.liveOverride(mint, sizeUsd, OneTap.newIdemKey())
+            val started = System.nanoTime()
+            val notice = sendRaw("$base/api/positions/buy", body.toString(), liveHttp).fold(
+                onSuccess = { (code, raw) ->
+                    val json = runCatching { JSONObject(raw) }.getOrNull()
+                    val ok = code in 200..299 && json?.optBoolean("ok", false) == true
                     DeskNotice(ok, OneTap.buyText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
                 },
                 onFailure = { err ->

@@ -536,12 +536,21 @@ fun NightDeskApp(desk: DeskRepository) {
             textContentColor = Ink,
             title = { Text("Buy ${ask.symbol} anyway?") },
             text = {
-                Text(ask.message + "\n\nPaper fill only. Slippage cap, pool depth, cash and the hard stop still apply.")
+                Text(
+                    ask.message + if (ask.live) {
+                        "\n\nLive buy. Real money at the live size. The engine, the analyst, a filter miss, the score, and a watch do not block it. Slippage, pool depth, the wallet check, and the hard stop still apply."
+                    } else {
+                        "\n\nPaper fill only. Slippage cap, pool depth, cash and the hard stop still apply."
+                    }
+                )
             },
             confirmButton = {
                 TextButton(onClick = {
                     desk.dismissHardKill()
-                    scope.launch { desk.buyPosition(ask.mint, ask.sizeUsd, ignoreCooldown = true, confirmHardKill = true, confirmSize = ask.confirmSize, symbol = ask.symbol) }
+                    scope.launch {
+                        if (ask.live) desk.liveOverrideBuy(ask.mint, ask.symbol, ask.sizeUsd ?: com.dirk.nightdesk.LiveTap.size(snap))
+                        else desk.buyPosition(ask.mint, ask.sizeUsd, ignoreCooldown = true, confirmHardKill = true, confirmSize = ask.confirmSize, symbol = ask.symbol)
+                    }
                 }) { Text("Buy anyway", color = Coral) }
             },
             dismissButton = {
