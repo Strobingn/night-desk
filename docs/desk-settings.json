@@ -14,9 +14,9 @@
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.38",
-    "androidVersionName": "13.38",
-    "androidVersionCode": 1338,
+    "appVersion": "13.39",
+    "androidVersionName": "13.39",
+    "androidVersionCode": 1339,
     "applicationId": "com.dirk.nightdesk",
     "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. 13.38 caps manual-buy Helius waits (launchBundleSoon, capped curve/quote) on top of 13.37 (main 929365c, PR 39), which includes 13.36 and the 13.35 redesign. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
@@ -34,7 +34,7 @@
   "backend": {
     "publicBaseUrl": "https://night-desk.157-151-200-171.sslip.io",
     "tls": "Caddy on :443, Let's Encrypt ACME (HTTP-01 disabled). No :80 listener; HTTP redirects are disabled.",
-    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme \u2026 disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
+    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme … disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
     "deskBind": "127.0.0.1:4721",
     "envHost": "127.0.0.1",
     "envPort": 4721,
@@ -68,9 +68,9 @@
   },
   "hardRules": [
     "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live. The 13.30 engine buys the paper book only and its exits do not set book live.",
-    "The desk hard stop is checked before an engine exit. A mark at or past that stop closes as STOP_LOSS or GAP_RUG. The engine stop (1% on the main paper book) can only be tighter. The $10 UTC-day paper-loss pause stays (STRATEGY.dailyMaxLossUsd).",
+    "The desk hard stop is checked before an engine exit. A mark at or past that stop closes as STOP_LOSS or GAP_RUG. The engine stop (1% on the main paper book) can only be tighter. Since 13.39 it is measured from the entry mark, like the hard stop, not from the fill. The $10 UTC-day paper-loss pause stays (STRATEGY.dailyMaxLossUsd).",
     "Never drop the v13.11 baseline controls: paper and live limit / take-profit / stop orders (GET/POST /api/orders, POST /api/orders/cancel), and the rest of the v13.11 book and ticket UI.",
-    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or \u22640) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25\u00d7 or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
+    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or ≤0) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25× or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
     "The hard stop cannot be loosened past 6%. LIVE_TRADING, the wallet secret, and mode cannot be changed from the API.",
     "Do not print secrets. RPC URLs may carry API keys in the path or query; publish hostnames only.",
     "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current.",
@@ -82,7 +82,8 @@
     "13.35: phone redesign only (five tabs, Engine tab, Settings \u2192 More). Adds strategy.mainOpen (engine positions on the main paper book). No desk setting, limit or trading behavior changed.",
     "13.38: manual paper and live buys use launchBundleSoon (1.5s) instead of an uncapped launchBundle. Unenriched quote and curve fallbacks, and ensureDepth's curve read, are also capped. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 929365c (PR 39).",
     "13.37: DAMM v2 is not a traditional LP lock. Rank traditional pools by real depth. A figure-less pool does not fail a coin that has another pool with data. Holder count is RugCheck totalHolders, not a top-20 sample; unknown stays fail-closed. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 7c00007 (PR 38).",
-    "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign)."
+    "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign).",
+    "13.39: Home charts on the phone, and the math audit: the engine stop is measured from the entry mark (not the fill), fractional hard-stop labels are exact, engine positions show the engine stop. No setting, endpoint or limit changed. Reset the scorecard after deploying."
   ],
   "manualOverride": {
     "version": "13.32",
@@ -117,7 +118,7 @@
         "raw": 5000,
         "display": "$5,000",
         "source": "rules",
-        "notes": "8:22 PM ET tuning. Band $1,000\u2013$500,000."
+        "notes": "8:22 PM ET tuning. Band $1,000–$500,000."
       },
       "minLiquidityUsd": {
         "raw": 4000,
@@ -141,7 +142,7 @@
         "raw": 0.1,
         "display": "10%",
         "source": "prefs",
-        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 \u2192 0.1)."
+        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 → 0.1)."
       },
       "minTokenAgeMin": {
         "raw": 0,
@@ -165,7 +166,7 @@
         "raw": 0.35,
         "display": "0.35",
         "source": "rules",
-        "notes": "Trade line. Band 0.10\u20130.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
+        "notes": "Trade line. Band 0.10–0.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
       },
       "volumeBoost": {
         "raw": 0.5,
@@ -211,7 +212,7 @@
         "raw": 20,
         "display": "20",
         "source": "prefs",
-        "notes": "Band 1\u201324."
+        "notes": "Band 1–24."
       },
       "maxTradesPerHour": {
         "raw": 34,
@@ -233,7 +234,7 @@
         "raw": 1000,
         "display": "1 s",
         "source": "prefs",
-        "notes": "Band 1,000\u201310,000 ms."
+        "notes": "Band 1,000–10,000 ms."
       }
     },
     "liveCaps": {
@@ -241,7 +242,7 @@
         "raw": 5,
         "display": "$5",
         "source": "prefs",
-        "notes": "Per live trade. Band $1\u2013$100. Do not change unless Dirk approves."
+        "notes": "Per live trade. Band $1–$100. Do not change unless Dirk approves."
       },
       "liveDailyCapUsd": {
         "raw": 20,
@@ -256,7 +257,7 @@
       },
       "liveScope": {
         "raw": "manual",
-        "display": "Live: manual only \u00b7 AI: paper"
+        "display": "Live: manual only · AI: paper"
       },
       "liveSpentTodayUsd": {
         "raw": 0,
@@ -292,7 +293,7 @@
         "raw": 0.06,
         "display": "6%",
         "source": "rules",
-        "notes": "Band 0.5\u201350%."
+        "notes": "Band 0.5–50%."
       },
       "maxExitSlippage": {
         "raw": 0.06,
@@ -356,21 +357,21 @@
       "targetNetUsd": {
         "raw": 3,
         "display": "$3.00 net",
-        "band": "$0.25\u2013$50",
+        "band": "$0.25–$50",
         "source": "strategy",
         "notes": "After modeled fees and slippage."
       },
       "tradeUsd": {
         "raw": 50,
         "display": "$50 paper",
-        "band": "$5\u2013$500",
+        "band": "$5–$500",
         "source": "strategy",
         "notes": "Paper. Up to the 50% auto ceiling; the exposure cap still applies."
       },
       "maxOpen": {
         "raw": 2,
         "display": "2",
-        "band": "1\u20136",
+        "band": "1–6",
         "source": "strategy",
         "notes": "Engine positions only. maxOpenPositions still caps the whole book."
       },
@@ -717,7 +718,7 @@
         "name": "SCOUT_ENRICH_CONCURRENCY",
         "secret": false,
         "present": false,
-        "default": "8 (code default, clamped 1\u201316)"
+        "default": "8 (code default, clamped 1–16)"
       },
       {
         "name": "SCOUT_ENRICH_QUEUE",
@@ -1126,7 +1127,7 @@
           "archivePath",
           "error"
         ],
-        "notes": "Paper book only. Live mode is refused. startingUsd 100\u201310,000."
+        "notes": "Paper book only. Live mode is refused. startingUsd 100–10,000."
       },
       {
         "method": "GET",
@@ -1205,8 +1206,8 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.38",
-      "androidVersionCode": 1338,
+      "version": "13.39",
+      "androidVersionCode": 1339,
       "applicationId": "com.dirk.nightdesk",
       "note": "Code in this branch (13.38). Not the host at the 1:46 PM ET pull. Based on main 929365c (PR 39, the 13.37 DAMM v2 / holder-count release, including 13.36 and the 13.35 redesign). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {

@@ -17,7 +17,7 @@ class V1325Test {
         val strip = OneTap.liveCashLabel(0.2951, 86.24, 0.001008, 0.0, true, null)
         assertTrue(strip.contains("0.2951 SOL"))
         assertTrue(strip.contains("USDC $0.0010"))
-        assertFalse(strip.contains("USDC $0.00"))
+        assertFalse(Regex("USDC \\$0\\.00(?!\\d)").containsMatchIn(strip))
     }
 
     @Test

@@ -71,11 +71,15 @@ class NativePaperGateTest {
         waitFor("· paper")
         dismissNotice()
         openTab("Home")
+        // v13.38 the equity curve and one chart per position card.
+        rule.onNode(hasTestTag("performance-chart")).assertExists()
         shot("home-top")
         // v13.32 the Home list is a tagged LazyColumn: scroll it to each card by node, not by swiping.
         for (symbol in listOf("DRC", "SPCX", "NOVA", "GATE")) homeScrollTo(hasTestTag("details-$symbol"))
         shot("home-collapsed")
         openDetails("GATE")
+        homeScrollTo(hasTestTag("chart-GATE"))
+        shot("home-chart")
         homeScrollTo(hasText("Sell 25%"))
         homeScrollTo(hasText("Sell 100%"))
         shot("home-expanded")
