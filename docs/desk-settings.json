@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "lastUpdatedET": "2026-11-11 6:35 PM ET",
-  "lastUpdated": "2026-11-11T18:35:00-05:00",
+  "lastUpdatedET": "2026-11-11 8:10 PM ET",
+  "lastUpdated": "2026-11-11T20:10:00-05:00",
   "pulledFrom": {
     "oracleApi": [
       "/api/state",
@@ -14,7 +14,7 @@
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.33",
+    "appVersion": "13.34",
     "androidVersionName": "13.33",
     "androidVersionCode": 1333,
     "applicationId": "com.dirk.nightdesk",
@@ -77,15 +77,30 @@
     "13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard ready flag arms nothing.",
     "13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5/$20 limits.",
     "13.32: an explicit manual paper or live buy (POST /api/positions/buy) bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. A resting limit fill does not skip that ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path.",
-    "13.33: poll latency only. equity(ts) index, SQL downsample to <=240 points. The cache keeps time buckets and widens them as the session grows. Snapshots carry seq; clients ignore an older snapshot, and a position mark drops the 1s cache. GET /api/orders and GET /api/settings skip the full snapshot. GET /api/wallet is non-blocking (balanceAgeMs, balanceStale). Live buys wait at most 4s then a 60s successful cache or refuse. Live sells may use an older successful SOL figure. Helius priority-0 queue max 24 with oldest-first drop and stale duplicate-mint drop. Caps stay 10+8. No trading, filter, slippage, cooldown, or engine-pause number changed."
+    "13.33: poll latency only. equity(ts) index, SQL downsample to <=240 points. The cache keeps time buckets and widens them as the session grows. Snapshots carry seq; clients ignore an older snapshot, and a position mark drops the 1s cache. GET /api/orders and GET /api/settings skip the full snapshot. GET /api/wallet is non-blocking (balanceAgeMs, balanceStale). Live buys wait at most 4s then a 60s successful cache or refuse. Live sells may use an older successful SOL figure. Helius priority-0 queue max 24 with oldest-first drop and stale duplicate-mint drop. Caps stay 10+8. No trading, filter, slippage, cooldown, or engine-pause number changed.",
+    "13.34: phone redesign only (five tabs, Engine tab, Settings → More). No desk setting, endpoint, limit or trading behavior changed."
   ],
   "manualOverride": {
     "version": "13.32",
-    "surfaces": ["Home", "Tape", "Search", "Details", "Pump Watch"],
+    "surfaces": [
+      "Home",
+      "Tape",
+      "Search",
+      "Details",
+      "Pump Watch"
+    ],
     "route": "POST /api/positions/buy",
     "source": "manual",
-    "books": ["paper", "live"],
-    "bypasses": ["engine watch / SIGNAL_WATCH", "analyst score", "soft filter", "hard-stop ban on POST /api/positions/buy only"],
+    "books": [
+      "paper",
+      "live"
+    ],
+    "bypasses": [
+      "engine watch / SIGNAL_WATCH",
+      "analyst score",
+      "soft filter",
+      "hard-stop ban on POST /api/positions/buy only"
+    ],
     "limitFills": "A resting limit buy calls manualBuy without ignoreCooldown, so a hard-stop ban still refuses it.",
     "stillHeld": "HARD_KILL until confirmHardKill (mint authority, dev rug, token safety blocked). The confirm may be live.",
     "logCode": "MANUAL_OVERRIDE",
@@ -364,7 +379,14 @@
         },
         "display": "1% stop on the main paper book",
         "source": "strategy",
-        "choices": ["launch-1", "launch-3", "launch-6", "momentum-1", "momentum-3", "momentum-6"],
+        "choices": [
+          "launch-1",
+          "launch-3",
+          "launch-6",
+          "momentum-1",
+          "momentum-3",
+          "momentum-6"
+        ],
         "notes": "Production's hard stop is 2.5% (tighter than the -6% floor) and is checked first, so a 3% or 6% active variant never reaches its own stop on the main book. Shadow books use their own stop."
       },
       "dailyMaxLossUsd": {
