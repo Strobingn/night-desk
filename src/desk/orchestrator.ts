@@ -3516,9 +3516,12 @@ export class Desk {
         message: `Executor could not close ${pos.symbol}. ${message}`
       });
       // v13.39: no route is not a write-off. The tokens stay in the wallet; a later retry can fill.
+      // A healthy cached quote is not residual value. Only a quote we already know is drained counts.
       if (kind === "live" && isNoSellRouteMessage(message)) {
+        const cached = this.lastQuoteUsd.get(pos.mint);
+        const quoteUsd = cached != null && Number.isFinite(cached) && cached <= QUOTE_SIDE_GONE_USD ? cached : 0;
         const mid = pos.qty * this.bk(kind).price(pos.mint, pos.entryPrice);
-        this.noteLiquidityGone(kind, pos.mint, residualExitUsd({ quoteUsd: this.lastQuoteUsd.get(pos.mint) ?? 0, midValueUsd: mid }), "no_routes");
+        this.noteLiquidityGone(kind, pos.mint, residualExitUsd({ quoteUsd, midValueUsd: mid }), "no_routes");
       }
     }
   }
@@ -3811,8 +3814,8 @@ export class Desk {
   /** v13.7 one feed print marks the paper book and, when held there, the live book. */
   /**
    * v13.39: the mid is no longer sellable value. Write the residual into the book so
-   * equity, P&L and stops see it, keep the position open, and do not loop review on
-   * every later drained tick.
+   * equity and P&L see it. The position stays open for a later retry, so this does
+   * not run the stop. A later drained tick with the same residual does not rewrite.
    */
   private noteLiquidityGone(kind: BookKind, mint: string, residualUsd: number, reason: string): void {
     const book = this.bk(kind);
@@ -3851,7 +3854,6 @@ export class Desk {
         message: `${LIQUIDITY_GONE_NOTE}. ${pos.symbol} is still held — a later sell can retry if a route returns.`
       });
     }
-    if (!pos.closing) this.review(mint, px, kind, true);
     this.bus.emit("position.mark", { mint, at: now });
   }
 
@@ -3878,9 +3880,6 @@ export class Desk {
     const book = this.bk(kind);
     const key = bookKey(kind, mint);
     const pos = book.positions.get(mint);
-    if (origin?.quoteUsd != null && Number.isFinite(origin.quoteUsd) && origin.quoteUsd >= 0) {
-      this.lastQuoteUsd.set(mint, origin.quoteUsd);
-    }
     let reanchored = false;
     if (pos && !sameMarkSource(pos, origin)) {
       const now = Date.now();
@@ -3924,6 +3923,9 @@ export class Desk {
       }
     } else if (pos) {
       this.reanchors.delete(key);
+    }
+    if (origin?.quoteUsd != null && Number.isFinite(origin.quoteUsd) && origin.quoteUsd >= 0) {
+      this.lastQuoteUsd.set(mint, origin.quoteUsd);
     }
     if (pos) {
       const midValue = pos.qty * priceUsd;

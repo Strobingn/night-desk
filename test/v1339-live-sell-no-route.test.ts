@@ -223,6 +223,48 @@ describe("v13.39 live sell no-route and drained quote side", () => {
     expect((pos?.marketValueUsd ?? 0) > 1).toBe(true);
   });
 
+  it("does not treat a healthy cached quote as residual when Jupiter has no route", async () => {
+    const desk = armed();
+    await openLive(desk);
+    desk.bus.emit("market.tick", {
+      mint: MINT,
+      priceUsd: 0.00001287,
+      at: Date.now(),
+      feed: "dexscreener",
+      liquidityUsd: 8_000,
+      quoteUsd: 4_000
+    });
+    const refused = await desk.closePosition(MINT, 1, "live");
+    expect(refused.ok).toBe(false);
+    const pos = desk.snapshot().liveBook?.positions.find((p) => p.mint === MINT);
+    expect(pos?.liquidityNote).toBe("Liquidity gone, no sell route");
+    expect(pos?.marketValueUsd ?? 1).toBeLessThan(0.05);
+    expect(desk.liveBook?.positions.has(MINT)).toBe(true);
+  });
+
+  it("keeps a paper position open when the quote side is drained", async () => {
+    const desk = armed();
+    await desk.submitCandidate(makeToken({ mint: MINT, symbol: "INSANE", priceUsd: 0.00001, liquidityUsd: 9_000 }));
+    const bought = await desk.manualBuy(MINT, 5, { book: "paper" });
+    expect(bought).toMatchObject({ ok: true });
+    const held = desk.book.positions.get(MINT)!;
+    held.priceFeed = "dexscreener";
+    held.pairAddress = "HealthyPool111111111111111111111111111111";
+    desk.bus.emit("market.tick", {
+      mint: MINT,
+      priceUsd: 0.00001287,
+      at: Date.now(),
+      feed: "dexscreener",
+      pairAddress: held.pairAddress,
+      liquidityUsd: 1.39,
+      quoteUsd: 0.000013
+    });
+    expect(desk.book.positions.has(MINT)).toBe(true);
+    const pos = desk.snapshot().positions.find((p) => p.mint === MINT);
+    expect(pos?.liquidityNote).toBe("Liquidity gone, no sell route");
+    expect(pos?.marketValueUsd ?? 1).toBeLessThan(0.05);
+  });
+
   it("retries a live sell once a route returns", async () => {
     const desk = armed();
     await openLive(desk);
