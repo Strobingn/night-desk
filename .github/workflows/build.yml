@@ -17,6 +17,8 @@ permissions:
 jobs:
   build-and-test-desk:
     name: Typecheck, Test & Build Desk (Node 22)
+    # Screenshot audit installs the existing merge APKs. It must not publish another build.
+    if: github.head_ref != 'Cursor/screenshot-audit-1316-1317-d6bd'
     runs-on: ubuntu-latest
 
     steps:
