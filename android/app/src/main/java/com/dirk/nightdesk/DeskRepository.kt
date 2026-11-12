@@ -201,6 +201,8 @@ class DeskRepository private constructor(private val context: Context) {
     private val tape = LinkedHashMap<String, TapeEvent>()
     private val tapeLock = Any()
     private val connectLock = Mutex()
+    /** One strategy write at a time, so a second tap cannot land before the first scorecard is applied. */
+    private val strategyWrites = Mutex()
     private val gate = Any()
     private var socket: WebSocket? = null
     private var reconnecting = false
@@ -859,47 +861,64 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
-    /** v13.30 trading engine switch and active variants. The desk answers with the new scorecard. */
     /** v13.32 wipe the shadow books. The main paper book is untouched. */
-    suspend fun resetStrategy(): DeskNotice = withContext(Dispatchers.IO) {
-        val base = link.baseUrl
-        if (base.isBlank()) {
-            val notice = DeskNotice(false, "No desk URL")
+    suspend fun resetStrategy(): DeskNotice = strategyWrites.withLock {
+        withContext(Dispatchers.IO) {
+            val base = link.baseUrl
+            if (base.isBlank()) {
+                val notice = DeskNotice(false, "No desk URL")
+                _notice.value = notice
+                return@withContext notice
+            }
+            val notice = post("$base/api/strategy/reset", JSONObject().put("confirm", true).toString()).fold(
+                onSuccess = { raw ->
+                    applyReturnedStrategy(raw)
+                    DeskNotice(true, "Scorecard reset. Every shadow book is back to its starting balance.")
+                },
+                onFailure = { err -> DeskNotice(false, err.message ?: "Scorecard reset refused.") }
+            )
             _notice.value = notice
-            return@withContext notice
+            if (notice.ok) refresh()
+            notice
         }
-        val notice = post("$base/api/strategy/reset", JSONObject().put("confirm", true).toString()).fold(
-            onSuccess = { DeskNotice(true, "Scorecard reset. Every shadow book is back to its starting balance.") },
-            onFailure = { err -> DeskNotice(false, err.message ?: "Scorecard reset refused.") }
-        )
-        _notice.value = notice
-        notice
     }
 
-    suspend fun saveStrategy(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {
-        val base = link.baseUrl
-        if (base.isBlank()) {
-            val notice = DeskNotice(false, "No desk URL")
-            _notice.value = notice
-            return@withContext notice
-        }
-        val body = JSONObject()
-        for ((key, value) in patch) {
-            when (value) {
-                null -> body.put(key, JSONObject.NULL)
-                is Map<*, *> -> body.put(key, JSONObject(value.mapKeys { it.key.toString() }))
-                else -> body.put(key, value)
+    /** v13.30 trading engine switch and active variants. The desk answers with the new scorecard. */
+    suspend fun saveStrategy(patch: Map<String, Any?>): DeskNotice = strategyWrites.withLock {
+        withContext(Dispatchers.IO) {
+            val base = link.baseUrl
+            if (base.isBlank()) {
+                val notice = DeskNotice(false, "No desk URL")
+                _notice.value = notice
+                return@withContext notice
             }
+            val body = JSONObject()
+            for ((key, value) in patch) {
+                when (value) {
+                    null -> body.put(key, JSONObject.NULL)
+                    is Map<*, *> -> body.put(key, JSONObject(value.mapKeys { it.key.toString() }))
+                    else -> body.put(key, value)
+                }
+            }
+            val notice = post("$base/api/strategy/settings", body.toString()).fold(
+                onSuccess = { raw ->
+                    applyReturnedStrategy(raw)
+                    val on = runCatching { JSONObject(raw).optJSONObject("strategy")?.optBoolean("enabled", false) }.getOrNull()
+                    DeskNotice(true, if (patch.containsKey("enabled")) (if (on == true) "Trading engine on. Paper only." else "Trading engine off.") else "Engine settings saved.")
+                },
+                onFailure = { err -> DeskNotice(false, err.message ?: "Engine settings refused.") }
+            )
+            _notice.value = notice
+            if (notice.ok) refresh()
+            notice
         }
-        val notice = post("$base/api/strategy/settings", body.toString()).fold(
-            onSuccess = { raw ->
-                val on = runCatching { JSONObject(raw).optJSONObject("strategy")?.optBoolean("enabled", false) }.getOrNull()
-                DeskNotice(true, if (patch.containsKey("enabled")) (if (on == true) "Trading engine on. Paper only." else "Trading engine off.") else "Engine settings saved.")
-            },
-            onFailure = { err -> DeskNotice(false, err.message ?: "Engine settings refused.") }
-        )
-        _notice.value = notice
-        notice
+    }
+
+    /** Paint the scorecard from the POST body now. [refresh] then replaces it with the full snapshot. */
+    private fun applyReturnedStrategy(raw: String) {
+        val parsed = runCatching { Strategy.parse(JSONObject(raw).optJSONObject("strategy")) }.getOrNull() ?: return
+        val current = _snapshot.value ?: return
+        _snapshot.value = current.copy(strategy = parsed)
     }
 
     suspend fun saveSettings(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {

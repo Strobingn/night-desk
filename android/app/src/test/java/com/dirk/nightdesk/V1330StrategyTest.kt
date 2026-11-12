@@ -81,6 +81,31 @@ class V1330StrategyTest {
     }
 
     @Test
+    fun stepperKeepsLaterTapsUntilTheSnapshotCatchesUp() {
+        assertEquals(55.0, Strategy.stepBound(50.0, 5.0, 5.0, 500.0), 0.0)
+        assertEquals(60.0, Strategy.stepBound(55.0, 5.0, 5.0, 500.0), 0.0)
+        assertEquals(5.0, Strategy.stepBound(5.0, -5.0, 5.0, 500.0), 0.0)
+        assertEquals(500.0, Strategy.stepBound(500.0, 5.0, 5.0, 500.0), 0.0)
+        assertEquals(0.25, Strategy.stepBound(0.25, -0.5, 0.25, 50.0), 0.0)
+        assertEquals(6.0, Strategy.stepBound(6.0, 1.0, 1.0, 6.0), 0.0)
+
+        val (held, seen) = Strategy.adoptStepper(50.0, 50.0, 50.0)
+        assertEquals(50.0, held, 0.0)
+        assertEquals(50.0, seen, 0.0)
+        // Two taps ahead of the last poll. The poll that reports only the first tap must not rewind the control.
+        val (ahead, seenFirst) = Strategy.adoptStepper(60.0, 50.0, 55.0)
+        assertEquals(60.0, ahead, 0.0)
+        assertEquals(55.0, seenFirst, 0.0)
+        val (caught, seenCaught) = Strategy.adoptStepper(ahead, seenFirst, 60.0)
+        assertEquals(60.0, caught, 0.0)
+        assertEquals(60.0, seenCaught, 0.0)
+        // A control that is still on the last snapshot follows an external change.
+        val (external, seenExternal) = Strategy.adoptStepper(60.0, 60.0, 40.0)
+        assertEquals(40.0, external, 0.0)
+        assertEquals(40.0, seenExternal, 0.0)
+    }
+
+    @Test
     fun engineStopCountsAsAStopForAlerts() {
         assertTrue(OneTap.isStopExit("STRATEGY_STOP"))
         assertFalse(OneTap.isStopExit("TAKE_PROFIT"))

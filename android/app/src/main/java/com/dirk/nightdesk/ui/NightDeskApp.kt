@@ -102,6 +102,7 @@ import com.dirk.nightdesk.BuildConfig
 import com.dirk.nightdesk.CrashLog
 import com.dirk.nightdesk.showDeskCrash
 import com.dirk.nightdesk.showPhoneCrash
+import com.dirk.nightdesk.DeskNotice
 import com.dirk.nightdesk.DeskRepository
 import com.dirk.nightdesk.formatUsd
 import com.dirk.nightdesk.DeskSnapshot
@@ -125,6 +126,8 @@ import com.dirk.nightdesk.feedLabel
 import com.dirk.nightdesk.pump.PumpScreen
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -552,7 +555,7 @@ fun NightDeskApp(desk: DeskRepository) {
                     safetyChips = snap?.safetyChips.orEmpty()
                 )
                 TAB_SEARCH -> AddCoinScreen(desk, snap, addPrefill, oneTap)
-                TAB_ENGINE -> EngineScreen(snap?.strategy, snap?.perf.orEmpty(), onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } }, onReset = { scope.launch { desk.resetStrategy() } })
+                TAB_ENGINE -> EngineScreen(snap?.strategy, snap?.perf.orEmpty(), onStrategy = { patch -> scope.async { desk.saveStrategy(patch) } }, onReset = { scope.launch { desk.resetStrategy() } })
                 else -> when (settingsSub) {
                     "link" -> SubScreen("Link", onBack = { settingsSub = null }) { LinkScreen(desk) }
                     "recap" -> SubScreen("Recap", onBack = { settingsSub = null }) {
@@ -2243,7 +2246,7 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                     } else {
                         SettingsScreen(snap) {}
                     }
-                    3 -> EngineScreen(snap.strategy, snap.perf, {}, {})
+                    3 -> EngineScreen(snap.strategy, snap.perf, { _ -> CompletableDeferred(DeskNotice(true, "")) }, {})
                     else -> SettingsScreen(snap) {}
                 }
             }

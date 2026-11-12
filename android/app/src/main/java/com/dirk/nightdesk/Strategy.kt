@@ -137,4 +137,19 @@ object Strategy {
         val sign = if (n > 0.004) "+" else if (n < -0.004) "−" else ""
         return sign + "$" + "%.2f".format(Locale.US, kotlin.math.abs(n))
     }
+
+    /** One stepper notch, clamped to the band the desk accepts. */
+    fun stepBound(current: Double, delta: Double, min: Double, max: Double): Double =
+        (current + delta).coerceIn(min, max)
+
+    /**
+     * Fold a polled value into a stepper that may already show a newer tap.
+     * Returns the value to paint and the snapshot value already accounted for.
+     * A poll that is still behind the taps is remembered and does not move the control.
+     */
+    fun adoptStepper(shown: Double, seen: Double, incoming: Double): Pair<Double, Double> {
+        if (incoming == seen) return shown to seen
+        val next = if (shown == seen || incoming == shown) incoming else shown
+        return next to incoming
+    }
 }

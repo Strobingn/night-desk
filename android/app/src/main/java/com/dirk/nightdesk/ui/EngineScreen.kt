@@ -23,8 +23,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,12 +35,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dirk.nightdesk.DeskNotice
 import com.dirk.nightdesk.PerfRow
 import com.dirk.nightdesk.Perf
 import com.dirk.nightdesk.Strategy
 import com.dirk.nightdesk.StrategyView
 import com.dirk.nightdesk.VariantScore
 import java.util.Locale
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.launch
 
 /**
  * v13.32 Engine tab: the trading engine's switch, sizes, the six shadow books and the
@@ -47,10 +53,62 @@ import java.util.Locale
 fun EngineScreen(
     view: StrategyView?,
     perf: List<PerfRow>,
-    onStrategy: (Map<String, Any?>) -> Unit,
+    onStrategy: (Map<String, Any?>) -> Deferred<DeskNotice>,
     onReset: () -> Unit
 ) {
     var askReset by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val latestView by rememberUpdatedState(view)
+    // The desk snapshot is not updated until the save returns, so a second tap in that
+    // window would otherwise repeat the first absolute value. These locals step immediately.
+    var tradeUsd by remember { mutableStateOf(view?.tradeUsd ?: 0.0) }
+    var seenTrade by remember { mutableStateOf(view?.tradeUsd ?: 0.0) }
+    var tradeGen by remember { mutableIntStateOf(0) }
+    var targetNet by remember { mutableStateOf(view?.targetNetUsd ?: 0.0) }
+    var seenTarget by remember { mutableStateOf(view?.targetNetUsd ?: 0.0) }
+    var targetGen by remember { mutableIntStateOf(0) }
+    var maxOpen by remember { mutableIntStateOf(view?.maxOpen ?: 0) }
+    var seenOpen by remember { mutableIntStateOf(view?.maxOpen ?: 0) }
+    var openGen by remember { mutableIntStateOf(0) }
+    if (view != null) {
+        val trade = Strategy.adoptStepper(tradeUsd, seenTrade, view.tradeUsd)
+        if (trade.first != tradeUsd) tradeUsd = trade.first
+        if (trade.second != seenTrade) seenTrade = trade.second
+        val target = Strategy.adoptStepper(targetNet, seenTarget, view.targetNetUsd)
+        if (target.first != targetNet) targetNet = target.first
+        if (target.second != seenTarget) seenTarget = target.second
+        val open = Strategy.adoptStepper(maxOpen.toDouble(), seenOpen.toDouble(), view.maxOpen.toDouble())
+        if (open.first.toInt() != maxOpen) maxOpen = open.first.toInt()
+        if (open.second.toInt() != seenOpen) seenOpen = open.second.toInt()
+    }
+    fun launchStep(
+        current: Double,
+        delta: Double,
+        min: Double,
+        max: Double,
+        gen: () -> Int,
+        setGen: (Int) -> Unit,
+        setShown: (Double) -> Unit,
+        setSeen: (Double) -> Unit,
+        fallback: () -> Double?,
+        patch: (Double) -> Map<String, Any?>
+    ) {
+        val next = Strategy.stepBound(current, delta, min, max)
+        if (next == current) return
+        setShown(next)
+        val ticket = gen() + 1
+        setGen(ticket)
+        val job = onStrategy(patch(next))
+        scope.launch {
+            val notice = job.await()
+            if (!notice.ok && gen() == ticket) {
+                fallback()?.let {
+                    setShown(it)
+                    setSeen(it)
+                }
+            }
+        }
+    }
     LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -95,9 +153,24 @@ fun EngineScreen(
         }
         item {
             Section("Sizing", padded = true) {
-                Stepper("Trade size", "$" + "%.0f".format(Locale.US, view.tradeUsd), onMinus = { onStrategy(mapOf("tradeUsd" to (view.tradeUsd - 5).coerceAtLeast(5.0))) }, onPlus = { onStrategy(mapOf("tradeUsd" to (view.tradeUsd + 5).coerceAtMost(500.0))) })
-                Stepper("Take-profit, net", "$" + "%.2f".format(Locale.US, view.targetNetUsd), onMinus = { onStrategy(mapOf("targetNetUsd" to (view.targetNetUsd - 0.5).coerceAtLeast(0.25))) }, onPlus = { onStrategy(mapOf("targetNetUsd" to (view.targetNetUsd + 0.5).coerceAtMost(50.0))) })
-                Stepper("Max open", "${view.maxOpen}", onMinus = { onStrategy(mapOf("maxOpen" to (view.maxOpen - 1).coerceAtLeast(1))) }, onPlus = { onStrategy(mapOf("maxOpen" to (view.maxOpen + 1).coerceAtMost(6))) })
+                Stepper(
+                    "Trade size",
+                    "$" + "%.0f".format(Locale.US, tradeUsd),
+                    onMinus = { launchStep(tradeUsd, -5.0, 5.0, 500.0, { tradeGen }, { tradeGen = it }, { tradeUsd = it }, { seenTrade = it }, { latestView?.tradeUsd }) { mapOf("tradeUsd" to it) } },
+                    onPlus = { launchStep(tradeUsd, 5.0, 5.0, 500.0, { tradeGen }, { tradeGen = it }, { tradeUsd = it }, { seenTrade = it }, { latestView?.tradeUsd }) { mapOf("tradeUsd" to it) } }
+                )
+                Stepper(
+                    "Take-profit, net",
+                    "$" + "%.2f".format(Locale.US, targetNet),
+                    onMinus = { launchStep(targetNet, -0.5, 0.25, 50.0, { targetGen }, { targetGen = it }, { targetNet = it }, { seenTarget = it }, { latestView?.targetNetUsd }) { mapOf("targetNetUsd" to it) } },
+                    onPlus = { launchStep(targetNet, 0.5, 0.25, 50.0, { targetGen }, { targetGen = it }, { targetNet = it }, { seenTarget = it }, { latestView?.targetNetUsd }) { mapOf("targetNetUsd" to it) } }
+                )
+                Stepper(
+                    "Max open",
+                    "$maxOpen",
+                    onMinus = { launchStep(maxOpen.toDouble(), -1.0, 1.0, 6.0, { openGen }, { openGen = it }, { maxOpen = it.toInt() }, { seenOpen = it.toInt() }, { latestView?.maxOpen?.toDouble() }) { mapOf("maxOpen" to it.toInt()) } },
+                    onPlus = { launchStep(maxOpen.toDouble(), 1.0, 1.0, 6.0, { openGen }, { openGen = it }, { maxOpen = it.toInt() }, { seenOpen = it.toInt() }, { latestView?.maxOpen?.toDouble() }) { mapOf("maxOpen" to it.toInt()) } }
+                )
                 Text("Paper only. New engine buys pause once the paper book is $10 down on the day.", color = P.muted, fontSize = 12.sp)
             }
         }
