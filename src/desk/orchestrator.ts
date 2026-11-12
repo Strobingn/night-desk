@@ -1788,7 +1788,10 @@ export class Desk {
       tried.push("DexScreener did not answer");
     }
     if (token.mint.endsWith("pump")) {
-      const curve = await this.curvePrice(token.mint);
+      const curve = await takeFirst(this.curvePrice(token.mint), LOOKUP_CURVE_MS, {
+        ok: false as const,
+        reason: "the RPC did not answer inside the buy budget"
+      });
       if (curve.ok) {
         const next: CandidateToken = { ...token, priceUsd: curve.priceUsd, liquidityUsd: curve.liquidityUsd, priceFeed: "chain", pairAddress: curve.curve, dex: "pump.fun curve" };
         this.remember(next);
@@ -1796,7 +1799,7 @@ export class Desk {
       }
       tried.push(`pump.fun curve: ${curve.reason}`);
     }
-    const jup = await jupiterLookupQuote(token.mint, token.priceUsd, fetchImpl);
+    const jup = await takeFirst(jupiterLookupQuote(token.mint, token.priceUsd, fetchImpl), LOOKUP_PRICE_MS, { ok: false as const });
     if (jup.ok) {
       const next: CandidateToken = { ...token, priceUsd: jup.priceUsd, liquidityUsd: jup.liquidityUsd, priceFeed: "jupiter" };
       return { token: next, tried };
@@ -2450,12 +2453,15 @@ export class Desk {
       // v13.6: brand-new pump.fun coins have no DexScreener pair and no Jupiter quote yet.
       // Read the bonding curve on-chain; fail closed if it is missing, complete or empty.
       const tried: string[] = [];
-      const jup = await jupiterLookupQuote(cleaned, 0, this.lookupFetch);
+      const jup = await takeFirst(jupiterLookupQuote(cleaned, 0, this.lookupFetch), LOOKUP_PRICE_MS, { ok: false as const });
       if (jup.ok) {
         token = { ...token, priceUsd: jup.priceUsd, liquidityUsd: jup.liquidityUsd, priceFeed: "jupiter", pairAddress: undefined };
       } else {
-        tried.push(`Jupiter has no quote${jup.error ? ` (${jup.error})` : ""}`);
-        const curve = await this.curvePrice(cleaned);
+        tried.push(`Jupiter has no quote${"error" in jup && jup.error ? ` (${jup.error})` : ""}`);
+        const curve = await takeFirst(this.curvePrice(cleaned), LOOKUP_CURVE_MS, {
+          ok: false as const,
+          reason: "the RPC did not answer inside the buy budget"
+        });
         if (curve.ok) {
           token = { ...token, priceUsd: curve.priceUsd, liquidityUsd: curve.liquidityUsd, priceFeed: "chain", pairAddress: curve.curve, dex: "pump.fun curve" };
           this.remember(token);
@@ -2485,7 +2491,8 @@ export class Desk {
     // Hard kills (mint authority not revoked, dev rug link, token safety) need the operator's "Buy anyway".
     // A safety read that fails is Unknown and does not block a manual buy. AI buys never reach this path.
     const safety = await this.tokenSafety(token.mint, -1);
-    const bundle = isPumpCoin(token) ? await this.launchBundle(token.mint, safety.supply) : null;
+    // Bundle is warning-only for a manual buy. Never wait on an uncapped Helius P2 read (launchBundle / rpcBundle).
+    const bundle = isPumpCoin(token) ? await this.launchBundleSoon(token.mint, safety.supply) : null;
     if (bundle?.flagged && bundle.label) {
       this.log({
         stage: "system",

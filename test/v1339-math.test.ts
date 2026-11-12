@@ -8,7 +8,7 @@ import { VARIANTS } from "../src/strategy/config.js";
 
 const meta = { variant: "launch-1", signal: "launch" as const, stopPct: 0.01, targetNetUsd: 3, timeLimitMs: 600_000 };
 
-describe("13.38 math audit", () => {
+describe("13.39 math audit", () => {
   it("the fill model matches an exact constant-product pool", () => {
     for (const [x, L] of [[50, 20_000], [50, 8_000], [500, 100_000]] as const) {
       const p = 0.001;
