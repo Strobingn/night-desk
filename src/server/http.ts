@@ -56,6 +56,15 @@ export function sendSnapshot(sockets: Iterable<PushTarget>, payload: string, bac
   return skipped;
 }
 
+/**
+ * A snapshot whose desk state matches the last push can be dropped, except when a slow
+ * socket skipped that push. The retry is often only `now` later, and that socket still
+ * needs the copy it missed.
+ */
+export function skipDuplicateSnapshot(fingerprint: string, lastFingerprint: string, slowPending: boolean): boolean {
+  return fingerprint === lastFingerprint && !slowPending;
+}
+
 export function startServer(
   desk: Desk,
   host: string,
@@ -359,6 +368,8 @@ export function startServer(
   let pending: NodeJS.Timeout | null = null;
   let lastSnapshotAt = 0;
   let lastPayload = "";
+  // A socket over the backlog cap has not been given lastPayload yet.
+  let slowPending = false;
   const push = () => {
     if (pending) return;
     const wait = Math.max(WS_PUSH_MS, lastSnapshotAt + WS_SNAPSHOT_MIN_MS - Date.now());
@@ -376,10 +387,12 @@ export function startServer(
         return;
       }
       // v13.32 nothing changed since the last push: the clients keep what they have.
-      if (fingerprint === lastPayload) return;
+      // The drain retry still sends when a backed-up socket never received that push.
+      if (skipDuplicateSnapshot(fingerprint, lastPayload, slowPending)) return;
       lastPayload = fingerprint;
       // A socket still draining an older snapshot skips this one and gets the latest once it drains.
-      if (sendSnapshot(sockets, payload) > 0) push();
+      slowPending = sendSnapshot(sockets, payload) > 0;
+      if (slowPending) push();
     }, wait);
   };
   let marksPending: NodeJS.Timeout | null = null;

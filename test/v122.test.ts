@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { Desk } from "../src/desk/orchestrator.js";
-import { WS_BACKLOG_MAX, readPublicUrl, sendSnapshot, startServer } from "../src/server/http.js";
+import { WS_BACKLOG_MAX, readPublicUrl, sendSnapshot, skipDuplicateSnapshot, startServer } from "../src/server/http.js";
 import { testConfig } from "./helpers.js";
 
 function fakeSocket(buffered: number) {
@@ -26,6 +26,12 @@ describe("v12.2 phone connection", () => {
     slow.bufferedAmount = 0;
     expect(sendSnapshot([slow], "{}")).toBe(0);
     expect(slow.sent).toHaveLength(1);
+  });
+
+  it("keeps the drain retry when the next snapshot only moved the clock", () => {
+    expect(skipDuplicateSnapshot("book", "book", false)).toBe(true);
+    expect(skipDuplicateSnapshot("book", "book", true)).toBe(false);
+    expect(skipDuplicateSnapshot("closed", "book", false)).toBe(false);
   });
 
   it("reads only an https trycloudflare URL from data/public-url.txt", () => {

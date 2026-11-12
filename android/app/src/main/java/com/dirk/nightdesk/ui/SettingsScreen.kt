@@ -209,20 +209,29 @@ fun SettingsScreen(
                 cursorColor = P.accent
             )
         )
-        if (query.isBlank()) {
-            Section("More") {
-                ListRow("Trading engine", snap?.strategy?.let { com.dirk.nightdesk.Strategy.summary(it) } ?: "Not on this desk", leading = { RowIcon("radar") }, trailing = { Chevron() }, onClick = { onOpenEngine?.invoke() })
-                RowDivider()
-                ListRow("Link", "Desk URL, token and beacon", leading = { RowIcon("link") }, trailing = { Chevron() }, onClick = { onOpen?.invoke("link") })
-                RowDivider()
-                ListRow("Recap", "What the desk did over 12h, 24h or 7d", leading = { RowIcon("recap") }, trailing = { Chevron() }, onClick = { onOpen?.invoke("recap") })
-                RowDivider()
-                ListRow("Pump terminal", "The pump.fun watch screen", leading = { RowIcon("coins") }, trailing = { Chevron() }, onClick = { onOpen?.invoke("pump") })
+        run {
+            val q = LocalSettingsQuery.current
+            val more = listOf(
+                MoreLink("Trading engine", snap?.strategy?.let { com.dirk.nightdesk.Strategy.summary(it) } ?: "Not on this desk", "radar", "engine"),
+                MoreLink("Link", "Desk URL, token and beacon", "link", "link"),
+                MoreLink("Recap", "What the desk did over 12h, 24h or 7d", "recap", "recap"),
+                MoreLink("Pump terminal", "The pump.fun watch screen", "coins", "pump")
+            )
+            val moreShown = more.filter { settingsQueryMatches(q, "More", it.title, it.subtitle) }
+            if (moreShown.isNotEmpty()) {
+                Section("More") {
+                    moreShown.forEachIndexed { index, item ->
+                        if (index > 0) RowDivider()
+                        ListRow(item.title, item.subtitle, leading = { RowIcon(item.icon) }, trailing = { Chevron() }, onClick = {
+                            if (item.dest == "engine") onOpenEngine?.invoke() else onOpen?.invoke(item.dest)
+                        })
+                    }
+                }
             }
-            AppearanceGroup()
+            if (settingsQueryMatches(q, "Appearance", "theme", "Dark", "Light", "System")) AppearanceGroup()
         }
         if (oneTap != null) {
-            Group("One tap") {
+            Group("One tap", listOf("Size", "Slip", "Sell all", "slippage")) {
                 Text(
                     "Size and slippage for the Buy and Sell buttons on Home, Tape and Add coin. Sell all stays here.",
                     color = Dim,
@@ -237,43 +246,45 @@ fun SettingsScreen(
                 )
             }
         }
-        Group("Live wallet") {
-            WalletCard(snap)
+        Group("Live wallet", listOf("Live $ per trade", "Live daily cap", "Live daily cap $", "Live trailing stop %", "Sender tip lamports")) {
             var showReady by remember { mutableStateOf(false) }
-            TextButton(onClick = { showReady = !showReady }) { Text(if (showReady) "Hide" else "Details", color = P.accent) }
-            if (showReady) {
-                val lines = snap?.readiness?.lines.orEmpty()
-                if (lines.isEmpty()) Text("Waiting for the desk checklist.", color = Dim, fontSize = 12.sp)
-                lines.forEach { line -> Text(line, color = P.ink, fontSize = 12.sp) }
+            if (LocalSettingsQuery.current.isBlank()) {
+                WalletCard(snap)
+                TextButton(onClick = { showReady = !showReady }) { Text(if (showReady) "Hide" else "Details", color = P.accent) }
+                if (showReady) {
+                    val lines = snap?.readiness?.lines.orEmpty()
+                    if (lines.isEmpty()) Text("Waiting for the desk checklist.", color = Dim, fontSize = 12.sp)
+                    lines.forEach { line -> Text(line, color = P.ink, fontSize = 12.sp) }
+                    Text(
+                        "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY on the desk host. Night Desk has no wallet vault.",
+                        color = Dim,
+                        fontSize = 12.sp
+                    )
+                }
                 Text(
-                    "This note does not enable live trading and does not save a seed or private key. The wallet key lives only in WALLET_PRIVATE_KEY on the desk host. Night Desk has no wallet vault.",
-                    color = Dim,
-                    fontSize = 12.sp
+                    "AI auto-buys stay on the paper book. The server refuses a request to send them live. Your live buys, sells, limits and stops default to \$5. These limits are not a tested profit system.",
+                    color = P.ink,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
-            Text(
-                "AI auto-buys stay on the paper book. The server refuses a request to send them live. Your live buys, sells, limits and stops default to \$5. These limits are not a tested profit system.",
-                color = P.ink,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.SemiBold
-            )
             ExactSlider("Live $ per trade", draft.liveUsd, 1f..100f, 1f, { "%.0f".format(it) }) { draft = draft.copy(liveUsd = it) }
-            Text("Up to \$100. Every live buy spends exactly this much USDC (\$5 default). Paper sizes are never used live.", color = Dim, fontSize = 12.sp)
+            Hint("Live $ per trade", "Up to \$100. Every live buy spends exactly this much USDC (\$5 default). Paper sizes are never used live.")
             ToggleRow("Live daily cap", draft.useLiveCap) { draft = draft.copy(useLiveCap = it) }
-            if (draft.useLiveCap) {
+            if (draft.useLiveCap || queryHits("Live daily cap $")) {
                 ExactSlider("Live daily cap $", draft.liveCap, 5f..1_000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(liveCap = it) }
             }
-            Text("Off by default: no max per day.", color = Dim, fontSize = 12.sp)
+            if (matches("Live daily cap") || matches("Live daily cap $")) Text("Off by default: no max per day.", color = Dim, fontSize = 12.sp)
             ExactSlider("Live trailing stop %", draft.liveTrail, 0.5f..20f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(liveTrail = it) }
-            Text("Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first.", color = Dim, fontSize = 12.sp)
+            Hint("Live trailing stop %", "Armed from entry. Sells when an accepted mark falls this far below the highest mark since the buy (1% default). The −6% hard stop still fires first.")
             ExactSlider("Sender tip lamports", draft.senderTipLamports, 5000f..1_000_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(senderTipLamports = it) }
-            Text("Live swaps only. Minimum 5000 lamports (0.000005 SOL). Paper trades do not tip.", color = Dim, fontSize = 12.sp)
+            Hint("Sender tip lamports", "Live swaps only. Minimum 5000 lamports (0.000005 SOL). Paper trades do not tip.")
         }
-        Group("Entry / Filter") {
+        Group("Entry / Filter", listOf("1h volume $", "Trade line", "Volume boost %", "Top 10 cap %", "Min liquidity $", "Min age min", "Max age min", holderSlider.label, "Max dev holding %", "Allow unlocked LP")) {
             ExactSlider("1h volume $", draft.volume, 1_000f..500_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(volume = it) }
             ExactSlider("Trade line", draft.score, 0.10f..0.95f, 0.01f, { "%.2f".format(it) }) { draft = draft.copy(score = it) }
             ExactSlider("Volume boost %", draft.boost, 0f..100f, 5f, { "%.0f".format(it) }) { draft = draft.copy(boost = it) }
-            Text("High 1h volume adds to the Analyst score: none at \$10k, half at \$100k, full at \$1M+. 50% = up to +0.10. 0 = off. Never lowers a score or passes 1. No volume data = no boost.", color = Dim, fontSize = 12.sp)
+            Hint("Volume boost %", "High 1h volume adds to the Analyst score: none at \$10k, half at \$100k, full at \$1M+. 50% = up to +0.10. 0 = off. Never lowers a score or passes 1. No volume data = no boost.")
             ExactSlider("Top 10 cap %", draft.top10, 5f..35f, 1f, { "%.0f".format(it) }) { draft = draft.copy(top10 = it) }
             ExactSlider("Min liquidity $", draft.liquidity, 0f..200_000f, 1000f, { "%.0f".format(it) }) { draft = draft.copy(liquidity = it) }
             ExactSlider("Min age min", draft.minAge, 0f..1440f, 5f, { "%.0f".format(it) }) { draft = draft.copy(minAge = it) }
@@ -281,52 +292,52 @@ fun SettingsScreen(
             ExactSlider(holderSlider.label, draft.holders, 0f..holderSlider.max, holderSlider.step, { "%.0f".format(it) }) {
                 draft = draft.copy(holders = it)
             }
-            if (holderSlider.max <= 20f) Text("Of the top 20 accounts. A full list counts as 20 or more.", color = Dim, fontSize = 12.sp)
+            if (holderSlider.max <= 20f && matches(holderSlider.label)) Text("Of the top 20 accounts. A full list counts as 20 or more.", color = Dim, fontSize = 12.sp)
             ExactSlider("Max dev holding %", draft.dev, 0f..50f, 1f, { "%.0f".format(it) }) { draft = draft.copy(dev = it) }
             ToggleRow("Allow unlocked LP", draft.unlocked) { draft = draft.copy(unlocked = it) }
-            Text("0 on a floor turns that extra gate off. Mint authority and dev rugs stay hard kills.", color = Dim, fontSize = 12.sp)
+            if (LocalSettingsQuery.current.isBlank()) Text("0 on a floor turns that extra gate off. Mint authority and dev rugs stay hard kills.", color = Dim, fontSize = 12.sp)
         }
-        Group("Risk / Exits") {
+        Group("Risk / Exits", listOf("Hard stop %", "Cooldown hours", "Daily max loss $", "Trail arm %", "Trail gap %", "Trailing take profit")) {
             ExactSlider("Hard stop %", draft.stop, 1f..6f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(stop = it.coerceAtMost(6f)) }
-            Text("Locked at 6% or tighter. The desk refuses a looser stop.", color = Dim, fontSize = 12.sp)
+            Hint("Hard stop %", "Locked at 6% or tighter. The desk refuses a looser stop.")
             ExactSlider("Cooldown hours", draft.cooldown, 0f..72f, 1f, { if (it < 0.5f) "off" else "%.0f".format(it) }) { draft = draft.copy(cooldown = it.coerceIn(0f, 72f)) }
-            Text(if (draft.cooldown < 0.5f) "Off. A hard stop does not ban the mint." else "Hours before that mint can be bought again after a hard stop.", color = Dim, fontSize = 12.sp)
+            if (matches("Cooldown hours")) Text(if (draft.cooldown < 0.5f) "Off. A hard stop does not ban the mint." else "Hours before that mint can be bought again after a hard stop.", color = Dim, fontSize = 12.sp)
             ExactSlider("Daily max loss $", draft.dailyLoss, 0f..1000f, 5f, { "%.0f".format(it) }) { draft = draft.copy(dailyLoss = it) }
             ExactSlider("Trail arm %", draft.arm, 12f..600f, 1f, { "%.0f".format(it) }) { draft = draft.copy(arm = it.coerceAtLeast(12f)) }
             ExactSlider("Trail gap %", draft.gap, 0.5f..4f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(gap = it.coerceAtMost(4f)) }
             ToggleRow("Trailing take profit", draft.trail) { draft = draft.copy(trail = it) }
-            Text("Off by default. Winners stay until you sell. Arm cannot be easier than 12%. Gap cannot be wider than 4%.", color = Dim, fontSize = 12.sp)
+            if (matches("Trailing take profit") || matches("Trail arm %") || matches("Trail gap %")) Text("Off by default. Winners stay until you sell. Arm cannot be easier than 12%. Gap cannot be wider than 4%.", color = Dim, fontSize = 12.sp)
         }
-        Group("Sizing") {
+        Group("Sizing", listOf("Max position % of book", "Fixed $ per auto buy", "Position size $", "Max total exposure %", "Entry slippage %", "Custom exit slippage", "Exit slippage %", "Manual buy $", "Use the position cap instead", "Max open", "Position price refresh s", "Max trades / hour", "Auto-buy", "Paper reset amount $")) {
             ExactSlider("Max position % of book", draft.position, 1f..50f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(position = it) }
-            Text("Cap for auto buys and normal manual buys. A confirmed manual buy on Add coin may go up to 100%.", color = Dim, fontSize = 12.sp)
+            Hint("Max position % of book", "Cap for auto buys and normal manual buys. A confirmed manual buy on Add coin may go up to 100%.")
             ToggleRow("Fixed $ per auto buy", draft.useSizeUsd) { draft = draft.copy(useSizeUsd = it) }
-            if (draft.useSizeUsd) {
+            if (draft.useSizeUsd || queryHits("Position size $")) {
                 ExactSlider("Position size $", draft.sizeUsd, 1f..10_000f, 1f, { "%.0f".format(it) }) { draft = draft.copy(sizeUsd = it) }
             }
             ExactSlider("Max total exposure %", draft.exposure, 10f..100f, 5f, { "%.0f".format(it) }) { draft = draft.copy(exposure = it) }
-            Text("Open positions as a share of equity. 100% = only cash limits it.", color = Dim, fontSize = 12.sp)
+            Hint("Max total exposure %", "Open positions as a share of equity. 100% = only cash limits it.")
             ExactSlider("Entry slippage %", draft.slip, 0.5f..50f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(slip = it) }
-            Text("Max price impact a buy may pay, 0.5–50% (3% default). A buy past it is refused, never filled worse; the fill is recorded at its real price. The −6% stop is unchanged.", color = Dim, fontSize = 12.sp)
+            Hint("Entry slippage %", "Max price impact a buy may pay, 0.5–50% (3% default). A buy past it is refused, never filled worse; the fill is recorded at its real price. The −6% stop is unchanged.")
             ToggleRow("Custom exit slippage", draft.useExitSlip) { draft = draft.copy(useExitSlip = it) }
-            if (draft.useExitSlip) {
+            if (draft.useExitSlip || queryHits("Exit slippage %")) {
                 ExactSlider("Exit slippage %", draft.exitSlip, 0.5f..50f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(exitSlip = it) }
             }
-            Text("Max cost of selling the whole position, checked before every buy. Off = entry cap + 3%. Sells always go through at the real fill.", color = Dim, fontSize = 12.sp)
+            if (matches("Custom exit slippage") || matches("Exit slippage %")) Text("Max cost of selling the whole position, checked before every buy. Off = entry cap + 3%. Sells always go through at the real fill.", color = Dim, fontSize = 12.sp)
             ExactSlider("Manual buy $", draft.buy, 1f..10_000f, 1f, { "%.0f".format(it) }) { draft = draft.copy(buy = it, useCap = false) }
             ToggleRow("Use the position cap instead", draft.useCap) { draft = draft.copy(useCap = it) }
             ExactSlider("Max open", draft.open, 1f..24f, 1f, { "%.0f".format(it) }) { draft = draft.copy(open = it) }
             ExactSlider("Position price refresh s", draft.refresh, 1f..10f, 0.5f, { "%.1f".format(it) }) { draft = draft.copy(refresh = it) }
-            Text("How often open positions are re-priced. Pool reserves every cycle; DexScreener every 3 s and Jupiter every 5 s at most, so the Scout is not rate-limited.", color = Dim, fontSize = 12.sp)
+            Hint("Position price refresh s", "How often open positions are re-priced. Pool reserves every cycle; DexScreener every 3 s and Jupiter every 5 s at most, so the Scout is not rate-limited.")
             ExactSlider("Max trades / hour", draft.rate, 0f..60f, 1f, { "%.0f".format(it) }) { draft = draft.copy(rate = it) }
             ToggleRow("Auto-buy", draft.autoBuy) { draft = draft.copy(autoBuy = it) }
-            Text("0 trades per hour means no hourly cap. Auto-buy off still leaves manual Buy and Buy anyway.", color = Dim, fontSize = 12.sp)
+            if (matches("Max trades / hour") || matches("Auto-buy")) Text("0 trades per hour means no hourly cap. Auto-buy off still leaves manual Buy and Buy anyway.", color = Dim, fontSize = 12.sp)
             ExactSlider("Paper reset amount $", draft.resetUsd, 100f..10_000f, 100f, { "%.0f".format(it) }) { draft = draft.copy(resetUsd = it) }
-            Text("Slippage and the pool-depth exit check still cap every size. A bigger ask than the pool takes is refused.", color = Dim, fontSize = 12.sp)
+            if (LocalSettingsQuery.current.isBlank()) Text("Slippage and the pool-depth exit check still cap every size. A bigger ask than the pool takes is refused.", color = Dim, fontSize = 12.sp)
         }
-        Group("Scout sources") {
+        Group("Scout sources", listOf("Pump", "Pump.fun API", "Bonk.fun / LaunchLab", "DexScreener", "Gecko", "Jupiter", "DexPaprika / Meteora", "Bitquery")) {
             ToggleRow("Pump", true) {}
-            Text("Pump stays on. It is the primary feed.", color = Dim, fontSize = 12.sp)
+            Hint("Pump", "Pump stays on. It is the primary feed.")
             ToggleRow("Pump.fun API", draft.pumpApi) { draft = draft.copy(pumpApi = it) }
             ToggleRow("Bonk.fun / LaunchLab", draft.launchLab) { draft = draft.copy(launchLab = it) }
             ToggleRow("DexScreener", draft.dex) { draft = draft.copy(dex = it) }
@@ -335,19 +346,20 @@ fun SettingsScreen(
             ToggleRow("DexPaprika / Meteora", draft.paprika) { draft = draft.copy(paprika = it) }
             ToggleRow("Bitquery", draft.bitquery) { draft = draft.copy(bitquery = it) }
         }
-        Group("Alerts") {
+        Group("Alerts", listOf("Near misses", "Fills", "Stops", "PnL alert %")) {
             ToggleRow("Near misses", draft.near) { draft = draft.copy(near = it) }
             ToggleRow("Fills", draft.fills) { draft = draft.copy(fills = it) }
             ToggleRow("Stops", draft.stops) { draft = draft.copy(stops = it) }
             ExactSlider("PnL alert %", draft.alert, 0f..50f, 1f, { "%.0f".format(it) }) { draft = draft.copy(alert = it) }
-            Text("0 turns the PnL alert off.", color = Dim, fontSize = 12.sp)
+            Hint("PnL alert %", "0 turns the PnL alert off.")
         }
-        if (query.isBlank()) {
-            if (onReset != null && (snap?.mode != "live" || snap.liveBook != null)) {
+        run {
+            val q = LocalSettingsQuery.current
+            if (onReset != null && (snap?.mode != "live" || snap.liveBook != null) && settingsQueryMatches(q, "Paper book", "Reset book", "paper reset")) {
                 Section("Paper book", padded = true) { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
             }
-            CrashLogGroup(snap)
-            Text("Night Desk ${com.dirk.nightdesk.BuildConfig.VERSION_NAME}", color = P.faint, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+            if (settingsQueryMatches(q, "Crash log")) CrashLogGroup(snap)
+            if (q.isEmpty()) Text("Night Desk ${com.dirk.nightdesk.BuildConfig.VERSION_NAME}", color = P.faint, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
         }
     }
     }
@@ -380,11 +392,33 @@ fun SettingsScreen(
 /** v13.32 the Settings filter text, lowercased. Rows whose label does not contain it are not drawn. */
 internal val LocalSettingsQuery = compositionLocalOf { "" }
 
+/** Blank query matches everything. Otherwise any label that contains the query matches. */
+internal fun settingsQueryMatches(query: String, vararg labels: String): Boolean {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return true
+    return labels.any { it.lowercase().contains(q) }
+}
+
 @Composable
 private fun matches(label: String): Boolean {
     val q = LocalSettingsQuery.current
     return q.isBlank() || label.lowercase().contains(q)
 }
+
+/** A row that is hidden until its switch is on, but should still appear when the find box names it. */
+@Composable
+private fun queryHits(label: String): Boolean {
+    val q = LocalSettingsQuery.current
+    return q.isNotEmpty() && label.lowercase().contains(q)
+}
+
+@Composable
+private fun Hint(label: String, text: String) {
+    if (!matches(label)) return
+    Text(text, color = Dim, fontSize = 12.sp)
+}
+
+private data class MoreLink(val title: String, val subtitle: String, val icon: String, val dest: String)
 
 @Composable
 private fun RowIcon(name: String) {
@@ -483,7 +517,16 @@ private fun CrashLogGroup(snap: DeskSnapshot?) {
 }
 
 @Composable
-private fun Group(title: String, body: @Composable () -> Unit) {
+private fun Group(title: String, labels: List<String> = emptyList(), body: @Composable () -> Unit) {
+    val q = LocalSettingsQuery.current
+    if (!settingsQueryMatches(q, title, *labels.toTypedArray())) return
+    // A section-name search shows every row in that section, not an empty card.
+    val expand = q.isNotEmpty() && title.lowercase().contains(q)
+    CompositionLocalProvider(LocalSettingsQuery provides if (expand) "" else q) { GroupCard(title, body) }
+}
+
+@Composable
+private fun GroupCard(title: String, body: @Composable () -> Unit) {
     val meta = GROUP_META[title]
     val q = LocalSettingsQuery.current
     Column(Modifier.deskCard(radius = 16.dp).padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
