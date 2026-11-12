@@ -449,7 +449,19 @@ data class DeskSnapshot(
     /** v13.33 monotonic snapshot id. 0 on an older desk. */
     val seq: Long = 0,
     /** v13.32 pipeline timings from the desk. Empty on an older desk. */
-    val perf: List<PerfRow> = emptyList()
+    val perf: List<PerfRow> = emptyList(),
+    /** v13.34 pre-filter line. present is false on an older desk. */
+    val prefilter: PrefilterStats = PrefilterStats()
+)
+
+/** v13.34 cheap kills, RPC reads not sent, Helius priority-0 depth, enrich latency. */
+data class PrefilterStats(
+    val present: Boolean = false,
+    val kills: Map<String, Int> = emptyMap(),
+    val rpcSaved: Int = 0,
+    val heliusQueue: Int = 0,
+    val enrichP50: Int = 0,
+    val enrichP90: Int = 0
 )
 
 data class SafetyChip(val mint: String, val safety: String, val bundle: String = "")
@@ -877,7 +889,30 @@ private fun parseDeskPayloadBody(raw: String): DeskSnapshot? {
         enrichHost = data.optJSONObject("enrich")?.optText("host")?.ifBlank { null },
         strategy = Strategy.parse(data.optJSONObject("strategy")),
         seq = data.optLong("seq", 0L),
-        perf = Perf.parse(data.optJSONObject("perf"))
+        perf = Perf.parse(data.optJSONObject("perf")),
+        prefilter = parsePrefilter(data.optJSONObject("prefilter"))
+    )
+}
+
+private fun parsePrefilter(row: JSONObject?): PrefilterStats {
+    if (row == null) return PrefilterStats()
+    val killsJson = row.optJSONObject("kills")
+    val kills = mutableMapOf<String, Int>()
+    if (killsJson != null) {
+        val keys = killsJson.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            kills[key] = killsJson.optInt(key, 0)
+        }
+    }
+    val enrich = row.optJSONObject("enrich")
+    return PrefilterStats(
+        present = true,
+        kills = kills,
+        rpcSaved = row.optInt("rpcSaved", 0),
+        heliusQueue = row.optInt("heliusQueue", 0),
+        enrichP50 = enrich?.optInt("p50Ms", 0) ?: 0,
+        enrichP90 = enrich?.optInt("p90Ms", 0) ?: 0
     )
 }
 

@@ -23,7 +23,8 @@ import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-inpu
 import { resolveCoinMint } from "../market/coin-lookup.js";
 import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
 import { EnrichDeferred, applyRugcheck, enrichSighting, isHeliusUrl, needsFilterRugcheck } from "../market/enrich.js";
-import { RecheckQueue, recheckToken } from "../market/recheck.js";
+import { KillMemory, type PrefilterThresholds } from "../market/prefilter.js";
+import { RecheckQueue, recheckEligible, recheckToken } from "../market/recheck.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
 import { Scout } from "../agents/scout.js";
 import { RawTape, draftFromRaw, rawCandidate } from "./raw-tape.js";
@@ -301,6 +302,12 @@ export class Desk {
   private maxDevHoldingPct = 0;
   /** v13.29 one later enrich for coins that missed only soft gates. */
   private readonly rechecks = new RecheckQueue();
+  /** v13.34 hard kills never return to enrich. Soft kills get one free-feed recheck. */
+  private readonly killMemory = new KillMemory();
+  /** Chain-mark RPCs not sent because the mint was neither held nor watched. */
+  private chainRpcSaved = 0;
+  /** Unheld curve reads collapse to one saved call per second, matching the batch. */
+  private curveDropAt = 0;
   private recheckTimer: NodeJS.Timeout | null = null;
   private recheckBusy = false;
   private maxTradesPerHour = 0;
@@ -481,11 +488,19 @@ export class Desk {
         curves: async (mints) => {
           const prices = new Map<string, number>();
           const missing = new Map<string, string>();
-          if (!this.chain) {
-            for (const m of mints) missing.set(m, "on-chain reads are off");
+          const keep = mints.filter((mint) => this.chainMarkWanted(mint));
+          for (const mint of mints) {
+            if (!keep.includes(mint)) missing.set(mint, "not held or watched");
+          }
+          if (!keep.length) {
+            if (this.chain && mints.length) this.chainRpcSaved += 1;
             return { prices, missing };
           }
-          const read = await this.chain.readCurves(mints);
+          if (!this.chain) {
+            for (const m of keep) missing.set(m, "on-chain reads are off");
+            return { prices, missing };
+          }
+          const read = await this.chain.readCurves(keep);
           for (const [m, why] of read.missing) missing.set(m, why);
           if (read.quotes.size) {
             const sol = await this.solUsd();
@@ -505,7 +520,7 @@ export class Desk {
       });
     }
     this.net.useEnrichRpc(config.rpcUrl, config.enrichCallsPerMin);
-    this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(0);
+    this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(-1);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
     const savedSol = this.store.readJson("solUsd") as { value?: unknown; at?: unknown } | null;
@@ -646,6 +661,25 @@ export class Desk {
       holderPagesMax: config.holderPagesMax,
       net: this.net,
       onTape: (row) => this.rawTape.observe(row),
+      prefilter: () => this.prefilterThresholds(),
+      killMemory: this.killMemory,
+      laneBusy: () => {
+        const lane = this.net.heliusQueue();
+        const stats = this.net.stats().find((row) => row.id === "helius");
+        return lane.priority0 > 0 || (stats != null && stats.budgetPerMin > 0 && stats.reqLastMin >= stats.budgetPerMin);
+      },
+      onPrefilterKill: (raw, reasons) => {
+        const primary = reasons[0];
+        this.log({
+          stage: "filter",
+          kind: "reject",
+          mint: raw.mint,
+          symbol: raw.symbol,
+          code: primary?.code,
+          message: `Prefilter killed ${raw.symbol || raw.mint.slice(0, 4)} before RPC. ${primary?.message ?? "Rejected."}`,
+          detail: reasons.map((reason) => reason.code).join(", ")
+        });
+      },
       onStatus: (patch) => {
         this.feed = { ...this.feed, ...patch };
       },
@@ -1163,8 +1197,15 @@ export class Desk {
 
   // ---------------------------------------------------------------- trading engine
 
+  /** The engine's scorecard plus how many engine positions the main paper book holds right now. */
+  private strategyCard(): ScorecardView {
+    let mainOpen = 0;
+    for (const pos of this.book.positions.values()) if (pos.strategy) mainOpen += 1;
+    return { ...this.strategy.scorecard(), mainOpen };
+  }
+
   strategyView(): ScorecardView {
-    return this.strategy.scorecard();
+    return this.strategyCard();
   }
 
   /** Change the engine's switch, sizes or active variants. Saved, and applied to the next signal. */
@@ -1185,7 +1226,7 @@ export class Desk {
       });
     }
     this.pinOrderMints();
-    return { ok: true, strategy: this.strategy.scorecard() };
+    return { ok: true, strategy: this.strategyCard() };
   }
 
   /** Wipe the shadow books and their saved trades. The main paper book is not touched. */
@@ -1193,7 +1234,7 @@ export class Desk {
     if (!confirm) return { ok: false, error: "Send confirm: true to wipe the scorecard." };
     this.strategy.reset();
     this.log({ stage: "system", kind: "info", code: "STRATEGY", message: "Scorecard reset. Every shadow book is back to its starting balance." });
-    return { ok: true, strategy: this.strategy.scorecard() };
+    return { ok: true, strategy: this.strategyCard() };
   }
 
   private watchForSignal(report: AnalystReport): void {
@@ -1835,8 +1876,59 @@ export class Desk {
     return null;
   }
 
+  /** Held positions, the watchlist, and open limit buys. Scout noise does not take a chain-mark slot. */
+  private chainMarkWanted(mint: string): boolean {
+    if (!mint) return false;
+    if (this.book?.positions.has(mint) || this.liveBook?.positions.has(mint)) return true;
+    if (this.watchlist.some((item) => item.mint === mint)) return true;
+    return this.orders.open().some((order) => order.side === "limit_buy" && order.mint === mint);
+  }
+
+  private prefilterThresholds(): PrefilterThresholds {
+    const banned = new Set<string>();
+    const now = Date.now();
+    for (const [key, until] of this.cooldowns) {
+      if (until <= now) continue;
+      banned.add(key.startsWith("live:") ? key.slice("live:".length) : key);
+    }
+    return {
+      minVolume1hUsd: this.config.rules.minVolume1hUsd,
+      minLiquidityUsd: this.minLiquidityUsd,
+      minAgeSeconds: this.minTokenAgeMin > 0 ? this.minTokenAgeMin * 60 : 0,
+      maxAgeSeconds: this.maxTokenAgeMin > 0 ? this.maxTokenAgeMin * 60 : 0,
+      minMarketCapUsd: 0,
+      maxMarketCapUsd: 0,
+      bannedMints: banned
+    };
+  }
+
+  prefilterSnapshot(): {
+    kills: Record<string, number>;
+    rpcSaved: number;
+    heliusQueue: number;
+    enrich: { count: number; p50Ms: number; p90Ms: number; maxMs: number };
+  } {
+    const view = this.scout.prefilterView();
+    return {
+      kills: view.kills,
+      rpcSaved: view.rpcSaved + this.chainRpcSaved,
+      heliusQueue: this.net.heliusQueue().priority0,
+      enrich: view.enrich
+    };
+  }
+
   /** v13.6 Tape: pump.fun sightings printed with "Mark 0" get priced from their curve. */
   private queueCurvePrice(mint: string): void {
+    if (!this.chainMarkWanted(mint)) {
+      if (this.chain) {
+        const now = Date.now();
+        if (now - this.curveDropAt >= 1_000) {
+          this.curveDropAt = now;
+          this.chainRpcSaved += 1;
+        }
+      }
+      return;
+    }
     if (!this.chain || this.curveQueue.size >= 60) return;
     this.curveQueue.add(mint);
     if (this.curveTimer) return;
@@ -2117,7 +2209,7 @@ export class Desk {
     const hardKills: Array<{ code: string; message: string }> = filter.checks
       .filter((c) => !c.pass && HARD_KILL_CODES.has(c.code))
       .map((c) => ({ code: c.code, message: c.message }));
-    const safety = await this.tokenSafety(mint);
+    const safety = await this.tokenSafety(mint, -1);
     if (safety.status === "blocked") hardKills.push({ code: "TOKEN_SAFETY", message: safety.chip });
     const pump = isPumpCoin({ source: token.source, dex: token.dex, platform: parsed.platform });
     const bundle = pump ? await this.launchBundleSoon(mint, safety.supply) : null;
@@ -2331,7 +2423,7 @@ export class Desk {
     });
     // Hard kills (mint authority not revoked, dev rug link, token safety) need the operator's "Buy anyway".
     // A safety read that fails is Unknown and does not block a manual buy. AI buys never reach this path.
-    const safety = await this.tokenSafety(token.mint);
+    const safety = await this.tokenSafety(token.mint, -1);
     const bundle = isPumpCoin(token) ? await this.launchBundle(token.mint, safety.supply) : null;
     if (bundle?.flagged && bundle.label) {
       this.log({
@@ -2581,11 +2673,12 @@ export class Desk {
       capWhy: this.capWhy(riskEquityUsd),
       enrich: this.scout.enrichStatus(),
       recheck: this.rechecks.counts(),
+      prefilter: this.prefilterSnapshot(),
       appVersion: APP_VERSION,
       lastClientCrash: this.lastClientCrash,
       markLoop: this.markLoopView(),
       safetyChips: this.safetyChipList(),
-      strategy: this.strategy.scorecard(),
+      strategy: this.strategyCard(),
       perf: this.latency.view()
     };
   }
@@ -2754,7 +2847,12 @@ export class Desk {
     });
     if (result.decision === "reject") {
       this.considerNearMiss(result, prior);
-      if (this.rechecks.offer(result.token, result.reasons, Date.now())) this.armRechecks();
+      const freeOnly =
+        result.reasons.length > 0 &&
+        result.reasons.every((reason) => reason.code === "VOLUME_TOO_LOW" || reason.code === "LIQUIDITY_TOO_THIN" || reason.code === "TOKEN_TOO_NEW");
+      if (freeOnly) this.killMemory.note(result.token.mint, false, Date.now(), result.token.volume1hUsd);
+      else if (!recheckEligible(result.token, result.reasons)) this.killMemory.note(result.token.mint, true, Date.now(), result.token.volume1hUsd);
+      if (!freeOnly && this.rechecks.offer(result.token, result.reasons, Date.now())) this.armRechecks();
     }
     this.bus.emit("filter.result", result);
   }
@@ -4905,20 +5003,20 @@ export class Desk {
     return this.safetyCache.get(mint)?.result ?? SAFETY_UNKNOWN;
   }
 
-  private async tokenSafety(mint: string): Promise<MintSafety> {
+  private async tokenSafety(mint: string, priority: -1 | 0 | 1 | 2 = 2): Promise<MintSafety> {
     const hit = this.safetyCache.get(mint);
     if (hit && Date.now() - hit.at < hit.ttl) return hit.result;
     const pending = this.safetyInflight.get(mint);
     if (pending) return pending;
-    const job = this.readMintSafety(mint).finally(() => this.safetyInflight.delete(mint));
+    const job = this.readMintSafety(mint, priority).finally(() => this.safetyInflight.delete(mint));
     this.safetyInflight.set(mint, job);
     return job;
   }
 
-  private async readMintSafety(mint: string): Promise<MintSafety> {
+  private async readMintSafety(mint: string, priority: -1 | 0 | 1 | 2): Promise<MintSafety> {
     let account: MintAccountBytes | null = null;
     try {
-      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint);
+      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint, priority);
       account = await Promise.race([
         read,
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_500))
@@ -4932,7 +5030,7 @@ export class Desk {
     return result;
   }
 
-  private async rpcMintAccount(mint: string): Promise<MintAccountBytes | null> {
+  private async rpcMintAccount(mint: string, priority: -1 | 0 | 1 | 2 = 2): Promise<MintAccountBytes | null> {
     const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
     if (!rpc) return null;
     const body = JSON.stringify({
@@ -4941,7 +5039,7 @@ export class Desk {
       method: "getAccountInfo",
       params: [mint, { encoding: "base64", commitment: "confirmed" }]
     });
-    const res = await this.net.fetchAt(2)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body });
+    const res = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body });
     if (!res.ok) return null;
     const json = (await res.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
     const value = json.result?.value;

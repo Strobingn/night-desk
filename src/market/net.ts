@@ -216,8 +216,8 @@ export function solanaExecSpec(): BucketSpec {
 }
 
 /**
- * -1 = wallet SOL/USDC reads (same read-lane budget, served before mark polls).
- * 0 = held-position marks and Add coin (never starve), 1 = enrichment, 2 = Scout list polls.
+ * -1 = wallet SOL/USDC reads and manual Search / buy pre-checks (same read-lane budget, ahead of marks).
+ * 0 = held-position marks and watch marks (never starve), 1 = enrichment, 2 = Scout list polls.
  */
 export type Priority = -1 | 0 | 1 | 2;
 
@@ -580,6 +580,15 @@ export class NetLimiter {
     if (!lane || lane.id !== ENRICH_BUCKET_ID) return false;
     const b = this.buckets.get(lane.id);
     return b != null && b.circuitUntil > this.clock.now();
+  }
+
+  /** Priority-0 depth is the mark queue. Wallet and manual reads (-1) are not included in priority0. */
+  heliusQueue(): { queued: number; priority0: number } {
+    const b = this.buckets.get("helius");
+    if (!b) return { queued: 0, priority0: 0 };
+    let priority0 = 0;
+    for (const waiter of b.queue) if (waiter.priority === 0) priority0 += 1;
+    return { queued: b.queue.length, priority0 };
   }
 
   stats(): BucketStats[] {

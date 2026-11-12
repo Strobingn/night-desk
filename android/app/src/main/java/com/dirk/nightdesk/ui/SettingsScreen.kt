@@ -193,6 +193,9 @@ fun SettingsScreen(
                 size = 11
             )
         }
+        if (snap?.prefilter?.present == true) {
+            Text(prefilterLine(snap.prefilter), color = P.muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        }
         // v13.32 filter: type part of a setting's name to show only matching rows.
         OutlinedTextField(
             value = query,
@@ -523,6 +526,13 @@ private fun AppearanceGroup() {
             fontSize = 12.sp
         )
     }
+}
+
+/** v13.34 one line under Settings. Does not replace a control. */
+internal fun prefilterLine(stats: com.dirk.nightdesk.PrefilterStats): String {
+    val top = stats.kills.entries.sortedByDescending { it.value }.take(2).joinToString(" ") { "${it.key} ${it.value}" }
+    val reasons = if (top.isBlank()) "idle" else top
+    return "Prefilter $reasons · RPC saved ${stats.rpcSaved} · Helius q ${stats.heliusQueue} · enrich p50 ${stats.enrichP50}ms p90 ${stats.enrichP90}ms"
 }
 
 internal data class HolderSliderSpec(val label: String, val max: Float, val step: Float)

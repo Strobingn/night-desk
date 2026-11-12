@@ -859,7 +859,16 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
-    /** v13.30 trading engine switch and active variants. The desk answers with the new scorecard. */
+    /** One engine request at a time, in tap order, so a later value never lands before an earlier one. */
+    private val strategyLock = Mutex()
+
+    /** The desk answers every engine request with the new scorecard. Show it now instead of at the next poll. */
+    private fun applyStrategy(raw: String) {
+        val view = runCatching { Strategy.parse(JSONObject(raw).optJSONObject("strategy")) }.getOrNull() ?: return
+        val current = _snapshot.value ?: return
+        _snapshot.value = current.copy(strategy = view)
+    }
+
     /** v13.32 wipe the shadow books. The main paper book is untouched. */
     suspend fun resetStrategy(): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
@@ -868,13 +877,21 @@ class DeskRepository private constructor(private val context: Context) {
             _notice.value = notice
             return@withContext notice
         }
-        val notice = post("$base/api/strategy/reset", JSONObject().put("confirm", true).toString()).fold(
-            onSuccess = { DeskNotice(true, "Scorecard reset. Every shadow book is back to its starting balance.") },
-            onFailure = { err -> DeskNotice(false, err.message ?: "Scorecard reset refused.") }
-        )
+        val notice = strategyLock.withLock {
+            post("$base/api/strategy/reset", JSONObject().put("confirm", true).toString()).fold(
+                onSuccess = { raw ->
+                    applyStrategy(raw)
+                    DeskNotice(true, "Scorecard reset. Every shadow book is back to its starting balance.")
+                },
+                onFailure = { err -> DeskNotice(false, err.message ?: "Scorecard reset refused.") }
+            )
+        }
         _notice.value = notice
+        if (notice.ok) refresh()
         notice
     }
+
+    /** v13.30 trading engine switch, sizes and active variants. */
 
     suspend fun saveStrategy(patch: Map<String, Any?>): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
@@ -891,13 +908,16 @@ class DeskRepository private constructor(private val context: Context) {
                 else -> body.put(key, value)
             }
         }
-        val notice = post("$base/api/strategy/settings", body.toString()).fold(
-            onSuccess = { raw ->
-                val on = runCatching { JSONObject(raw).optJSONObject("strategy")?.optBoolean("enabled", false) }.getOrNull()
-                DeskNotice(true, if (patch.containsKey("enabled")) (if (on == true) "Trading engine on. Paper only." else "Trading engine off.") else "Engine settings saved.")
-            },
-            onFailure = { err -> DeskNotice(false, err.message ?: "Engine settings refused.") }
-        )
+        val notice = strategyLock.withLock {
+            post("$base/api/strategy/settings", body.toString()).fold(
+                onSuccess = { raw ->
+                    applyStrategy(raw)
+                    val on = runCatching { JSONObject(raw).optJSONObject("strategy")?.optBoolean("enabled", false) }.getOrNull()
+                    DeskNotice(true, if (patch.containsKey("enabled")) (if (on == true) "Trading engine on. Paper only." else "Trading engine off.") else "Engine settings saved.")
+                },
+                onFailure = { err -> DeskNotice(false, err.message ?: "Engine settings refused.") }
+            )
+        }
         _notice.value = notice
         notice
     }

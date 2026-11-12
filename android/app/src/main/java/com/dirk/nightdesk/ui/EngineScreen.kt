@@ -22,6 +22,8 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,9 +50,28 @@ fun EngineScreen(
     view: StrategyView?,
     perf: List<PerfRow>,
     onStrategy: (Map<String, Any?>) -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    /** Engine positions on the main paper book. */
+    mainOpen: Int = view?.mainOpen?.coerceAtLeast(0) ?: 0
 ) {
     var askReset by remember { mutableStateOf(false) }
+    // A tap steps from the value on screen, not from the last snapshot, so quick taps add up.
+    // The pending value is dropped once the desk reports it, or after 6 s if it never does.
+    var pendingTrade by remember { mutableStateOf<Double?>(null) }
+    var pendingTarget by remember { mutableStateOf<Double?>(null) }
+    var pendingOpen by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(view?.tradeUsd, pendingTrade) {
+        if (pendingTrade != null && pendingTrade == view?.tradeUsd) pendingTrade = null
+        else if (pendingTrade != null) { delay(6_000); pendingTrade = null }
+    }
+    LaunchedEffect(view?.targetNetUsd, pendingTarget) {
+        if (pendingTarget != null && pendingTarget == view?.targetNetUsd) pendingTarget = null
+        else if (pendingTarget != null) { delay(6_000); pendingTarget = null }
+    }
+    LaunchedEffect(view?.maxOpen, pendingOpen) {
+        if (pendingOpen != null && pendingOpen == view?.maxOpen) pendingOpen = null
+        else if (pendingOpen != null) { delay(6_000); pendingOpen = null }
+    }
     LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -89,15 +110,30 @@ fun EngineScreen(
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
                     Stat("Watching", "${view.watching}")
                     Stat("Signals", "${view.signals}")
-                    Stat("Open", "${view.variants.filter { it.active }.sumOf { it.open }}")
+                    Stat("Open", "$mainOpen")
                 }
             }
         }
         item {
             Section("Sizing", padded = true) {
-                Stepper("Trade size", "$" + "%.0f".format(Locale.US, view.tradeUsd), onMinus = { onStrategy(mapOf("tradeUsd" to (view.tradeUsd - 5).coerceAtLeast(5.0))) }, onPlus = { onStrategy(mapOf("tradeUsd" to (view.tradeUsd + 5).coerceAtMost(500.0))) })
-                Stepper("Take-profit, net", "$" + "%.2f".format(Locale.US, view.targetNetUsd), onMinus = { onStrategy(mapOf("targetNetUsd" to (view.targetNetUsd - 0.5).coerceAtLeast(0.25))) }, onPlus = { onStrategy(mapOf("targetNetUsd" to (view.targetNetUsd + 0.5).coerceAtMost(50.0))) })
-                Stepper("Max open", "${view.maxOpen}", onMinus = { onStrategy(mapOf("maxOpen" to (view.maxOpen - 1).coerceAtLeast(1))) }, onPlus = { onStrategy(mapOf("maxOpen" to (view.maxOpen + 1).coerceAtMost(6))) })
+                val trade = pendingTrade ?: view.tradeUsd
+                val target = pendingTarget ?: view.targetNetUsd
+                val open = pendingOpen ?: view.maxOpen
+                fun setTrade(delta: Double) {
+                    val next = Strategy.step(trade, delta, 5.0, 500.0)
+                    if (next != trade) { pendingTrade = next; onStrategy(mapOf("tradeUsd" to next)) }
+                }
+                fun setTarget(delta: Double) {
+                    val next = Strategy.step(target, delta, 0.25, 50.0)
+                    if (next != target) { pendingTarget = next; onStrategy(mapOf("targetNetUsd" to next)) }
+                }
+                fun setOpen(delta: Int) {
+                    val next = (open + delta).coerceIn(1, 6)
+                    if (next != open) { pendingOpen = next; onStrategy(mapOf("maxOpen" to next)) }
+                }
+                Stepper("Trade size", "$" + "%.0f".format(Locale.US, trade), onMinus = { setTrade(-5.0) }, onPlus = { setTrade(5.0) })
+                Stepper("Take-profit, net", "$" + "%.2f".format(Locale.US, target), onMinus = { setTarget(-0.5) }, onPlus = { setTarget(0.5) })
+                Stepper("Max open", "$open", onMinus = { setOpen(-1) }, onPlus = { setOpen(1) })
                 Text("Paper only. New engine buys pause once the paper book is $10 down on the day.", color = P.muted, fontSize = 12.sp)
             }
         }
@@ -170,7 +206,7 @@ private fun VariantRow(row: VariantScore, onUse: () -> Unit) {
         }
         Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Stat("Net", if (row.trades > 0) Strategy.signedUsd(row.netUsd) else "—", tint, big = true)
-            Stat("Trades", "${row.trades}" + (if (row.open > 0) " · ${row.open} open" else ""))
+            Stat("Trades", "${row.trades}" + (if (row.open > 0) " · ${row.open} held" else ""))
             Stat("Win", if (row.trades > 0) "%.0f%%".format(Locale.US, row.winRate * 100) else "—")
             Stat("Avg", if (row.trades > 0) Strategy.signedUsd(row.avgNetUsd) else "—", tint)
         }

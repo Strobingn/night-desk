@@ -88,7 +88,8 @@ export function startServer(
           mode: desk.config.mode,
           now: Date.now(),
           publicUrl: readPublicUrl(desk.config.dbPath),
-          eventLoopLag: eventLoopLag()
+          eventLoopLag: eventLoopLag(),
+          prefilter: desk.prefilterSnapshot()
         });
       }
       if (url.pathname === "/api/state") return json(res, 200, takeSnapshot(false));

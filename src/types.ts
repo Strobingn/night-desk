@@ -762,6 +762,17 @@ export interface DeskSnapshot {
    * to keep the queue at 300. Rechecks share the enrich RPC budget and never use Helius.
    */
   recheck?: { pending: number; ran: number; dropped: number };
+  /**
+   * v13.34 cheap pre-filter. `kills` is by reason, before any RPC.
+   * `rpcSaved` counts enrich reads and chain-mark calls that were not sent.
+   * `heliusQueue` is the priority-0 Helius depth. `enrich` is enrichSighting latency.
+   */
+  prefilter?: {
+    kills: Record<string, number>;
+    rpcSaved: number;
+    heliusQueue: number;
+    enrich: { count: number; p50Ms: number; p90Ms: number; maxMs: number };
+  };
   /** v13.24 installed release. The Home crash card compares a report to this. */
   appVersion?: string;
   /** v12. Last crash the phone reported (POST /api/client-crash). Kept after Dismiss. */
@@ -838,6 +849,10 @@ export interface RawSighting {
   priceFeed?: "jupiter" | "gecko";
   /** Market cap already printed by the listing. Display only. Enrichment does not read this. */
   marketCapUsd?: number;
+  /** Pool or mint creation time from a free feed, unix ms. Absent when the payload did not say. */
+  createdAt?: number;
+  /** Age already printed by the feed. Absent when the payload did not say. */
+  ageSeconds?: number;
 }
 
 export type RugLookup =

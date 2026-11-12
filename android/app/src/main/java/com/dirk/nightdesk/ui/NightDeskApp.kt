@@ -552,7 +552,13 @@ fun NightDeskApp(desk: DeskRepository) {
                     safetyChips = snap?.safetyChips.orEmpty()
                 )
                 TAB_SEARCH -> AddCoinScreen(desk, snap, addPrefill, oneTap)
-                TAB_ENGINE -> EngineScreen(snap?.strategy, snap?.perf.orEmpty(), onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } }, onReset = { scope.launch { desk.resetStrategy() } })
+                TAB_ENGINE -> EngineScreen(
+                    snap?.strategy,
+                    snap?.perf.orEmpty(),
+                    onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } },
+                    onReset = { scope.launch { desk.resetStrategy() } },
+                    mainOpen = snap?.strategy?.let { com.dirk.nightdesk.Strategy.mainOpen(it, snap?.positions.orEmpty()) } ?: 0
+                )
                 else -> when (settingsSub) {
                     "link" -> SubScreen("Link", onBack = { settingsSub = null }) { LinkScreen(desk) }
                     "recap" -> SubScreen("Recap", onBack = { settingsSub = null }) {
@@ -694,7 +700,7 @@ private fun BookScreen(
         }
         // v13.32 the one number first: equity, today's result, the curve.
         item { HeroCard(snap, openPnl) }
-        snap?.strategy?.let { engine -> item { EngineLine(engine, onOpenEngine) } }
+        snap?.strategy?.let { engine -> item { EngineLine(engine, com.dirk.nightdesk.Strategy.mainOpen(engine, snap.positions), onOpenEngine) } }
         item {
             SectionTitle(
                 if (liveBook != null) "Paper · AI" else "Positions",
@@ -776,9 +782,8 @@ private fun BookScreen(
 
 /** v13.32 one line of engine status under the hero. Tap for the Engine tab. */
 @Composable
-private fun EngineLine(engine: com.dirk.nightdesk.StrategyView, onOpen: () -> Unit) {
+private fun EngineLine(engine: com.dirk.nightdesk.StrategyView, open: Int, onOpen: () -> Unit) {
     val best = engine.variants.filter { it.trades > 0 }.maxByOrNull { it.netUsd }
-    val open = engine.variants.filter { it.active }.sumOf { it.open }
     Row(
         Modifier.deskCard(radius = 14.dp).clickable(onClick = onOpen).padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -2243,7 +2248,7 @@ internal fun DeskPreview(tab: Int, snap: DeskSnapshot, oneTap: OneTapUi? = null,
                     } else {
                         SettingsScreen(snap) {}
                     }
-                    3 -> EngineScreen(snap.strategy, snap.perf, {}, {})
+                    3 -> EngineScreen(snap.strategy, snap.perf, {}, {}, mainOpen = snap.strategy?.let { com.dirk.nightdesk.Strategy.mainOpen(it, snap.positions) } ?: 0)
                     else -> SettingsScreen(snap) {}
                 }
             }
