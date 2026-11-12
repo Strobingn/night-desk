@@ -228,6 +228,26 @@ describe("trading engine on the desk", () => {
     }
   });
 
+  it("reports main-book engine positions separately from shadow holdings", async () => {
+    const desk = engineDesk({ maxOpen: 1 });
+    try {
+      await signal(desk, young({ mint: "EngineOpenA11111111111111111111111111111111", symbol: "OPA" }));
+      // The second signal is refused on the main book (1 open at most)...
+      await signal(desk, young({ mint: "EngineOpenB11111111111111111111111111111111", symbol: "OPB" }));
+      const card = desk.snapshot().strategy!;
+      expect(card.mainOpen).toBe(1);
+      // ...while each shadow book also holds one, so the shadow sum is not the main-book count.
+      expect(card.variants.filter((v) => v.signal === "launch").map((v) => v.open)).toEqual([1, 1, 1]);
+      // A scorecard reset wipes the shadow books and leaves the main book alone.
+      const reset = desk.resetStrategy(true);
+      expect(reset.ok && reset.strategy.mainOpen).toBe(1);
+      expect(desk.strategyView().variants.every((v) => v.open === 0)).toBe(true);
+      expect(desk.book.positions.size).toBe(1);
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("puts the scorecard and timings on the snapshot", async () => {
     const desk = engineDesk();
     try {

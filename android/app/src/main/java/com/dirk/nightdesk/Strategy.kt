@@ -30,9 +30,42 @@ data class StrategyView(
     val readyTrades: Int,
     val watching: Int,
     val signals: Int,
+    /** Engine positions open on the main paper book. -1 on a desk that does not report it. */
+    val mainOpen: Int = -1,
     val variants: List<VariantScore>,
     val note: String
 )
+
+/** One pipeline step's timing from the desk's `perf` block. */
+data class PerfRow(val step: String, val count: Int, val p50Ms: Long, val p90Ms: Long, val maxMs: Long)
+
+object Perf {
+    private val ORDER = listOf("sightingToCandidate", "candidateToDecision", "watchToSignal", "signalToFill")
+    private val LABELS = mapOf(
+        "sightingToCandidate" to "Sighting → candidate",
+        "candidateToDecision" to "Candidate → decision",
+        "watchToSignal" to "Watch → signal",
+        "signalToFill" to "Signal → fill"
+    )
+
+    fun parse(json: JSONObject?): List<PerfRow> {
+        if (json == null) return emptyList()
+        val rows = ArrayList<PerfRow>()
+        for (key in json.keys()) {
+            val row = json.optJSONObject(key) ?: continue
+            rows.add(PerfRow(key, row.optFinite("count").toInt(), row.optFinite("p50Ms").toLong(), row.optFinite("p90Ms").toLong(), row.optFinite("maxMs").toLong()))
+        }
+        return rows.sortedBy { ORDER.indexOf(it.step).let { i -> if (i < 0) ORDER.size else i } }
+    }
+
+    fun label(step: String): String = LABELS[step] ?: step
+
+    fun ms(n: Long): String = when {
+        n >= 60_000 -> "%.1f min".format(Locale.US, n / 60_000.0)
+        n >= 1_000 -> "%.1f s".format(Locale.US, n / 1_000.0)
+        else -> "$n ms"
+    }
+}
 
 object Strategy {
     fun parse(json: JSONObject?): StrategyView? {
@@ -75,10 +108,22 @@ object Strategy {
             readyTrades = json.optFinite("readyTrades", 200.0).toInt(),
             watching = json.optFinite("watching").toInt(),
             signals = signals.toInt(),
+            mainOpen = if (json.has("mainOpen")) json.optFinite("mainOpen").toInt() else -1,
             variants = variants,
             note = json.optText("note")
         )
     }
+
+    /**
+     * Engine positions on the main paper book. An older desk does not report it, so count the
+     * book's own positions tagged by the engine. Never the shadow books' holdings.
+     */
+    fun mainOpen(view: StrategyView, positions: List<PositionRow>): Int =
+        if (view.mainOpen >= 0) view.mainOpen else positions.count { !it.live && (it.tag == "launch" || it.tag == "momentum") }
+
+    /** The next stepper value: one step from `current`, kept inside the desk's band. */
+    fun step(current: Double, delta: Double, min: Double, max: Double): Double =
+        kotlin.math.round((current + delta).coerceIn(min, max) * 100.0) / 100.0
 
     /** "Launch · 1% stop" */
     fun label(v: VariantScore): String {

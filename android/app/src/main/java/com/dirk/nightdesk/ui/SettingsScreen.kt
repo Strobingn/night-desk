@@ -1,6 +1,14 @@
 package com.dirk.nightdesk.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -152,6 +160,10 @@ fun SettingsScreen(
     snap: DeskSnapshot?,
     oneTap: OneTapUi? = null,
     onStrategy: ((Map<String, Any?>) -> Unit)? = null,
+    /** v13.32 opens a sub-screen: "link", "recap" or "pump". */
+    onOpen: ((String) -> Unit)? = null,
+    onOpenEngine: (() -> Unit)? = null,
+    onReset: (() -> Unit)? = null,
     onSave: (Map<String, Any?>) -> Unit
 ) {
     var draft by remember { mutableStateOf(draftOf(snap)) }
@@ -165,25 +177,53 @@ fun SettingsScreen(
     }
     val dirty = draft != saved
     val holderSlider = holderSliderSpec(snap?.enrichHost)
+    var query by remember { mutableStateOf("") }
+    Box(Modifier.fillMaxSize()) {
+    CompositionLocalProvider(LocalSettingsQuery provides query.trim().lowercase()) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = if (dirty) 88.dp else 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Settings", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("Settings", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
             Chip(
-                if (dirty) "Unsaved changes" else "Matches the desk",
+                if (dirty) "Unsaved" else "Matches the desk",
                 if (dirty) P.amber else P.up,
                 (if (dirty) P.amber else P.up).copy(alpha = 0.16f),
-                size = 12
+                size = 11
             )
         }
         if (snap?.prefilter?.present == true) {
             Text(prefilterLine(snap.prefilter), color = P.muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
         }
-        AppearanceGroup()
-        CrashLogGroup(snap)
-        StrategyGroup(snap?.strategy, onStrategy)
+        // v13.32 filter: type part of a setting's name to show only matching rows.
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            placeholder = { Text("Find a setting", color = P.faint) },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = P.accent,
+                unfocusedBorderColor = P.line,
+                focusedTextColor = P.ink,
+                unfocusedTextColor = P.ink,
+                cursorColor = P.accent
+            )
+        )
+        if (query.isBlank()) {
+            Section("More") {
+                ListRow("Trading engine", snap?.strategy?.let { com.dirk.nightdesk.Strategy.summary(it) } ?: "Not on this desk", leading = { RowIcon("radar") }, trailing = { Chevron() }, onClick = { onOpenEngine?.invoke() })
+                RowDivider()
+                ListRow("Link", "Desk URL, token and beacon", leading = { RowIcon("link") }, trailing = { Chevron() }, onClick = { onOpen?.invoke("link") })
+                RowDivider()
+                ListRow("Recap", "What the desk did over 12h, 24h or 7d", leading = { RowIcon("recap") }, trailing = { Chevron() }, onClick = { onOpen?.invoke("recap") })
+                RowDivider()
+                ListRow("Pump terminal", "The pump.fun watch screen", leading = { RowIcon("coins") }, trailing = { Chevron() }, onClick = { onOpen?.invoke("pump") })
+            }
+            AppearanceGroup()
+        }
         if (oneTap != null) {
             Group("One tap") {
                 Text(
@@ -305,49 +345,56 @@ fun SettingsScreen(
             ExactSlider("PnL alert %", draft.alert, 0f..50f, 1f, { "%.0f".format(it) }) { draft = draft.copy(alert = it) }
             Text("0 turns the PnL alert off.", color = Dim, fontSize = 12.sp)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (query.isBlank()) {
+            if (onReset != null && (snap?.mode != "live" || snap.liveBook != null)) {
+                Section("Paper book", padded = true) { ResetCard(snap?.paperResetUsd ?: 100.0, onReset) }
+            }
+            CrashLogGroup(snap)
+            Text("Night Desk ${com.dirk.nightdesk.BuildConfig.VERSION_NAME}", color = P.faint, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+    }
+    // v13.32 the Save bar stays pinned while there are unsaved changes.
+    if (dirty) {
+        Row(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(P.nav)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Unsaved changes", color = P.amber, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { draft = saved }) { Text("Discard", color = Dim) }
             Button(
                 onClick = {
                     onSave(changedOnly(payload(saved), payload(draft)))
                     saved = draft
                 },
-                enabled = dirty && snap != null,
+                enabled = snap != null,
                 colors = ButtonDefaults.buttonColors(containerColor = P.accent, contentColor = P.onAccent)
-            ) { Text("Save") }
-            TextButton(onClick = { draft = saved }, enabled = dirty) { Text("Reset", color = Dim) }
+            ) { Text("Save", fontWeight = FontWeight.Bold) }
         }
+    }
     }
 }
 
-/** v13.30 the desk's trading engine: one switch, a summary line, and the shadow-book scorecard. */
+/** v13.32 the Settings filter text, lowercased. Rows whose label does not contain it are not drawn. */
+internal val LocalSettingsQuery = compositionLocalOf { "" }
+
 @Composable
-private fun StrategyGroup(view: com.dirk.nightdesk.StrategyView?, onStrategy: ((Map<String, Any?>) -> Unit)?) {
-    var open by remember { mutableStateOf(false) }
-    Group("Trading engine") {
-        if (view == null) {
-            Text("This desk does not have the trading engine yet. Update the desk to 13.30.", color = Dim, fontSize = 12.sp)
-        } else {
-            ToggleRow("Engine on", view.enabled) { on -> onStrategy?.invoke(mapOf("enabled" to on)) }
-            Text(com.dirk.nightdesk.Strategy.summary(view), color = Dim, fontSize = 12.sp)
-            TextButton(onClick = { open = !open }) { Text(if (open) "Hide scorecard" else "Show scorecard", color = P.accent) }
-        }
-        if (view != null && open) {
-            for (row in view.variants) {
-                val tint = if (row.trades <= 0) Dim else if (row.netUsd > 0) P.up else if (row.netUsd < 0) P.down else Ink
-                Column(Modifier.fillMaxWidth()) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(com.dirk.nightdesk.Strategy.label(row), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        if (row.ready) Chip("Ready", P.up, P.up.copy(alpha = 0.16f), size = 11)
-                        if (row.active) Chip("In use", P.accent, P.accent.copy(alpha = 0.16f), size = 11)
-                        else TextButton(onClick = { onStrategy?.invoke(mapOf("active" to mapOf(row.signal to row.variant))) }) { Text("Use", color = P.accent, fontSize = 12.sp) }
-                    }
-                    Text(com.dirk.nightdesk.Strategy.stats(row), color = tint, fontSize = 12.sp)
-                }
-            }
-            Text("Ready means ${view.readyTrades}+ trades and a net profit. It does not turn on live trading.", color = Dim, fontSize = 12.sp)
-            if (view.note.isNotBlank()) Text(view.note, color = Dim, fontSize = 12.sp)
-        }
-    }
+private fun matches(label: String): Boolean {
+    val q = LocalSettingsQuery.current
+    return q.isBlank() || label.lowercase().contains(q)
+}
+
+@Composable
+private fun RowIcon(name: String) {
+    Box(
+        Modifier.width(32.dp).height(32.dp).background(P.accent.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
+        contentAlignment = Alignment.Center
+    ) { DeskIcon(name, tint = P.accent, size = 17.dp) }
 }
 
 /** Only the keys Dirk changed are sent, so a save never rewrites a value he did not touch. */
@@ -420,16 +467,15 @@ private val GROUP_META = mapOf(
     Pair("Risk / Exits", Pair("shield", "Hard stop, cooldown, daily loss and the trailing take-profit.")),
     Pair("Sizing", Pair("coins", "How much each buy spends and how much can be open at once.")),
     Pair("Scout sources", Pair("radar", "Which feeds the Scout listens to for new pairs.")),
-    Pair("Alerts", Pair("bell", "When the phone should ping you.")),
-    Pair("Trading engine", Pair("radar", "Buys and sells on its own, on paper. The scorecard shows which settings make money."))
+    Pair("Alerts", Pair("bell", "When the phone should ping you."))
 )
 
 @Composable
 private fun CrashLogGroup(snap: DeskSnapshot?) {
     val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
-    Group("Crash log") {
-        TextButton(onClick = { open = !open }) { Text(if (open) "Hide" else "Show", color = P.accent) }
+    Section("Crash log", collapsible = true, open = false, padded = true) {
+        open = true
         if (open) {
             val desk = snap?.lastClientCrashText?.ifBlank { snap.lastClientCrash }.orEmpty()
             val phone = CrashLog.read(context).orEmpty()
@@ -442,8 +488,16 @@ private fun CrashLogGroup(snap: DeskSnapshot?) {
 @Composable
 private fun Group(title: String, body: @Composable () -> Unit) {
     val meta = GROUP_META[title]
-    Column(Modifier.deskCard().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        GroupHeader(meta?.first ?: "settings", title, meta?.second ?: "")
+    val q = LocalSettingsQuery.current
+    Column(Modifier.deskCard(radius = 16.dp).padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RowIcon(meta?.first ?: "settings")
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                if (q.isBlank() && !meta?.second.isNullOrBlank()) Text(meta?.second.orEmpty(), color = P.muted, fontSize = 12.sp, lineHeight = 16.sp)
+            }
+        }
         body()
     }
 }
@@ -452,8 +506,15 @@ private fun Group(title: String, body: @Composable () -> Unit) {
 @Composable
 private fun AppearanceGroup() {
     val context = LocalContext.current
-    Column(Modifier.deskCard().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        GroupHeader("palette", "Appearance", "Theme for this phone only. Not a desk setting.")
+    Column(Modifier.deskCard(radius = 16.dp).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RowIcon("palette")
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Appearance", color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("This phone only. Not a desk setting.", color = P.muted, fontSize = 12.sp)
+            }
+        }
         SegmentedFill(
             ThemePref.entries.map { it.name to it.label },
             ThemeState.pref.name,
@@ -492,13 +553,23 @@ private fun ExactSlider(
     format: (Float) -> String,
     onChange: (Float) -> Unit
 ) {
+    if (!matches(label)) return
     var text by remember(value) { mutableStateOf(format(value)) }
+    var typing by remember { mutableStateOf(false) }
     val span = (range.endInclusive - range.start).coerceAtLeast(step)
     val steps = ((span / step).toInt() - 1).coerceAtLeast(0)
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Text(format(value), color = P.accent, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            // Tap the value to type an exact number.
+            Text(
+                format(value),
+                color = P.accent,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable { typing = !typing }.padding(horizontal = 6.dp, vertical = 2.dp)
+            )
         }
         Slider(
             value = value.coerceIn(range.start, range.endInclusive),
@@ -516,7 +587,7 @@ private fun ExactSlider(
                 inactiveTickColor = Color.Transparent
             )
         )
-        OutlinedTextField(
+        if (typing) OutlinedTextField(
             value = text,
             onValueChange = { raw ->
                 text = raw.filter { ch -> ch.isDigit() || ch == '.' }
@@ -533,6 +604,7 @@ private fun ExactSlider(
 
 @Composable
 private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    if (!matches(label)) return
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = Ink, modifier = Modifier.weight(1f), fontSize = 15.sp)
         Switch(

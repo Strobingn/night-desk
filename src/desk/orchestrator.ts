@@ -1197,8 +1197,15 @@ export class Desk {
 
   // ---------------------------------------------------------------- trading engine
 
+  /** The engine's scorecard plus how many engine positions the main paper book holds right now. */
+  private strategyCard(): ScorecardView {
+    let mainOpen = 0;
+    for (const pos of this.book.positions.values()) if (pos.strategy) mainOpen += 1;
+    return { ...this.strategy.scorecard(), mainOpen };
+  }
+
   strategyView(): ScorecardView {
-    return this.strategy.scorecard();
+    return this.strategyCard();
   }
 
   /** Change the engine's switch, sizes or active variants. Saved, and applied to the next signal. */
@@ -1219,7 +1226,7 @@ export class Desk {
       });
     }
     this.pinOrderMints();
-    return { ok: true, strategy: this.strategy.scorecard() };
+    return { ok: true, strategy: this.strategyCard() };
   }
 
   /** Wipe the shadow books and their saved trades. The main paper book is not touched. */
@@ -1227,7 +1234,7 @@ export class Desk {
     if (!confirm) return { ok: false, error: "Send confirm: true to wipe the scorecard." };
     this.strategy.reset();
     this.log({ stage: "system", kind: "info", code: "STRATEGY", message: "Scorecard reset. Every shadow book is back to its starting balance." });
-    return { ok: true, strategy: this.strategy.scorecard() };
+    return { ok: true, strategy: this.strategyCard() };
   }
 
   private watchForSignal(report: AnalystReport): void {
@@ -2671,7 +2678,7 @@ export class Desk {
       lastClientCrash: this.lastClientCrash,
       markLoop: this.markLoopView(),
       safetyChips: this.safetyChipList(),
-      strategy: this.strategy.scorecard(),
+      strategy: this.strategyCard(),
       perf: this.latency.view()
     };
   }

@@ -86,6 +86,11 @@ export interface ScorecardView {
   active: Record<SignalKind, string>;
   readyTrades: number;
   watching: number;
+  /**
+   * Engine positions open on the main paper book. Set by the desk. A variant's own `open`
+   * is its shadow book, which can hold a coin the main book refused, or nothing after a reset.
+   */
+  mainOpen?: number;
   variants: Array<VariantScore & { open: number; active: boolean }>;
   stats: EngineStats;
   /** Plain-words caveat shown with the numbers. */

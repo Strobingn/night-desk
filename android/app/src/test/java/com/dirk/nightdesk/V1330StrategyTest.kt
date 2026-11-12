@@ -81,6 +81,32 @@ class V1330StrategyTest {
     }
 
     @Test
+    fun steppersStepFromTheValueOnScreenAndStayInBand() {
+        // Three quick + taps from $25: each steps from the last value shown, not from the old snapshot.
+        var shown = 25.0
+        repeat(3) { shown = Strategy.step(shown, 5.0, 5.0, 500.0) }
+        assertEquals(40.0, shown, 0.0)
+        assertEquals(500.0, Strategy.step(498.0, 5.0, 5.0, 500.0), 0.0)
+        assertEquals(5.0, Strategy.step(5.0, -5.0, 5.0, 500.0), 0.0)
+        assertEquals(0.25, Strategy.step(0.5, -0.5, 0.25, 50.0), 0.0)
+        assertEquals(3.5, Strategy.step(3.0, 0.5, 0.25, 50.0), 0.0)
+    }
+
+    @Test
+    fun openCountIsTheMainBookNotTheShadowBooks() {
+        // The shadow books hold 1; the desk says the main book holds 2.
+        val reported = Strategy.parse(card().put("mainOpen", 2))!!
+        assertEquals(2, Strategy.mainOpen(reported, emptyList()))
+        // After a scorecard reset the shadow books are empty but the main book still holds its trades.
+        val wiped = Strategy.parse(card().put("mainOpen", 1).put("variants", JSONArray()))!!
+        assertEquals(1, Strategy.mainOpen(wiped, emptyList()))
+        // A desk that does not report it: unknown, never the shadow sum.
+        val older = Strategy.parse(card())!!
+        assertEquals(-1, older.mainOpen)
+        assertEquals(0, Strategy.mainOpen(older, emptyList()))
+    }
+
+    @Test
     fun engineStopCountsAsAStopForAlerts() {
         assertTrue(OneTap.isStopExit("STRATEGY_STOP"))
         assertFalse(OneTap.isStopExit("TAKE_PROFIT"))

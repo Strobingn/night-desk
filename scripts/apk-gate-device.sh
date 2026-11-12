@@ -33,6 +33,8 @@ mkdir -p "${GITHUB_WORKSPACE:-.}/gate-logs"
 set +e
 adb shell am instrument -w -r com.dirk.nightdesk.test/androidx.test.runner.AndroidJUnitRunner | tee "${GITHUB_WORKSPACE:-.}/gate-logs/instrument.txt"
 set -e
+adb pull /data/data/com.dirk.nightdesk/files/home-top.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-top-13.28.png" || true
+adb pull /data/data/com.dirk.nightdesk/files/engine.png "${GITHUB_WORKSPACE:-.}/gate-logs/engine-13.28.png" || true
 adb pull /data/data/com.dirk.nightdesk/files/home-collapsed.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-collapsed-13.28.png" || true
 adb pull /data/data/com.dirk.nightdesk/files/home-expanded.png "${GITHUB_WORKSPACE:-.}/gate-logs/home-expanded-13.28.png" || true
 adb pull /data/data/com.dirk.nightdesk/files/settings-onetap.png "${GITHUB_WORKSPACE:-.}/gate-logs/settings-onetap-13.28.png" || true
