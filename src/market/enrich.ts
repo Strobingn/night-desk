@@ -235,19 +235,19 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     await dexTask;
     const pools = token.poolAddresses ?? [];
     const exclude = holderExclusions(raw.mint, pools);
-    const readLargest = async (prefetched: unknown) => {
-      const largest =
-        prefetched ??
-        (await rpc(fetchImpl, urls, "getTokenLargestAccounts", [raw.mint], deps.meter, signal).catch(catchDeferred));
-      if (largest && prefetched == null) noteProvider(deps.note, "rpc:getTokenLargestAccounts");
+    const readLargest = async (prefetched: unknown, alreadyFetched: boolean) => {
+      // null from the prefetch is a miss or a 429, not "not started". Do not send the same call again.
+      const largest = alreadyFetched
+        ? prefetched
+        : await rpc(fetchImpl, urls, "getTokenLargestAccounts", [raw.mint], deps.meter, signal).catch(catchDeferred);
+      if (largest && !alreadyFetched) noteProvider(deps.note, "rpc:getTokenLargestAccounts");
       const addresses = largestAddresses(largest);
-      const accounts =
-        prefetched != null
-          ? multiple
-          : addresses.length
-            ? await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter, signal).catch(catchDeferred)
-            : null;
-      if (accounts && prefetched == null) noteProvider(deps.note, "rpc:getMultipleAccounts");
+      const accounts = alreadyFetched
+        ? multiple
+        : addresses.length
+          ? await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter, signal).catch(catchDeferred)
+          : null;
+      if (accounts && !alreadyFetched) noteProvider(deps.note, "rpc:getMultipleAccounts");
       const ownersRead = multipleOwnersRead(accounts);
       const attached = ownersRead ? attachTokenOwners(largest, accounts) : largest;
       if (ownersRead) {
@@ -262,7 +262,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
       const parsedFull = parseHolderAccounts(full.accounts, mint.supplyUi, mint.decimals, exclude, full.truncated);
       if (parsedFull.top10HolderPct != null || parsedFull.holderCount != null) {
         if (parsedFull.truncated) {
-          const top = await readLargest(null);
+          const top = await readLargest(null, false);
           holders = {
             top10HolderPct:
               top.top10HolderPct == null
@@ -278,7 +278,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
         }
       }
     }
-    if (!holders) holders = await readLargest(wantLargestNow ? largestFirst : null);
+    if (!holders) holders = await readLargest(wantLargestNow ? largestFirst : null, wantLargestNow);
     if (holders.top10HolderPct != null) {
       const prior = token.top10HolderPct;
       token.top10HolderPct = prior == null ? holders.top10HolderPct : Math.max(prior, holders.top10HolderPct);
