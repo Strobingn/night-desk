@@ -9,7 +9,6 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
-import androidx.compose.ui.test.assertExists
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.isToggleable
