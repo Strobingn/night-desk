@@ -137,9 +137,11 @@ class NativePaperGateTest {
         waitFor("(paper)")
         dismissNotice()
         openTab("Home")
-        scrollUntil("SEEK")
         openDetails("SEEK")
-        tapContains("⚡ Sell")
+        // v13.32 the expanded card's Sell button can sit under the fold; scroll the list to it first.
+        homeScrollTo(hasText("⚡ Sell", substring = true))
+        rule.onAllNodes(hasText("⚡ Sell", substring = true) and hasClickAction())[0].performClick()
+        rule.waitForIdle()
         waitFor("Sold SEEK")
         dismissNotice()
 
