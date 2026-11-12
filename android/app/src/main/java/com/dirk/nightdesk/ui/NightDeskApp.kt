@@ -1260,7 +1260,7 @@ private fun OpenPositionCard(
                 Spacer(Modifier.width(8.dp))
                 Text("stop ${num(pos.stopDistancePct, "%.1f")}% away", color = P.muted, fontSize = 11.sp, maxLines = 1)
             }
-            Disclosure(open = false) { expanded = true }
+            Disclosure(open = false, tag = "details-${pos.symbol}") { expanded = true }
         } else {
         StopTrailBar(stopBarModel(pos.stopPrice, pos.entryPrice, pos.markPrice, pos.peakPrice, armPct, trailOn))
         Column(
@@ -1325,7 +1325,7 @@ private fun OpenPositionCard(
                 )
             }
         }
-            Disclosure(open = true) { expanded = false }
+            Disclosure(open = true, tag = "details-${pos.symbol}") { expanded = false }
         }
     }
     val pending = sellAsk

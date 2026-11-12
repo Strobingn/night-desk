@@ -75,7 +75,7 @@ class NativePaperGateTest {
         scrollUntil("NOVA")
         scrollUntil("GATE")
         shot("home-collapsed")
-        tapBelow("GATE", "Details", substring = true)
+        openDetails("GATE")
         scrollUntil("Sell 25%")
         scrollUntil("Sell 100%")
         shot("home-expanded")
@@ -138,7 +138,7 @@ class NativePaperGateTest {
         dismissNotice()
         openTab("Home")
         scrollUntil("SEEK")
-        tapBelow("SEEK", "Details", substring = true)
+        openDetails("SEEK")
         tapContains("⚡ Sell")
         waitFor("Sold SEEK")
         dismissNotice()
@@ -219,6 +219,13 @@ class NativePaperGateTest {
             Thread.sleep(700)
         }
         error("Night Desk never drew. Last package ${device.currentPackageName}")
+    }
+
+    /** v13.32 the Details toggle on one position card, found by tag so another coin's card is never opened. */
+    private fun openDetails(symbol: String) {
+        scrollUntil(symbol)
+        rule.onNode(hasTestTag("details-$symbol")).performScrollTo().performClick()
+        rule.waitForIdle()
     }
 
     /** v13.32 opens the folded LIVE strip on one tape card, if it is still closed. */
