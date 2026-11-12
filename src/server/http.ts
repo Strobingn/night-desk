@@ -89,7 +89,8 @@ export function startServer(
           now: Date.now(),
           publicUrl: readPublicUrl(desk.config.dbPath),
           eventLoopLag: eventLoopLag(),
-          prefilter: desk.prefilterSnapshot()
+          prefilter: desk.prefilterSnapshot(),
+          unverifiedKills: desk.unverifiedKillCounts()
         });
       }
       if (url.pathname === "/api/state") return json(res, 200, takeSnapshot(false));

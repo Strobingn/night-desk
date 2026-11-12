@@ -51,14 +51,16 @@ describe("v13.3 honest gap/rug labels", () => {
       await desk.submitCandidate(quiet());
       const bought = await desk.manualBuy(MINT, 50);
       expect(bought.ok).toBe(true);
-      const entry = desk.book.positions.get(MINT)!.entryPrice;
+      const held = desk.book.positions.get(MINT)!;
+      const entry = held.entryPrice;
+      const basis = held.entryMark != null && held.entryMark > 0 ? held.entryMark : entry;
       await desk.markPrice(MINT, entry * 0.001);
       await desk.markPrice(MINT, entry * 0.001);
       expect(desk.book.positions.has(MINT)).toBe(false);
       const closed = desk.snapshot().closed.find((t) => t.mint === MINT)!;
       expect(closed.exitCode).toBe("GAP_RUG");
       expect(closed.exitPrice!).toBeLessThan(entry * 0.01);
-      expect(closed.stopPrice!).toBeCloseTo(entry * 0.94, 10);
+      expect(closed.stopPrice!).toBeCloseTo(basis * 0.94, 10);
       expect(closed.triggerPrice!).toBeCloseTo(entry * 0.001, 12);
       const exitEvent = desk.snapshot().events.find((e) => e.code === "GAP_RUG" && e.stage === "risk");
       expect(exitEvent?.message).toContain("gapped through the stop");
@@ -347,7 +349,8 @@ describe("v13.3 adjustable slippage (entry up to 50%, exit tolerance)", () => {
       expect(pos.entryPrice).toBeGreaterThan(1.09);
       expect(pos.entryPrice).toBeLessThan(1.2);
       if (filled.ok) expect(filled.fillPriceUsd).toBeCloseTo(pos.entryPrice, 10);
-      expect(desk.snapshot().positions.find((p) => p.mint === thin)?.stopPrice).toBeCloseTo(pos.entryPrice * 0.94, 10);
+      const stopBasis = pos.entryMark != null && pos.entryMark > 0 ? pos.entryMark : pos.entryPrice;
+      expect(desk.snapshot().positions.find((p) => p.mint === thin)?.stopPrice).toBeCloseTo(stopBasis * 0.94, 10);
 
       // A tight custom exit tolerance blocks the same buy before it opens.
       await desk.closePosition(thin, 1);

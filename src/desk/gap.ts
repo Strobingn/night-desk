@@ -17,6 +17,8 @@ export const RUG_DROP = 0.5;
 export interface StopExitInput {
   code: ReasonCode;
   entryPrice: number;
+  /** Mark the stop is measured from. Falls back to the fill when the buy never recorded one. */
+  basisPrice?: number;
   stopPct: number;
   fillPrice: number;
   triggerPrice?: number;
@@ -34,13 +36,15 @@ export interface StopExitLabel {
 }
 
 export function classifyStopExit(input: StopExitInput): StopExitLabel {
-  const stopPrice = input.entryPrice > 0 ? input.entryPrice * (1 - input.stopPct) : 0;
+  const basis = input.basisPrice != null && input.basisPrice > 0 ? input.basisPrice : input.entryPrice;
+  const stopPrice = basis > 0 ? basis * (1 - input.stopPct) : 0;
   if (!(input.entryPrice > 0) || !(input.fillPrice >= 0)) {
     return { code: input.code, stopPrice, fillDropPct: null, gapPct: 0, rug: false };
   }
   const fillDropPct = input.fillPrice / input.entryPrice - 1;
   if (input.code !== "STOP_LOSS") return { code: input.code, stopPrice, fillDropPct, gapPct: 0, rug: false };
-  const past = -fillDropPct - input.stopPct;
+  // How far the fill landed through the line that actually fired, as a fraction of that basis.
+  const past = basis > 0 ? (stopPrice - input.fillPrice) / basis : 0;
   if (past > GAP_TOLERANCE) {
     return { code: "GAP_RUG", stopPrice, fillDropPct, gapPct: past, rug: -fillDropPct >= RUG_DROP };
   }

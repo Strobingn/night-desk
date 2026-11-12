@@ -94,7 +94,8 @@ describe("manual buy and live-ready checklist", () => {
       expect(desk.book.positions.get(mint)?.costUsd).toBe(7.1);
       expect(desk.snapshot().events.some((event) => event.message.includes("Refusing"))).toBe(false);
       const pos = desk.snapshot().positions[0];
-      expect(pos?.stopPrice).toBeCloseTo(pos!.entryPrice * 0.94, 8);
+      const basis = desk.book.positions.get(mint)?.entryMark ?? pos!.entryPrice;
+      expect(pos?.stopPrice).toBeCloseTo(basis * 0.94, 8);
       const omitted = await desk.manualBuy(mint);
       expect(omitted.ok).toBe(false);
       if (!omitted.ok) expect(formatBuyNotice(omitted)).toBe(omitted.error);

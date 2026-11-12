@@ -234,6 +234,8 @@ export interface ParsedRugcheck {
   mintAuthorityRevoked: boolean | null;
   lpLockedOrBurned: boolean | null;
   lpLockPct: number | null;
+  /** Pool the lock percent was taken from. Null when no pool was judged. */
+  lpPool: string | null;
   /** Set only when topHolders could be filtered for reserves. Otherwise null so RPC wins. */
   top10HolderPct: number | null;
   /** True when at least one reported holder was dropped as a curve, vault, or burn account. */
@@ -242,6 +244,78 @@ export interface ParsedRugcheck {
   devHoldingPct: number | null;
   devRug: { rugged: boolean; evidence?: string } | null;
   riskText: string;
+}
+
+/** Concentrated-liquidity markets have no traditional LP token. They are not an unlock. */
+export function isConcentratedLpMarket(market: Record<string, unknown>): boolean {
+  const lp = market.lp as Record<string, unknown> | undefined;
+  const blob = [market.marketType, market.type, market.dex, market.dexId, market.name, market.label, lp?.type]
+    .filter((part) => part != null)
+    .join(" ")
+    .toLowerCase();
+  return /dlmm|clmm|whirlpool|concentrated|\bcl\b|bin-step|bin step/.test(blob);
+}
+
+function marketLiquidityUsd(market: Record<string, unknown>): number | null {
+  const lp = market.lp as Record<string, unknown> | undefined;
+  const bag = market.liquidity;
+  if (bag && typeof bag === "object") {
+    const usd = (bag as { usd?: unknown }).usd;
+    if (typeof usd === "number" && Number.isFinite(usd) && usd > 0) return usd;
+  }
+  for (const value of [market.liquidityUsd, market.liquidity, lp?.lpLockedUSD, lp?.liquidityUsd, lp?.usd]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+function marketLockPct(market: Record<string, unknown>): number | null {
+  const lp = market.lp as { lpLockedPct?: unknown } | undefined;
+  const pct = lp?.lpLockedPct ?? market.lpLockedPct;
+  return typeof pct === "number" && Number.isFinite(pct) ? pct : null;
+}
+
+function marketLabel(market: Record<string, unknown>, index: number): string {
+  const kind = String(market.marketType ?? market.dexId ?? market.dex ?? market.name ?? "pool");
+  const id = String(market.pubkey ?? market.pairAddress ?? market.address ?? market.id ?? "");
+  const short = id.length > 8 ? `${id.slice(0, 4)}…${id.slice(-4)}` : id;
+  return short ? `${kind} ${short}` : `${kind} #${index + 1}`;
+}
+
+/**
+ * Primary pool by liquidity, among markets that actually have an LP token.
+ * No liquidity on anyone: weakest explicit percent, and a silent traditional pool
+ * nulls a lock (it might be the deep one). An explicit unlock beside a silent pool still counts.
+ */
+export function judgeLpLock(markets: readonly unknown[]): { lpLockPct: number | null; lpPool: string | null } {
+  const rows = markets.map((market, index) => {
+    const row = (market ?? {}) as Record<string, unknown>;
+    return {
+      pct: marketLockPct(row),
+      liquidity: marketLiquidityUsd(row),
+      concentrated: isConcentratedLpMarket(row),
+      label: marketLabel(row, index)
+    };
+  });
+  const applicable = rows.filter((row) => !row.concentrated);
+  const ranked = applicable.filter((row) => row.liquidity != null);
+  if (ranked.length) {
+    ranked.sort((a, b) => (b.liquidity ?? 0) - (a.liquidity ?? 0));
+    const primary = ranked[0]!;
+    if (primary.pct == null) return { lpLockPct: null, lpPool: primary.label };
+    return { lpLockPct: primary.pct, lpPool: primary.label };
+  }
+  const withPct = applicable.filter((row) => row.pct != null);
+  const silent = applicable.some((row) => row.pct == null);
+  if (!withPct.length) return { lpLockPct: null, lpPool: null };
+  if (silent) {
+    const unlocked = withPct.filter((row) => (row.pct ?? 100) < 95);
+    if (!unlocked.length) return { lpLockPct: null, lpPool: null };
+    const worst = unlocked.reduce((a, b) => ((a.pct ?? 0) <= (b.pct ?? 0) ? a : b));
+    return { lpLockPct: worst.pct, lpPool: worst.label };
+  }
+  const worst = withPct.reduce((a, b) => ((a.pct ?? 0) <= (b.pct ?? 0) ? a : b));
+  return { lpLockPct: worst.pct, lpPool: `${worst.label} (no liquidity to rank)` };
 }
 
 /**
@@ -273,16 +347,13 @@ export function parseRugcheckReport(report: unknown, mint?: string, extraAddress
     mintAuthorityRevoked = false;
   }
 
-  // The weakest market decides. One unlocked pool can still be pulled.
-  let lpLockPct: number | null = null;
-  let lpMissing = false;
-  for (const market of data.markets ?? []) {
-    const pct = market.lp?.lpLockedPct ?? market.lpLockedPct;
-    if (typeof pct === "number" && Number.isFinite(pct)) lpLockPct = lpLockPct == null ? pct : Math.min(lpLockPct, pct);
-    else lpMissing = true;
-  }
-  // A silent market must not be vouched for by the pools we can see. Evidence of an unlock still counts.
-  if (lpMissing && lpLockPct != null && lpLockPct >= 95) lpLockPct = null;
+  // Judge the primary traditional pool. A DLMM or other concentrated-liquidity market has no
+  // LP token, so a 0% or a missing figure there is "not applicable", not an unlock.
+  // When no pool reports liquidity, an explicit unlock still fails and a silent pool still
+  // refuses to let the others vouch for it (the old weakest-market rule).
+  const judged = judgeLpLock(data.markets ?? []);
+  let lpLockPct = judged.lpLockPct;
+  const lpPool = judged.lpPool;
   let lpLockedOrBurned: boolean | null = null;
   if (lpLockPct != null) {
     // RugCheck reports a percent (0–100). 1 and 0.96 are about 1%, not a full lock.
@@ -315,6 +386,7 @@ export function parseRugcheckReport(report: unknown, mint?: string, extraAddress
     mintAuthorityRevoked,
     lpLockedOrBurned,
     lpLockPct,
+    lpPool,
     top10HolderPct,
     holdersExcludeReserves,
     devWallet,

@@ -28,6 +28,24 @@ export interface EnrichDeps {
   dexLookup?: (mint: string) => Promise<unknown | null>;
   /** Counts enrich RPC attempts only. Wallet and mark reads do not touch this. */
   meter?: EnrichMeter;
+  /** Lookup already fetched Dex. Skip a second call and reuse this payload (null is a miss). */
+  skipDex?: boolean;
+  dexPayload?: unknown | null;
+  /** Fires when the Dex body arrives, including a miss, so lookup can reuse it. */
+  onDex?: (payload: unknown | null) => void;
+  /**
+   * Wall-clock budget for the whole enrich. When it fires, fields that already landed
+   * are returned and the rest stay null. RugCheck and RPC do not wait on each other.
+   */
+  budgetMs?: number;
+  /** Providers that answered, and whether the budget won. Lookup writes this onto the event. */
+  note?: EnrichNote;
+}
+
+/** Which outside calls returned a body during this enrich. */
+export interface EnrichNote {
+  providers: string[];
+  timedOut: boolean;
 }
 
 const DAS_PAGE = 1_000;
@@ -95,6 +113,28 @@ export class EnrichMeter {
 const emptySocial = { mentions1h: 0, hasWebsite: false, hasTelegram: false, hasTwitter: false };
 const emptyHints: AuthorityHints = { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
 
+function noteProvider(note: EnrichNote | undefined, name: string): void {
+  if (!note) return;
+  if (!note.providers.includes(name)) note.providers.push(name);
+}
+
+function cloneToken(token: CandidateToken): CandidateToken {
+  return {
+    ...token,
+    social: { ...token.social },
+    ...(token.poolAddresses ? { poolAddresses: [...token.poolAddresses] } : {}),
+    ...(token.holderSample
+      ? { holderSample: { supplyUi: token.holderSample.supplyUi, rows: token.holderSample.rows.map((row) => ({ ...row })) } }
+      : {}),
+    ...(token.devRug ? { devRug: { ...token.devRug } } : {})
+  };
+}
+
+/**
+ * Dex, RugCheck, and Alchemy run together. A slow RugCheck cannot stop getAccountInfo,
+ * and a timed-out call keeps whatever already landed instead of returning an all-null chain.
+ * Tape enrich still omits RugCheck; the filter calls it afterwards.
+ */
 export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promise<CandidateToken> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const urls = enrichRpcUrls(deps.rpcUrl);
@@ -115,15 +155,190 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     devWallet: raw.devWallet ?? null,
     social: { ...emptySocial }
   };
+  const budgetCtrl = new AbortController();
+  const signal = budgetCtrl.signal;
+  let deferred: EnrichDeferred | null = null;
+  let riskText = "";
+  const catchDeferred = (err: unknown): null => {
+    if (err instanceof EnrichDeferred) deferred = err;
+    return null;
+  };
 
-  // Dex and RugCheck do not depend on each other. RugCheck is optional: tape enrich
-  // leaves it unset and the filter path calls it later, at about 1 request/second.
+  const dexTask = (async (): Promise<unknown | null> => {
+    const dex = deps.skipDex
+      ? (deps.dexPayload ?? null)
+      : deps.dexLookup
+        ? await deps.dexLookup(raw.mint).catch(() => null)
+        : await fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`, signal);
+    deps.onDex?.(dex);
+    if (dex) noteProvider(deps.note, "dex");
+    applyDexPayload(token, dex, raw);
+    return dex;
+  })();
+
   const rugUrl = deps.rugcheckUrl ? `${deps.rugcheckUrl.replace(/\/$/, "")}/tokens/${raw.mint}/report` : null;
-  const [dex, report] = await Promise.all([
-    deps.dexLookup ? deps.dexLookup(raw.mint).catch(() => null) : fetchJson(fetchImpl, `https://api.dexscreener.com/latest/dex/tokens/${raw.mint}`),
-    rugUrl ? fetchJson(fetchImpl, rugUrl) : Promise.resolve(null)
-  ]);
+  const rugTask = (async (): Promise<unknown | null> => {
+    if (!rugUrl) return null;
+    const report = await fetchJson(fetchImpl, rugUrl, signal);
+    if (report) noteProvider(deps.note, "rugcheck");
+    return report;
+  })();
 
+  const mintTask = (async (): Promise<ParsedMint> => {
+    const blank: ParsedMint = { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
+    if (!urls.length) return blank;
+    try {
+      const mintInfo = await rpc(fetchImpl, urls, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }], deps.meter, signal);
+      noteProvider(deps.note, "rpc:getAccountInfo");
+      return parseMintAccount(mintInfo);
+    } catch (err) {
+      catchDeferred(err);
+      return blank;
+    }
+  })();
+
+  // On-chain mint is applied as soon as getAccountInfo returns. It does not wait for RugCheck.
+  const mintApply = mintTask.then((mint) => {
+    if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
+    if (mint.freezeAuthorityRevoked != null) token.freezeAuthorityRevoked = mint.freezeAuthorityRevoked;
+    if (mint.decimals != null) token.decimals = mint.decimals;
+  });
+
+  const holdersTask = (async () => {
+    if (!urls.length) return;
+    const pages = deps.holderPagesMax ?? 0;
+    const heliusPrimary = urls[0] && isHeliusUrl(urls[0]) ? urls[0] : "";
+    const wantLargestNow = !(pages > 0 && heliusPrimary);
+    const largestPromise = wantLargestNow
+      ? rpc(fetchImpl, urls, "getTokenLargestAccounts", [raw.mint], deps.meter, signal)
+          .then((largest) => {
+            noteProvider(deps.note, "rpc:getTokenLargestAccounts");
+            return largest;
+          })
+          .catch(catchDeferred)
+      : Promise.resolve(null);
+    const pagesPromise =
+      pages > 0 && heliusPrimary
+        ? readAllHolders(fetchImpl, heliusPrimary, raw.mint, pages, deps.dasGapMs ?? 500, deps.meter, signal).catch(catchDeferred)
+        : Promise.resolve(null);
+
+    const largestFirst = await largestPromise;
+    let multiple: unknown = null;
+    if (wantLargestNow) {
+      const addresses = largestAddresses(largestFirst);
+      if (addresses.length) {
+        multiple = await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter, signal).catch(catchDeferred);
+        if (multiple) noteProvider(deps.note, "rpc:getMultipleAccounts");
+      }
+    }
+    const [mint, full] = await Promise.all([mintTask, pagesPromise]);
+    await dexTask;
+    const pools = token.poolAddresses ?? [];
+    const exclude = holderExclusions(raw.mint, pools);
+    const readLargest = async (prefetched: unknown) => {
+      const largest =
+        prefetched ??
+        (await rpc(fetchImpl, urls, "getTokenLargestAccounts", [raw.mint], deps.meter, signal).catch(catchDeferred));
+      if (largest && prefetched == null) noteProvider(deps.note, "rpc:getTokenLargestAccounts");
+      const addresses = largestAddresses(largest);
+      const accounts =
+        prefetched != null
+          ? multiple
+          : addresses.length
+            ? await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter, signal).catch(catchDeferred)
+            : null;
+      if (accounts && prefetched == null) noteProvider(deps.note, "rpc:getMultipleAccounts");
+      const attached = attachTokenOwners(largest, accounts);
+      const rows = (attached as { value?: LargestHolderRow[] })?.value;
+      token.holderSample = { supplyUi: mint.supplyUi, rows: Array.isArray(rows) ? rows : [] };
+      return parseTop10Pct(attached, mint.supplyUi, exclude);
+    };
+
+    let holders: { top10HolderPct: number | null; holderCount: number | null; holderCountAtLeast?: boolean } | null = null;
+    if (full) {
+      const parsedFull = parseHolderAccounts(full.accounts, mint.supplyUi, mint.decimals, exclude, full.truncated);
+      if (parsedFull.top10HolderPct != null || parsedFull.holderCount != null) {
+        if (parsedFull.truncated) {
+          const top = await readLargest(null);
+          holders = {
+            top10HolderPct:
+              top.top10HolderPct == null
+                ? parsedFull.top10HolderPct
+                : parsedFull.top10HolderPct == null
+                  ? top.top10HolderPct
+                  : Math.max(parsedFull.top10HolderPct, top.top10HolderPct),
+            holderCount: parsedFull.holderCount,
+            holderCountAtLeast: false
+          };
+        } else {
+          holders = parsedFull;
+        }
+      }
+    }
+    if (!holders) holders = await readLargest(wantLargestNow ? largestFirst : null);
+    if (holders.top10HolderPct != null) token.top10HolderPct = holders.top10HolderPct;
+    if (holders.holderCount != null) {
+      token.holderCount = holders.holderCount;
+      token.holderCountAtLeast = holders.holderCountAtLeast === true;
+    }
+  })().catch(catchDeferred);
+
+  // RugCheck merges after Dex so pool vaults are known. The HTTP call itself already started.
+  const rugApply = (async () => {
+    const [report] = await Promise.all([rugTask, dexTask]);
+    if (!report) return;
+    const pools = token.poolAddresses ?? [];
+    riskText = parseRugcheckReport(report, raw.mint, pools).riskText;
+    mergeRug(token, report, raw.mint, pools);
+  })().catch(() => undefined);
+
+  // Rug or Dex may name a revoked mint when the account read missed. They never wipe an on-chain answer.
+  const hintApply = (async () => {
+    const [mint, dex, report] = await Promise.all([mintTask, dexTask, rugTask]);
+    const dexHints = dex ? hintsFromDex(dex, raw.mint) : emptyHints;
+    const rugHints = report ? authorityHints(report) : emptyHints;
+    if (token.mintAuthorityRevoked == null) {
+      const known = rugHints.mintAuthorityRevoked ?? dexHints.mintAuthorityRevoked;
+      if (known != null) token.mintAuthorityRevoked = known;
+    }
+    if (token.freezeAuthorityRevoked == null) {
+      const known = rugHints.freezeAuthorityRevoked ?? dexHints.freezeAuthorityRevoked;
+      if (known != null) token.freezeAuthorityRevoked = known;
+    }
+    if (token.decimals == null) {
+      const known = rugHints.decimals ?? dexHints.decimals ?? mint.decimals;
+      if (known != null) token.decimals = known;
+    }
+  })().catch(() => undefined);
+
+  const tasks = [dexTask, mintApply, holdersTask, rugApply, hintApply];
+  let finished = false;
+  const all = Promise.all(tasks).then(
+    () => {
+      finished = true;
+    },
+    () => {
+      finished = true;
+    }
+  );
+  if (deps.budgetMs != null && Number.isFinite(deps.budgetMs)) {
+    const ms = Math.max(0, deps.budgetMs);
+    await Promise.race([all, new Promise<void>((resolve) => setTimeout(resolve, ms))]);
+    if (!finished) {
+      if (deps.note) deps.note.timedOut = true;
+      budgetCtrl.abort();
+    }
+  } else {
+    await all;
+  }
+  const snap = cloneToken(token);
+  fillDevShare(snap);
+  snap.onBondingCurve = inferOnBondingCurve({ source: snap.source, dex: snap.dex, riskText });
+  if (deferred && snap.mintAuthorityRevoked == null && snap.top10HolderPct == null && !deps.note?.timedOut) throw deferred;
+  return snap;
+}
+
+function applyDexPayload(token: CandidateToken, dex: unknown | null, raw: RawSighting): void {
   const parsed = dex ? parseDexPair(dex, raw.mint) : null;
   if (parsed && parsed.priceUsd > 0) {
     token.priceUsd = parsed.priceUsd;
@@ -159,89 +374,8 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
     token.liquidityUsd = (raw.liquidityUsd ?? 0) > 0 ? raw.liquidityUsd ?? 0 : parsed?.liquidityUsd ?? 0;
     if (token.priceUsd > 0) token.priceFeed = raw.priceFeed ?? "listing";
   }
-
-  const dexHints = dex ? hintsFromDex(dex, raw.mint) : emptyHints;
-  const rugHints = report ? authorityHints(report) : emptyHints;
-  const knownMint = rugHints.mintAuthorityRevoked ?? dexHints.mintAuthorityRevoked;
-  const knownFreeze = rugHints.freezeAuthorityRevoked ?? dexHints.freezeAuthorityRevoked;
-  // On-chain mint supply wins. A Dex market-cap / price guess is not a supply.
-  const knownSupply = rugHints.supplyUi ?? dexHints.supplyUi;
-  const knownDecimals = rugHints.decimals ?? dexHints.decimals;
-
-  let mint: ParsedMint = { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, supplyUi: null, decimals: null };
-  if (urls.length > 0) {
-    const mintInfo = await rpc(fetchImpl, urls, "getAccountInfo", [raw.mint, { encoding: "jsonParsed" }], deps.meter);
-    mint = parseMintAccount(mintInfo);
-  }
-  if (mint.mintAuthorityRevoked == null && knownMint != null) mint.mintAuthorityRevoked = knownMint;
-  if (mint.freezeAuthorityRevoked == null && knownFreeze != null) mint.freezeAuthorityRevoked = knownFreeze;
-  if (!(mint.supplyUi != null && mint.supplyUi > 0) && knownSupply != null && knownSupply > 0) mint.supplyUi = knownSupply;
-  if (mint.decimals == null && knownDecimals != null) mint.decimals = knownDecimals;
-  if (mint.mintAuthorityRevoked != null) token.mintAuthorityRevoked = mint.mintAuthorityRevoked;
-  if (mint.freezeAuthorityRevoked != null) token.freezeAuthorityRevoked = mint.freezeAuthorityRevoked;
-  if (mint.decimals != null) token.decimals = mint.decimals;
-
   const pools = dex ? dexPairAddresses(dex, raw.mint) : [];
   if (pools.length) token.poolAddresses = pools;
-  const holderSample: { current: { supplyUi: number | null; rows: LargestHolderRow[] } | null } = { current: null };
-  if (urls.length > 0) {
-    const exclude = holderExclusions(raw.mint, pools);
-    const readLargest = async () => {
-      const largest = await rpc(fetchImpl, urls, "getTokenLargestAccounts", [raw.mint], deps.meter);
-      const addresses = largestAddresses(largest);
-      const multiple =
-        addresses.length > 0
-          ? await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter)
-          : null;
-      const attached = attachTokenOwners(largest, multiple);
-      const rows = (attached as { value?: LargestHolderRow[] })?.value;
-      holderSample.current = { supplyUi: mint.supplyUi, rows: Array.isArray(rows) ? rows : [] };
-      return parseTop10Pct(attached, mint.supplyUi, exclude);
-    };
-
-    let holders: { top10HolderPct: number | null; holderCount: number | null; holderCountAtLeast?: boolean } | null = null;
-    const pages = deps.holderPagesMax ?? 0;
-    const heliusPrimary = urls[0] && isHeliusUrl(urls[0]) ? urls[0] : "";
-    if (pages > 0 && heliusPrimary) {
-      const full = await readAllHolders(fetchImpl, heliusPrimary, raw.mint, pages, deps.dasGapMs ?? 500, deps.meter);
-      if (full) {
-        const parsedFull = parseHolderAccounts(full.accounts, mint.supplyUi, mint.decimals, exclude, full.truncated);
-        if (parsedFull.top10HolderPct != null || parsedFull.holderCount != null) {
-          if (parsedFull.truncated) {
-            const top = await readLargest();
-            holders = {
-              top10HolderPct:
-                top.top10HolderPct == null
-                  ? parsedFull.top10HolderPct
-                  : parsedFull.top10HolderPct == null
-                    ? top.top10HolderPct
-                    : Math.max(parsedFull.top10HolderPct, top.top10HolderPct),
-              holderCount: parsedFull.holderCount,
-              holderCountAtLeast: false
-            };
-          } else {
-            holders = parsedFull;
-          }
-        }
-      }
-    }
-    if (!holders) holders = await readLargest();
-    if (holders.top10HolderPct != null) token.top10HolderPct = holders.top10HolderPct;
-    if (holders.holderCount != null) {
-      token.holderCount = holders.holderCount;
-      token.holderCountAtLeast = holders.holderCountAtLeast === true;
-    }
-  }
-  if (holderSample.current) token.holderSample = holderSample.current;
-
-  let riskText = "";
-  if (report) {
-    riskText = parseRugcheckReport(report, raw.mint, pools).riskText;
-    mergeRug(token, report, raw.mint, pools);
-  }
-  fillDevShare(token);
-  token.onBondingCurve = inferOnBondingCurve({ source: token.source, dex: token.dex, riskText });
-  return token;
 }
 
 let rugNextAt = 0;
@@ -297,6 +431,7 @@ function mergeRug(token: CandidateToken, report: unknown, mint: string, pools?: 
   }
   if (rug.lpLockedOrBurned != null) token.lpLockedOrBurned = rug.lpLockedOrBurned;
   if (rug.lpLockPct != null) token.lpLockPct = rug.lpLockPct;
+  if (rug.lpPool) token.lpLockPool = rug.lpPool;
   if (rug.top10HolderPct != null) {
     token.top10HolderPct = token.top10HolderPct == null ? rug.top10HolderPct : Math.max(token.top10HolderPct, rug.top10HolderPct);
   }
@@ -332,13 +467,14 @@ async function readAllHolders(
   mint: string,
   maxPages: number,
   gapMs: number,
-  meter?: EnrichMeter
+  meter?: EnrichMeter,
+  signal?: AbortSignal
 ): Promise<{ accounts: TokenAccountRow[]; truncated: boolean } | null> {
   const accounts: TokenAccountRow[] = [];
   let truncated = false;
   for (let page = 1; page <= maxPages; page += 1) {
     await dasSlot(gapMs);
-    const result = await rpc(fetchImpl, [rpcUrl], "getTokenAccounts", { mint, page, limit: DAS_PAGE }, meter);
+    const result = await rpc(fetchImpl, [rpcUrl], "getTokenAccounts", { mint, page, limit: DAS_PAGE }, meter, signal);
     const rows = (result as { token_accounts?: TokenAccountRow[] } | null)?.token_accounts;
     if (!Array.isArray(rows)) {
       if (page === 1) return null;
@@ -358,11 +494,12 @@ function largestAddresses(largest: unknown): string[] {
   return rows.map((row) => row.address).filter((address): address is string => Boolean(address));
 }
 
-async function fetchJson(fetchImpl: typeof fetch, url: string): Promise<unknown | null> {
+async function fetchJson(fetchImpl: typeof fetch, url: string, signal?: AbortSignal): Promise<unknown | null> {
   try {
+    const timeout = AbortSignal.timeout(4500);
     const res = await fetchImpl(url, {
       headers: { accept: "application/json", "user-agent": "night-desk/1.0" },
-      signal: AbortSignal.timeout(4500)
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout
     });
     if (!res.ok) return null;
     return await res.json();
@@ -381,14 +518,15 @@ async function rpc(
   urls: string[],
   method: string,
   params: unknown,
-  meter?: EnrichMeter
+  meter?: EnrichMeter,
+  signal?: AbortSignal
 ): Promise<unknown | null> {
   if (!urls.length) return null;
   let down = 0;
   let answered = false;
   let retryMs = 2_000;
   for (const url of urls) {
-    const outcome = await rpcOnce(fetchImpl, url, method, params, meter);
+    const outcome = await rpcOnce(fetchImpl, url, method, params, meter, signal);
     if (outcome.kind === "ok") return outcome.result;
     if (outcome.kind === "down") {
       down += 1;
@@ -406,14 +544,16 @@ async function rpcOnce(
   url: string,
   method: string,
   params: unknown,
-  meter?: EnrichMeter
+  meter?: EnrichMeter,
+  signal?: AbortSignal
 ): Promise<RpcOutcome> {
   try {
+    const timeout = AbortSignal.timeout(4500);
     const res = await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json", "user-agent": "night-desk/1.0" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-      signal: AbortSignal.timeout(4500)
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout
     });
     const local = res.headers.get("x-nd-local") === "1";
     meter?.note(res.status, local);

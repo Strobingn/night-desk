@@ -29,7 +29,10 @@ export interface RiskAssessment {
 }
 
 /**
- * The only automatic exit is the hard stop, −6% from the fill.
+ * The only automatic exit is the hard stop, the configured percent under the entry mark.
+ * The fill is often worse than that mark by entry slippage. Measuring the stop from the
+ * fill makes an unchanged mark look like a loss and can stop out one tick later.
+ * When the buy did not record a mark, the fill is still the line.
  * Peak and the old trail gap stay on the book as hints. Dirk closes winners.
  */
 export function assessPosition(
@@ -39,11 +42,13 @@ export function assessPosition(
   options?: { trailExits?: boolean; liveTrailPct?: number | null }
 ): RiskAssessment {
   const entry = pos.entryPrice;
+  const basis = pos.entryMark != null && pos.entryMark > 0 && Number.isFinite(pos.entryMark) ? pos.entryMark : entry;
   const peak = Math.max(pos.peakPrice, mark, entry);
   const pnlPct = entry > 0 ? (mark - entry) / entry : 0;
+  const fromMark = basis > 0 ? (mark - basis) / basis : 0;
   const peakPnl = entry > 0 ? (peak - entry) / entry : 0;
   const trailArmed = pos.trailArmed || peakPnl >= rules.trailArmPct;
-  const stopPrice = entry * (1 - rules.stopLossPct);
+  const stopPrice = basis * (1 - rules.stopLossPct);
   let trailHintPrice = trailArmed ? peak * (1 - rules.trailGapPct) : null;
   // v13.5 live trail. Armed from entry, measured on marks (not the fill), so paying entry slippage
   // does not trip it on the first tick. Line = highest accepted mark × (1 − trail %). The hard
@@ -53,12 +58,12 @@ export function assessPosition(
   const liveTrailPrice = liveTrail != null && markPeak != null ? markPeak * (1 - liveTrail) : null;
   if (liveTrailPrice != null) trailHintPrice = liveTrailPrice;
 
-  if (pnlPct <= -rules.stopLossPct) {
+  if (basis > 0 && mark <= stopPrice) {
     return {
       action: "stop",
       code: "STOP_LOSS",
-      message: `Hard stop: mark is ${(pnlPct * 100).toFixed(2)}% from entry (limit -${(rules.stopLossPct * 100).toFixed(0)}%).`,
-      pnlPct,
+      message: `Hard stop: mark is ${(fromMark * 100).toFixed(2)}% from the entry mark (limit -${(rules.stopLossPct * 100).toFixed(0)}%).`,
+      pnlPct: fromMark,
       peakPrice: peak,
       trailArmed,
       stopPrice,

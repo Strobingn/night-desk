@@ -5,7 +5,7 @@ import { enrichSighting } from "../src/market/enrich.js";
 const MINT = "Mint111111111111111111111111111111111111111";
 
 describe("enrich overlap", () => {
-  it("runs dex, mint, and rugcheck together, then holders, even when volume is thin", async () => {
+  it("runs dex, rugcheck, and the mint read together, and does not hold holders for rugcheck", async () => {
     const delay: Record<string, number> = {
       dex: 80,
       rug: 80,
@@ -37,9 +37,11 @@ describe("enrich overlap", () => {
     );
 
     expect(Math.abs(starts.dex - starts.rug)).toBeLessThan(40);
-    expect(starts.getAccountInfo).toBeGreaterThanOrEqual(Math.max(ends.dex, ends.rug) - 5);
-    expect(starts.getTokenLargestAccounts).toBeGreaterThanOrEqual(ends.getAccountInfo - 5);
+    expect(Math.abs(starts.dex - starts.getAccountInfo)).toBeLessThan(40);
+    expect(Math.abs(starts.getAccountInfo - starts.getTokenLargestAccounts)).toBeLessThan(40);
+    // Holders do not wait for RugCheck. Multiple starts as soon as the largest-accounts read returns.
     expect(starts.getMultipleAccounts).toBeGreaterThanOrEqual(ends.getTokenLargestAccounts - 5);
+    expect(starts.getMultipleAccounts).toBeLessThan(ends.rug);
     expect(counts).toEqual({
       dex: 1,
       rug: 1,

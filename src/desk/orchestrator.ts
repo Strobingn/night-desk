@@ -22,7 +22,7 @@ import { assertNonNegativeFinite, entryPriceAllowed, exitImpactAllowed, floorUsd
 import { dexscreenerUrl, parseCoinInput, positionTag } from "../market/coin-input.js";
 import { resolveCoinMint } from "../market/coin-lookup.js";
 import { DexSearchClient, matchLocal, mergeTickerCandidates, rankDexSearch, tickerQuery, type LocalCoin, type TickerCandidate } from "../market/ticker-search.js";
-import { EnrichDeferred, applyRugcheck, enrichSighting, isHeliusUrl, needsFilterRugcheck } from "../market/enrich.js";
+import { EnrichDeferred, applyRugcheck, enrichSighting, isHeliusUrl, needsFilterRugcheck, type EnrichNote } from "../market/enrich.js";
 import { KillMemory, type PrefilterThresholds } from "../market/prefilter.js";
 import { RecheckQueue, recheckEligible, recheckToken } from "../market/recheck.js";
 import { fetchDexQuotes } from "../market/dex-prices.js";
@@ -325,7 +325,9 @@ export class Desk {
   private maxExposurePct: number = SIZING_BAND.exposureDefaultPct;
   private paperResetUsd: number = HARD_RULES.paperStartingUsd;
   /** Add-coin lookups by mint. Manual buys of these mints use the lookup's pool and platform tag. */
-  private readonly lookups = new Map<string, { at: number; platform: string; token: CandidateToken }>();
+  private readonly lookups = new Map<string, { at: number; platform: string; token: CandidateToken; audit?: LookupAudit }>();
+  /** Verified chain fields from a scout enrich or a lookup, so a later timeout can reuse them. */
+  private readonly chainFacts = new Map<string, { at: number; token: CandidateToken }>();
   private watchlist: WatchItem[] = [];
   /** v13.6 ticker search (own spacing, cache and 429 backoff). */
   private dexSearch: DexSearchClient | null = null;
@@ -456,6 +458,8 @@ export class Desk {
     gapExits: 0
   };
   private killReasons: Record<string, number> = {};
+  /** Filter kills that failed closed because a provider did not answer, by reason code. */
+  private unverifiedKills: Record<string, number> = {};
   /** v13.3 recent marks and liquidity per mint for the pre-buy crash guard. */
   readonly momentum = new MomentumTracker();
   private feed: FeedStatus;
@@ -932,7 +936,7 @@ export class Desk {
       })),
       closed: this.store.closedSince(this.resetAt),
       equity: visibleEquity(this.store.equitySince(this.resetAt)),
-      pipeline: { ...this.pipeline },
+      pipeline: this.pipelineView(),
       settings: this.readSettings(),
       nextStartingUsd: starting
     });
@@ -947,8 +951,12 @@ export class Desk {
     this.startedAt = Date.now();
     this.resetAt = this.startedAt;
     this.store.writeJson("resetAt", this.resetAt);
-    for (const key of Object.keys(this.pipeline) as Array<keyof PipelineCounts>) this.pipeline[key] = 0;
+    for (const key of Object.keys(this.pipeline) as Array<keyof PipelineCounts>) {
+      if (key === "unverifiedKills") continue;
+      this.pipeline[key] = 0;
+    }
     this.killReasons = {};
+    this.unverifiedKills = {};
     this.weakSurvivor = null;
     this.persist();
     this.markEquity(true);
@@ -1902,6 +1910,23 @@ export class Desk {
     };
   }
 
+  /** v13.35 fail-closed kills whose check said the data could not be verified. */
+  unverifiedKillCounts(): Record<string, number> {
+    return { ...this.unverifiedKills };
+  }
+
+  private pipelineView(): PipelineCounts {
+    return { ...this.pipeline, unverifiedKills: { ...this.unverifiedKills } };
+  }
+
+  private noteUnverified(checks: ReadonlyArray<{ code: string; pass?: boolean; message: string }>): void {
+    for (const check of checks) {
+      if (check.pass === true) continue;
+      if (!check.message.includes("could not be verified")) continue;
+      this.unverifiedKills[check.code] = (this.unverifiedKills[check.code] ?? 0) + 1;
+    }
+  }
+
   prefilterSnapshot(): {
     kills: Record<string, number>;
     rpcSaved: number;
@@ -2096,10 +2121,15 @@ export class Desk {
     const resolved = await resolveCoinMint(parsed, this.lookupFetch);
     if (!resolved.ok) return { ok: false, error: resolved.error, code: "LOOKUP_FAILED", platform: parsed.platform };
     const mint = resolved.mint;
-    // Dex and Jupiter are raced. A stuck public-RPC or Rugcheck call must not hold the
-    // phone until OkHttp prints "timeout". Chain checks get a short leftover budget.
+    const lookupStarted = Date.now();
+    // Dex and Jupiter are raced. Chain reads reuse that Dex body and start Alchemy at once.
+    // RugCheck runs beside the RPC calls. The leftover budget stays inside the phone's 12s timeout.
+    let dexPayload: unknown | null = null;
     const priced = await lookupPriceFeeds(
-      enrichSighting({ mint, source: "raydium", observedAt: Date.now() }, { fetchImpl: this.lookupFetch, holderPagesMax: 0 }).catch(() => null),
+      enrichSighting(
+        { mint, source: "raydium", observedAt: Date.now() },
+        { fetchImpl: this.lookupFetch, holderPagesMax: 0, onDex: (payload) => { dexPayload = payload; } }
+      ).catch(() => null),
       jupiterLookupQuote(mint, 0, this.lookupFetch),
       LOOKUP_PRICE_MS
     );
@@ -2154,36 +2184,48 @@ export class Desk {
         providerNote: "Tap Look up to try again. Nothing was bought."
       };
     }
+    const providers: string[] = [];
+    if (priceSource === "dexscreener") providers.push("dex");
+    if (priceSource === "jupiter") providers.push("jupiter");
+    if (priceSource === "chain") providers.push("curve");
+    let chainTimedOut = false;
     if (this.config.rpcUrl || this.config.rugcheckUrl) {
-      const chain = await takeFirst(
-        enrichSighting(
+      const note: EnrichNote = { providers: [], timedOut: false };
+      const budgetMs = lookupChainBudgetMs(Date.now() - lookupStarted);
+      let chain: CandidateToken | null = null;
+      try {
+        chain = await enrichSighting(
           { mint, source: token.source === "pumpfun" ? "pumpfun" : "raydium", observedAt: Date.now(), symbol: token.symbol, name: token.name, devWallet: token.devWallet ?? undefined },
-          { rpcUrl: this.config.rpcUrl || undefined, rugcheckUrl: this.config.rugcheckUrl || undefined, fetchImpl: this.lookupFetch, holderPagesMax: 0 }
-        ),
-        LOOKUP_CHAIN_MS,
-        null
-      );
-      if (chain) {
-        token.mintAuthorityRevoked = chain.mintAuthorityRevoked;
-        token.top10HolderPct = chain.top10HolderPct;
-        token.holderCount = chain.holderCount;
-        token.holderCountAtLeast = chain.holderCountAtLeast;
-        token.freezeAuthorityRevoked = chain.freezeAuthorityRevoked;
-        token.lpLockedOrBurned = chain.lpLockedOrBurned;
-        token.lpLockPct = chain.lpLockPct;
-        token.devWallet = token.devWallet ?? chain.devWallet;
-        token.devHoldingPct = chain.devHoldingPct;
-        token.devHoldingUpperBound = chain.devHoldingUpperBound;
-        token.poolAddresses = chain.poolAddresses;
-        token.holderSample = chain.holderSample;
-        token.devRug = chain.devRug;
-        token.decimals = token.decimals ?? chain.decimals;
-        token.onBondingCurve = chain.onBondingCurve;
-        if (chain.symbol && token.symbol === mint.slice(0, 4)) token.symbol = chain.symbol;
-        if (chain.name && token.name === mint.slice(0, 6)) token.name = chain.name;
-      } else {
-        providerNote = "Price is in from DexScreener or Jupiter. The public RPC or Rugcheck did not answer in time, so mint authority is unverified and the hard kill stays on. Tap Look up to try again.";
+          {
+            rpcUrl: this.config.rpcUrl || undefined,
+            rugcheckUrl: this.config.rugcheckUrl || undefined,
+            fetchImpl: this.lookupFetch,
+            holderPagesMax: 0,
+            skipDex: dexPayload != null,
+            dexPayload,
+            budgetMs,
+            note
+          }
+        );
+      } catch (err) {
+        if (!(err instanceof EnrichDeferred)) throw err;
+        chainTimedOut = true;
       }
+      if (note.timedOut) chainTimedOut = true;
+      for (const name of note.providers) if (!providers.includes(name)) providers.push(name);
+      if (chain) applyChainFields(token, chain);
+      if (chainTimedOut && !chainVerified(token)) {
+        providerNote = "Price is in from DexScreener or Jupiter. The public RPC or Rugcheck did not answer in time, so mint authority is unverified and the hard kill stays on. Tap Look up to try again.";
+      } else if (chainTimedOut) {
+        providerNote = "Price is in. Some chain checks timed out; the ones that answered are filled in.";
+      }
+    }
+    const reused = this.fillChainFromFacts(token);
+    if (reused) {
+      if (!providers.includes("sighting")) providers.push("sighting");
+      const ageMin = Math.max(1, Math.round(reused.ageMs / 60_000));
+      const reuseNote = `Chain read was incomplete. Reused a scout or lookup from ${ageMin} min ago for the checks it had verified.`;
+      providerNote = providerNote ? `${providerNote} ${reuseNote}` : reuseNote;
     }
     this.lookups.set(mint, { at: Date.now(), platform: parsed.platform, token: { ...token, social: { ...token.social } } });
     if (this.lookups.size > 200) {
@@ -2224,14 +2266,22 @@ export class Desk {
         : !(poolMaxUsd >= 1)
           ? "Pool is too thin for even $1 under the slippage and exit-depth caps."
           : null;
-    this.log({
-      stage: "system",
-      kind: "info",
-      mint,
-      symbol: token.symbol,
-      code: "MANUAL_BUY",
-      message: `Add coin looked up ${token.symbol} from ${parsed.platform}. Mark ${price(token.priceUsd)}, liquidity ${money(token.liquidityUsd)}, 1h volume ${money(token.volume1hUsd)}. Filter ${filter.decision === "pass" ? "pass" : `kill (${filter.reasons.map((r) => r.code).join(", ")})`}, Analyst ${report.score.toFixed(2)}.`
-    });
+    const checks = filter.checks.map((c) => ({ code: c.code, pass: c.pass, message: c.message }));
+    const audit: LookupAudit = { providerNote, chainTimedOut, providers, checks };
+    const lookedUp = this.lookups.get(mint);
+    if (lookedUp) lookedUp.audit = audit;
+    this.noteUnverified(checks);
+    this.log(
+      {
+        stage: "system",
+        kind: "info",
+        mint,
+        symbol: token.symbol,
+        code: "MANUAL_BUY",
+        message: `Add coin looked up ${token.symbol} from ${parsed.platform}. Mark ${price(token.priceUsd)}, liquidity ${money(token.liquidityUsd)}, 1h volume ${money(token.volume1hUsd)}. Filter ${filter.decision === "pass" ? "pass" : `kill (${filter.reasons.map((r) => r.code).join(", ")})`}, Analyst ${report.score.toFixed(2)}.${auditText(audit)}`
+      },
+      audit
+    );
     return {
       ok: true,
       mint,
@@ -2248,7 +2298,7 @@ export class Desk {
       dex: token.dex ?? null,
       dexscreenerUrl: dexscreenerUrl(token.pairAddress ?? mint),
       priceSource,
-      checks: filter.checks.map((c) => ({ code: c.code, pass: c.pass, message: c.message })),
+      checks,
       filterPass: filter.decision === "pass",
       hardKills,
       analyst: { score: report.score, line: this.config.rules.analystMinScore, pass: report.decision === "trade" },
@@ -2413,14 +2463,18 @@ export class Desk {
         return { ok: false, error: message, code: "PRICE_UNAVAILABLE" };
       }
     }
-    this.log({
-      stage: "system",
-      kind: "info",
-      mint: token.mint,
-      symbol: token.symbol,
-      code: "MANUAL_BUY",
-      message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)} on the ${kind} book.`
-    });
+    const lookupAudit = this.lookups.get(token.mint)?.audit;
+    this.log(
+      {
+        stage: "system",
+        kind: "info",
+        mint: token.mint,
+        symbol: token.symbol,
+        code: "MANUAL_BUY",
+        message: `Manual buy requested for ${token.symbol} at mark ${price(token.priceUsd)} on the ${kind} book.${lookupAudit ? auditText(lookupAudit) : ""}`
+      },
+      lookupAudit ?? null
+    );
     // Hard kills (mint authority not revoked, dev rug link, token safety) need the operator's "Buy anyway".
     // A safety read that fails is Unknown and does not block a manual buy. AI buys never reach this path.
     const safety = await this.tokenSafety(token.mint, -1);
@@ -2657,7 +2711,7 @@ export class Desk {
           minutesLeft: Math.ceil((until - Date.now()) / 60_000)
         })),
       feed: this.feedView(),
-      pipeline: { ...this.pipeline },
+      pipeline: this.pipelineView(),
       killReasons: { ...this.killReasons },
       positions,
       closed: this.store
@@ -2718,6 +2772,7 @@ export class Desk {
         for (const reason of result.reasons) {
           this.killReasons[reason.code] = (this.killReasons[reason.code] ?? 0) + 1;
         }
+        this.noteUnverified(result.reasons);
         const primary = result.reasons[0];
         if (primary) {
           noteKill(this.advisor.memory, primary.code);
@@ -3295,7 +3350,9 @@ export class Desk {
       tradeId: fill.id,
       ...(tag ? { tag } : entry === "manual" ? { tag: "manual" } : {}),
       ...(Number.isFinite(fill.slippage) ? { entrySlippage: fill.slippage } : {}),
-      ...(fill.mode === "live" ? { live: true, entryMark: fill.markUsd, markPeak: fill.markUsd } : {}),
+      // Stop distance is from this mark, not the slipped fill. Live trail uses the same anchor.
+      ...(fill.markUsd > 0 ? { entryMark: fill.markUsd, markPeak: fill.markUsd } : {}),
+      ...(fill.mode === "live" ? { live: true } : {}),
       ...(strategy && kind === "paper" ? { strategy: { ...strategy } } : {})
     };
     book.positions.set(token.mint, position);
@@ -3455,6 +3512,7 @@ export class Desk {
     const label = classifyStopExit({
       code: order.reason.code,
       entryPrice: pos.entryPrice,
+      basisPrice: pos.entryMark != null && pos.entryMark > 0 ? pos.entryMark : pos.entryPrice,
       stopPct: this.config.rules.stopLossPct,
       fillPrice,
       triggerPrice: order.markPrice
@@ -4154,12 +4212,48 @@ export class Desk {
 
   private remember(token: CandidateToken): void {
     this.sightings.set(token.mint, { ...token, social: { ...token.social } });
+    this.rememberChain(token);
     // v13.11 supply from the first sighting where price and market cap came from the same read.
     if (!this.supplyByMint.has(token.mint) && (token.marketCapUsd ?? 0) > 0 && token.priceUsd > 0) {
       const supply = (token.marketCapUsd as number) / token.priceUsd;
       if (Number.isFinite(supply) && supply > 0) this.supplyByMint.set(token.mint, supply);
     }
     this.momentum.note(token.mint, token.priceUsd, token.liquidityUsd);
+  }
+
+  /** Keep verified chain fields for 30 minutes. A null read does not erase a fresh one. */
+  private rememberChain(token: CandidateToken, at = Date.now()): void {
+    const prev = this.chainFacts.get(token.mint);
+    const prevOk = prev && at - prev.at <= CHAIN_FACT_MAX_AGE_MS && prev.at <= at ? prev.token : undefined;
+    if (prev && !prevOk) this.chainFacts.delete(token.mint);
+    if (!chainVerified(token)) return;
+    const merged = prevOk ? { ...prevOk, social: { ...prevOk.social } } : { ...token, social: { ...token.social } };
+    if (prevOk) applyChainFields(merged, token);
+    this.chainFacts.set(token.mint, { at, token: merged });
+    if (this.chainFacts.size > 400) {
+      const first = this.chainFacts.keys().next().value;
+      if (first) this.chainFacts.delete(first);
+    }
+  }
+
+  /** Copy still-missing chain fields from a fresh sighting. Returns how old that sighting is. */
+  private fillChainFromFacts(token: CandidateToken, now = Date.now()): { ageMs: number } | null {
+    const saved = this.chainFacts.get(token.mint);
+    if (!saved || now - saved.at > CHAIN_FACT_MAX_AGE_MS || saved.at > now) return null;
+    const missingMint = token.mintAuthorityRevoked == null;
+    const missingTop = token.top10HolderPct == null;
+    const missingHolders = token.holderCount == null;
+    const missingLp = token.lpLockedOrBurned == null;
+    const missingDev = !(typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct));
+    fillMissingChain(token, saved.token);
+    const filled =
+      (missingMint && token.mintAuthorityRevoked != null) ||
+      (missingTop && token.top10HolderPct != null) ||
+      (missingHolders && token.holderCount != null) ||
+      (missingLp && token.lpLockedOrBurned != null) ||
+      (missingDev && typeof token.devHoldingPct === "number");
+    if (!filled) return null;
+    return { ageMs: now - saved.at };
   }
 
   /**
@@ -5242,8 +5336,96 @@ export const LOOKUP_PRICE_AGREEMENT = 0.25;
 
 /** Search must answer before the phone's lookup client gives up and prints "timeout". */
 const LOOKUP_PRICE_MS = 3_500;
-const LOOKUP_CHAIN_MS = 2_000;
 const LOOKUP_CURVE_MS = 1_500;
+/** Phone OkHttp gives the lookup about 12s. Leave a second for the response itself. */
+const LOOKUP_PHONE_MS = 11_000;
+/** A scout or lookup this fresh can fill chain fields a later read did not get. */
+export const CHAIN_FACT_MAX_AGE_MS = 30 * 60_000;
+
+/**
+ * Time left for Alchemy and RugCheck after the price feeds. Capped at 8s.
+ * A test may set NIGHT_DESK_LOOKUP_CHAIN_MS so a hung provider does not wait out the phone budget.
+ */
+export function lookupChainBudgetMs(elapsedMs: number): number {
+  if (process.env.VITEST) {
+    const override = Number(process.env.NIGHT_DESK_LOOKUP_CHAIN_MS);
+    if (Number.isFinite(override) && override >= 0) return override;
+  }
+  return Math.min(8_000, Math.max(0, LOOKUP_PHONE_MS - elapsedMs));
+}
+
+interface LookupAudit {
+  providerNote?: string;
+  chainTimedOut: boolean;
+  providers: string[];
+  checks: Array<{ code: string; pass: boolean; message: string }>;
+}
+
+function auditText(audit: LookupAudit): string {
+  const checks = audit.checks.map((check) => `${check.code}:${check.pass ? "pass" : "fail"}`).join(",");
+  const note = audit.providerNote ? ` Note: ${audit.providerNote}` : "";
+  return ` chainTimedOut=${audit.chainTimedOut} providers=${audit.providers.join("|") || "none"} checks=${checks}.${note}`;
+}
+
+function chainVerified(token: CandidateToken): boolean {
+  return (
+    token.mintAuthorityRevoked != null ||
+    token.top10HolderPct != null ||
+    token.holderCount != null ||
+    token.lpLockedOrBurned != null ||
+    (typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct))
+  );
+}
+
+function fillMissingChain(target: CandidateToken, chain: CandidateToken): void {
+  if (target.mintAuthorityRevoked == null && chain.mintAuthorityRevoked != null) target.mintAuthorityRevoked = chain.mintAuthorityRevoked;
+  if (target.top10HolderPct == null && chain.top10HolderPct != null) target.top10HolderPct = chain.top10HolderPct;
+  if (target.holderCount == null && chain.holderCount != null) {
+    target.holderCount = chain.holderCount;
+    target.holderCountAtLeast = chain.holderCountAtLeast;
+  }
+  if (target.freezeAuthorityRevoked == null && chain.freezeAuthorityRevoked != null) target.freezeAuthorityRevoked = chain.freezeAuthorityRevoked;
+  if (target.lpLockedOrBurned == null && chain.lpLockedOrBurned != null) {
+    target.lpLockedOrBurned = chain.lpLockedOrBurned;
+    if (target.lpLockPct == null && chain.lpLockPct != null) target.lpLockPct = chain.lpLockPct;
+    if (!target.lpLockPool && chain.lpLockPool) target.lpLockPool = chain.lpLockPool;
+  }
+  if (!target.devWallet && chain.devWallet) target.devWallet = chain.devWallet;
+  if (!(typeof target.devHoldingPct === "number" && Number.isFinite(target.devHoldingPct)) && chain.devHoldingPct != null) {
+    target.devHoldingPct = chain.devHoldingPct;
+    target.devHoldingUpperBound = chain.devHoldingUpperBound;
+  }
+  if (!target.poolAddresses?.length && chain.poolAddresses?.length) target.poolAddresses = chain.poolAddresses;
+  if (!target.holderSample && chain.holderSample) target.holderSample = chain.holderSample;
+  if (!target.devRug && chain.devRug) target.devRug = chain.devRug;
+  if (target.decimals == null && chain.decimals != null) target.decimals = chain.decimals;
+  if (target.onBondingCurve == null && chain.onBondingCurve != null) target.onBondingCurve = chain.onBondingCurve;
+}
+
+function applyChainFields(target: CandidateToken, chain: CandidateToken): void {
+  if (chain.mintAuthorityRevoked != null) target.mintAuthorityRevoked = chain.mintAuthorityRevoked;
+  if (chain.top10HolderPct != null) target.top10HolderPct = chain.top10HolderPct;
+  if (chain.holderCount != null) {
+    target.holderCount = chain.holderCount;
+    target.holderCountAtLeast = chain.holderCountAtLeast;
+  }
+  if (chain.freezeAuthorityRevoked != null) target.freezeAuthorityRevoked = chain.freezeAuthorityRevoked;
+  if (chain.lpLockedOrBurned != null) target.lpLockedOrBurned = chain.lpLockedOrBurned;
+  if (chain.lpLockPct != null) target.lpLockPct = chain.lpLockPct;
+  if (chain.lpLockPool) target.lpLockPool = chain.lpLockPool;
+  target.devWallet = target.devWallet ?? chain.devWallet;
+  if (chain.devHoldingPct != null) {
+    target.devHoldingPct = chain.devHoldingPct;
+    target.devHoldingUpperBound = chain.devHoldingUpperBound;
+  }
+  if (chain.poolAddresses?.length) target.poolAddresses = chain.poolAddresses;
+  if (chain.holderSample) target.holderSample = chain.holderSample;
+  if (chain.devRug) target.devRug = chain.devRug;
+  target.decimals = target.decimals ?? chain.decimals;
+  if (chain.onBondingCurve != null) target.onBondingCurve = chain.onBondingCurve;
+  if (chain.symbol && target.symbol === target.mint.slice(0, 4)) target.symbol = chain.symbol;
+  if (chain.name && target.name === target.mint.slice(0, 6)) target.name = chain.name;
+}
 
 function blankLookupToken(mint: string): CandidateToken {
   return {
