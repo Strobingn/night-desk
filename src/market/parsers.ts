@@ -263,7 +263,9 @@ function marketLiquidityUsd(market: Record<string, unknown>): number | null {
     const usd = (bag as { usd?: unknown }).usd;
     if (typeof usd === "number" && Number.isFinite(usd) && usd > 0) return usd;
   }
-  for (const value of [market.liquidityUsd, market.liquidity, lp?.lpLockedUSD, lp?.liquidityUsd, lp?.usd]) {
+  // Locked dollars are not depth. An unlocked pool reports 0 locked, so ranking on that
+  // figure would pick a small locked pool over a deeper unlocked one.
+  for (const value of [market.liquidityUsd, market.liquidity, lp?.liquidityUsd, lp?.usd]) {
     if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
   }
   return null;

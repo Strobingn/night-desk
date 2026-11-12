@@ -4,7 +4,7 @@ import { assessPosition } from "../src/agents/risk.js";
 import { quotePaperBuy } from "../src/agents/execution-math.js";
 import { evaluateFilter } from "../src/agents/filter.js";
 import { makeToken } from "../src/demo/tokens.js";
-import { Desk } from "../src/desk/orchestrator.js";
+import { CHAIN_FACT_MAX_AGE_MS, Desk, lookupChainBudgetMs } from "../src/desk/orchestrator.js";
 import { enrichSighting } from "../src/market/enrich.js";
 import { parseRugcheckReport } from "../src/market/parsers.js";
 import { resolveRules } from "../src/rules.js";
@@ -158,6 +158,14 @@ describe("v13.35 lookup chain", () => {
     const lp = filtered.checks.find((check) => check.code === "LP_NOT_LOCKED");
     expect(lp?.pass).toBe(true);
     expect(lp?.message).toMatch(/pump_amm/);
+    const lockedDollars = parseRugcheckReport({
+      markets: [
+        { marketType: "raydium", lp: { lpLockedPct: 0, lpLockedUSD: 0 } },
+        { marketType: "pumpswap", lp: { lpLockedPct: 100, lpLockedUSD: 100 } }
+      ]
+    });
+    expect(lockedDollars.lpLockedOrBurned).toBe(false);
+    expect(lockedDollars.lpLockPct).toBe(0);
   });
 
   it("does not stop a paper buy just because the fill paid entry slippage", async () => {
@@ -249,6 +257,116 @@ describe("v13.35 lookup chain", () => {
     } finally {
       server.close();
       desk.stop();
+    }
+  });
+
+  it("keeps the higher holder concentration when RugCheck answers before the RPC", async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("dexscreener")) return Response.json(dexBody());
+      if (url.includes("/report")) {
+        return Response.json({ topHolders: [{ address: "Whale111111111111111111111111111111111111", pct: 60 }] });
+      }
+      const method = (JSON.parse(String(init?.body)) as { method: string }).method;
+      if (method === "getTokenLargestAccounts" || method === "getMultipleAccounts") {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+      if (method === "getAccountInfo") {
+        return Response.json({
+          result: { value: { data: { parsed: { info: { mintAuthority: null, supply: "1000000000", decimals: 6 } } } } }
+        });
+      }
+      if (method === "getTokenLargestAccounts") {
+        return Response.json({
+          result: { value: [{ address: "RetailTokenAccount1111111111111111111111111", uiAmount: 100, amount: "100000000", decimals: 6 }] }
+        });
+      }
+      return Response.json({
+        result: { value: [{ data: { parsed: { info: { owner: "RetailOwner111111111111111111111111111111" } } } }] }
+      });
+    };
+    const token = await enrichSighting(
+      { mint: MINT, source: "raydium", observedAt: 1 },
+      { rpcUrl: "http://rpc.test", rugcheckUrl: "http://rug.test", fetchImpl, holderPagesMax: 0 }
+    );
+    expect(token.top10HolderPct).toBeCloseTo(0.6, 5);
+  });
+
+  it("leaves dev holding unknown when the owner read fails", async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("dexscreener")) return Response.json(dexBody());
+      if (url.includes("/report")) return Response.json({ risks: [], markets: [], topHolders: [] });
+      const method = (JSON.parse(String(init?.body)) as { method: string }).method;
+      if (method === "getAccountInfo") {
+        return Response.json({
+          result: { value: { data: { parsed: { info: { mintAuthority: null, supply: "1000000000", decimals: 6 } } } } }
+        });
+      }
+      if (method === "getTokenLargestAccounts") {
+        return Response.json({
+          result: { value: [{ address: "RetailTokenAccount1111111111111111111111111", uiAmount: 100, amount: "100000000", decimals: 6 }] }
+        });
+      }
+      return new Response("busy", { status: 503 });
+    };
+    const token = await enrichSighting(
+      { mint: MINT, symbol: "MAX", source: "raydium", observedAt: 1, devWallet: "DevWallet1111111111111111111111111111111111" },
+      { rpcUrl: "http://rpc.test", rugcheckUrl: "http://rug.test", fetchImpl, holderPagesMax: 0 }
+    );
+    expect(token.mintAuthorityRevoked).toBe(true);
+    expect(token.top10HolderPct).toBeCloseTo(0.1, 5);
+    expect(token.devHoldingPct ?? null).toBeNull();
+  });
+
+  it("does not extend a reused chain fact past 30 minutes from the original read", async () => {
+    const previous = process.env.NIGHT_DESK_LOOKUP_CHAIN_MS;
+    process.env.NIGHT_DESK_LOOKUP_CHAIN_MS = "80";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const started = 1_700_000_000_000;
+    vi.setSystemTime(started);
+    const fetchImpl: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("dexscreener")) return Response.json(dexBody());
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 5_000);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+      return Response.json({ result: { value: [] } });
+    }) as typeof fetch;
+    const desk = new Desk(testConfig({ rpcUrl: "http://rpc.test", rugcheckUrl: "http://rug.test" }), { lookupFetch: fetchImpl });
+    try {
+      desk.updateSettings({ autoBuy: false });
+      await desk.submitCandidate(makeToken({ mint: MINT, symbol: "MAX", mintAuthorityRevoked: true, lpLockedOrBurned: true, top10HolderPct: 0.1 }));
+      vi.setSystemTime(started + 20 * 60_000);
+      const reused = await desk.lookupCoin(MINT);
+      expect(reused.ok).toBe(true);
+      if (!reused.ok) return;
+      expect(reused.checks.find((check) => check.code === "MINT_AUTHORITY_ACTIVE")?.pass).toBe(true);
+      vi.setSystemTime(started + CHAIN_FACT_MAX_AGE_MS + 60_000);
+      const expired = await desk.lookupCoin(MINT);
+      expect(expired.ok).toBe(true);
+      if (!expired.ok) return;
+      expect(expired.checks.find((check) => check.code === "MINT_AUTHORITY_ACTIVE")?.pass).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      if (previous == null) delete process.env.NIGHT_DESK_LOOKUP_CHAIN_MS;
+      else process.env.NIGHT_DESK_LOOKUP_CHAIN_MS = previous;
+      desk.stop();
+    }
+  });
+
+  it("fits the chain budget inside the 8s lookup client", () => {
+    const previous = process.env.NIGHT_DESK_LOOKUP_CHAIN_MS;
+    delete process.env.NIGHT_DESK_LOOKUP_CHAIN_MS;
+    try {
+      expect(lookupChainBudgetMs(1_000)).toBe(6_300);
+      expect(lookupChainBudgetMs(9_000)).toBe(0);
+    } finally {
+      if (previous != null) process.env.NIGHT_DESK_LOOKUP_CHAIN_MS = previous;
     }
   });
 });

@@ -248,9 +248,12 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
             ? await rpc(fetchImpl, urls, "getMultipleAccounts", [addresses, { encoding: "jsonParsed" }], deps.meter, signal).catch(catchDeferred)
             : null;
       if (accounts && prefetched == null) noteProvider(deps.note, "rpc:getMultipleAccounts");
-      const attached = attachTokenOwners(largest, accounts);
-      const rows = (attached as { value?: LargestHolderRow[] })?.value;
-      token.holderSample = { supplyUi: mint.supplyUi, rows: Array.isArray(rows) ? rows : [] };
+      const ownersRead = multipleOwnersRead(accounts);
+      const attached = ownersRead ? attachTokenOwners(largest, accounts) : largest;
+      if (ownersRead) {
+        const rows = (attached as { value?: LargestHolderRow[] })?.value;
+        token.holderSample = { supplyUi: mint.supplyUi, rows: Array.isArray(rows) ? rows : [] };
+      }
       return parseTop10Pct(attached, mint.supplyUi, exclude);
     };
 
@@ -276,7 +279,10 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
       }
     }
     if (!holders) holders = await readLargest(wantLargestNow ? largestFirst : null);
-    if (holders.top10HolderPct != null) token.top10HolderPct = holders.top10HolderPct;
+    if (holders.top10HolderPct != null) {
+      const prior = token.top10HolderPct;
+      token.top10HolderPct = prior == null ? holders.top10HolderPct : Math.max(prior, holders.top10HolderPct);
+    }
     if (holders.holderCount != null) {
       token.holderCount = holders.holderCount;
       token.holderCountAtLeast = holders.holderCountAtLeast === true;
@@ -413,6 +419,16 @@ export async function applyRugcheck(
   const rug = parseRugcheckReport(report, token.mint, token.poolAddresses);
   token.onBondingCurve = inferOnBondingCurve({ source: token.source, dex: token.dex, riskText: rug.riskText });
   return token;
+}
+
+/** True when getMultipleAccounts returned at least one token-account owner. */
+function multipleOwnersRead(multiple: unknown): boolean {
+  const value = (multiple as { value?: unknown } | null)?.value;
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    const owner = (entry as { data?: { parsed?: { info?: { owner?: unknown } } } } | null)?.data?.parsed?.info?.owner;
+    return typeof owner === "string" && owner.length > 0;
+  });
 }
 
 function fillDevShare(token: CandidateToken): void {

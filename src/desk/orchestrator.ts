@@ -327,7 +327,7 @@ export class Desk {
   /** Add-coin lookups by mint. Manual buys of these mints use the lookup's pool and platform tag. */
   private readonly lookups = new Map<string, { at: number; platform: string; token: CandidateToken; audit?: LookupAudit }>();
   /** Verified chain fields from a scout enrich or a lookup, so a later timeout can reuse them. */
-  private readonly chainFacts = new Map<string, { at: number; token: CandidateToken }>();
+  private readonly chainFacts = new Map<string, { at: number; ages: Partial<Record<ChainFactField, number>>; token: CandidateToken }>();
   private watchlist: WatchItem[] = [];
   /** v13.6 ticker search (own spacing, cache and 429 backoff). */
   private dexSearch: DexSearchClient | null = null;
@@ -2122,8 +2122,10 @@ export class Desk {
     if (!resolved.ok) return { ok: false, error: resolved.error, code: "LOOKUP_FAILED", platform: parsed.platform };
     const mint = resolved.mint;
     const lookupStarted = Date.now();
+    // Safety overlaps price and chain. The phone lookup client dies at 8s, so it cannot wait behind them.
+    const safetyPromise = this.tokenSafety(mint, -1);
     // Dex and Jupiter are raced. Chain reads reuse that Dex body and start Alchemy at once.
-    // RugCheck runs beside the RPC calls. The leftover budget stays inside the phone's 12s timeout.
+    // RugCheck runs beside the RPC calls. The leftover budget stays inside that 8s, with a tail for the response.
     let dexPayload: unknown | null = null;
     const priced = await lookupPriceFeeds(
       enrichSighting(
@@ -2185,6 +2187,10 @@ export class Desk {
       };
     }
     const providers: string[] = [];
+    const pumpEarly = isPumpCoin({ source: token.source, dex: token.dex, platform: parsed.platform });
+    const bundlePromise = pumpEarly
+      ? safetyPromise.then((safety) => this.launchBundleSoon(mint, safety.supply))
+      : Promise.resolve(null);
     if (priceSource === "dexscreener") providers.push("dex");
     if (priceSource === "jupiter") providers.push("jupiter");
     if (priceSource === "chain") providers.push("curve");
@@ -2220,6 +2226,7 @@ export class Desk {
         providerNote = "Price is in. Some chain checks timed out; the ones that answered are filled in.";
       }
     }
+    const freshChain = chainFactFieldSet(token);
     const reused = this.fillChainFromFacts(token);
     if (reused) {
       if (!providers.includes("sighting")) providers.push("sighting");
@@ -2234,7 +2241,7 @@ export class Desk {
     }
     const held = this.book.positions.has(mint) || this.liveBook?.positions.has(mint) === true;
     if (!held) {
-      this.remember(token);
+      this.remember(token, freshChain);
       this.book.mark(mint, token.priceUsd);
     }
     const rug = await this.rugs.lookup(token.devWallet);
@@ -2251,10 +2258,9 @@ export class Desk {
     const hardKills: Array<{ code: string; message: string }> = filter.checks
       .filter((c) => !c.pass && HARD_KILL_CODES.has(c.code))
       .map((c) => ({ code: c.code, message: c.message }));
-    const safety = await this.tokenSafety(mint, -1);
+    const safety = await safetyPromise;
     if (safety.status === "blocked") hardKills.push({ code: "TOKEN_SAFETY", message: safety.chip });
-    const pump = isPumpCoin({ source: token.source, dex: token.dex, platform: parsed.platform });
-    const bundle = pump ? await this.launchBundleSoon(mint, safety.supply) : null;
+    const bundle = await bundlePromise;
     const cooldownUntil = this.cooldowns.get(mint) ?? 0;
     const capUsd = this.positionCapUsd();
     const manualMaxUsd = this.positionCapUsd(this.book.equity(), SIZING_BAND.manualMaxPct);
@@ -4210,9 +4216,9 @@ export class Desk {
     this.store.insertEquity({ t: now, equity, cash });
   }
 
-  private remember(token: CandidateToken): void {
+  private remember(token: CandidateToken, fresh?: ReadonlySet<ChainFactField>): void {
     this.sightings.set(token.mint, { ...token, social: { ...token.social } });
-    this.rememberChain(token);
+    this.rememberChain(token, Date.now(), fresh);
     // v13.11 supply from the first sighting where price and market cap came from the same read.
     if (!this.supplyByMint.has(token.mint) && (token.marketCapUsd ?? 0) > 0 && token.priceUsd > 0) {
       const supply = (token.marketCapUsd as number) / token.priceUsd;
@@ -4221,39 +4227,57 @@ export class Desk {
     this.momentum.note(token.mint, token.priceUsd, token.liquidityUsd);
   }
 
-  /** Keep verified chain fields for 30 minutes. A null read does not erase a fresh one. */
-  private rememberChain(token: CandidateToken, at = Date.now()): void {
+  /**
+   * Keep each verified chain field for 30 minutes from the read that produced it.
+   * Copying a stored field into a later lookup does not renew that field.
+   * A null read does not erase a field that is still inside its own window.
+   */
+  private rememberChain(token: CandidateToken, at = Date.now(), fresh?: ReadonlySet<ChainFactField>): void {
     const prev = this.chainFacts.get(token.mint);
-    const prevOk = prev && at - prev.at <= CHAIN_FACT_MAX_AGE_MS && prev.at <= at ? prev.token : undefined;
-    if (prev && !prevOk) this.chainFacts.delete(token.mint);
-    if (!chainVerified(token)) return;
-    const merged = prevOk ? { ...prevOk, social: { ...prevOk.social } } : { ...token, social: { ...token.social } };
-    if (prevOk) applyChainFields(merged, token);
-    this.chainFacts.set(token.mint, { at, token: merged });
+    const refresh = fresh ?? chainFactFieldSet(token);
+    const ages: Partial<Record<ChainFactField, number>> = {};
+    const merged: CandidateToken = { ...token, social: { ...token.social } };
+    for (const field of CHAIN_FACT_FIELDS) {
+      const priorAt = prev?.ages[field];
+      const priorFresh = priorAt != null && priorAt <= at && at - priorAt <= CHAIN_FACT_MAX_AGE_MS;
+      const observedNow = refresh.has(field) && chainFieldPresent(token, field);
+      if (observedNow) {
+        ages[field] = at;
+      } else if (priorFresh && prev && chainFieldPresent(prev.token, field)) {
+        ages[field] = priorAt;
+        if (!chainFieldPresent(merged, field)) copyChainField(merged, prev.token, field);
+      } else {
+        clearChainField(merged, field);
+      }
+    }
+    if (!chainVerified(merged)) {
+      this.chainFacts.delete(token.mint);
+      return;
+    }
+    const oldest = Math.min(...CHAIN_FACT_FIELDS.map((field) => ages[field] ?? Number.POSITIVE_INFINITY));
+    this.chainFacts.set(token.mint, { at: oldest, ages, token: merged });
     if (this.chainFacts.size > 400) {
       const first = this.chainFacts.keys().next().value;
       if (first) this.chainFacts.delete(first);
     }
   }
 
-  /** Copy still-missing chain fields from a fresh sighting. Returns how old that sighting is. */
+  /** Copy still-missing chain fields whose own verification is under 30 minutes. Age is the oldest field copied. */
   private fillChainFromFacts(token: CandidateToken, now = Date.now()): { ageMs: number } | null {
     const saved = this.chainFacts.get(token.mint);
-    if (!saved || now - saved.at > CHAIN_FACT_MAX_AGE_MS || saved.at > now) return null;
-    const missingMint = token.mintAuthorityRevoked == null;
-    const missingTop = token.top10HolderPct == null;
-    const missingHolders = token.holderCount == null;
-    const missingLp = token.lpLockedOrBurned == null;
-    const missingDev = !(typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct));
-    fillMissingChain(token, saved.token);
-    const filled =
-      (missingMint && token.mintAuthorityRevoked != null) ||
-      (missingTop && token.top10HolderPct != null) ||
-      (missingHolders && token.holderCount != null) ||
-      (missingLp && token.lpLockedOrBurned != null) ||
-      (missingDev && typeof token.devHoldingPct === "number");
+    if (!saved) return null;
+    let oldest = Number.POSITIVE_INFINITY;
+    let filled = false;
+    for (const field of CHAIN_FACT_FIELDS) {
+      const seen = saved.ages[field];
+      if (seen == null || seen > now || now - seen > CHAIN_FACT_MAX_AGE_MS) continue;
+      if (chainFieldPresent(token, field) || !chainFieldPresent(saved.token, field)) continue;
+      copyChainField(token, saved.token, field);
+      filled = true;
+      if (seen < oldest) oldest = seen;
+    }
     if (!filled) return null;
-    return { ageMs: now - saved.at };
+    return { ageMs: now - oldest };
   }
 
   /**
@@ -5337,13 +5361,16 @@ export const LOOKUP_PRICE_AGREEMENT = 0.25;
 /** Search must answer before the phone's lookup client gives up and prints "timeout". */
 const LOOKUP_PRICE_MS = 3_500;
 const LOOKUP_CURVE_MS = 1_500;
-/** Phone OkHttp gives the lookup about 12s. Leave a second for the response itself. */
-const LOOKUP_PHONE_MS = 11_000;
+/** Android Search uses lookupHttp, whose call timeout is 8s. The 12s client is the paper-buy path. */
+const LOOKUP_CLIENT_MS = 8_000;
+/** Room to write the response after price, chain, safety, and the bundle check. */
+const LOOKUP_TAIL_MS = 700;
 /** A scout or lookup this fresh can fill chain fields a later read did not get. */
 export const CHAIN_FACT_MAX_AGE_MS = 30 * 60_000;
 
 /**
- * Time left for Alchemy and RugCheck after the price feeds. Capped at 8s.
+ * Time left for Alchemy and RugCheck after the price feeds, inside the 8s lookup client.
+ * Safety and the bundle check are already in flight, so the tail is only the response.
  * A test may set NIGHT_DESK_LOOKUP_CHAIN_MS so a hung provider does not wait out the phone budget.
  */
 export function lookupChainBudgetMs(elapsedMs: number): number {
@@ -5351,7 +5378,7 @@ export function lookupChainBudgetMs(elapsedMs: number): number {
     const override = Number(process.env.NIGHT_DESK_LOOKUP_CHAIN_MS);
     if (Number.isFinite(override) && override >= 0) return override;
   }
-  return Math.min(8_000, Math.max(0, LOOKUP_PHONE_MS - elapsedMs));
+  return Math.max(0, LOOKUP_CLIENT_MS - LOOKUP_TAIL_MS - elapsedMs);
 }
 
 interface LookupAudit {
@@ -5365,6 +5392,44 @@ function auditText(audit: LookupAudit): string {
   const checks = audit.checks.map((check) => `${check.code}:${check.pass ? "pass" : "fail"}`).join(",");
   const note = audit.providerNote ? ` Note: ${audit.providerNote}` : "";
   return ` chainTimedOut=${audit.chainTimedOut} providers=${audit.providers.join("|") || "none"} checks=${checks}.${note}`;
+}
+
+const CHAIN_FACT_FIELDS = ["mintAuthorityRevoked", "freezeAuthorityRevoked", "top10HolderPct", "holderCount", "lpLockedOrBurned", "devHoldingPct"] as const;
+type ChainFactField = (typeof CHAIN_FACT_FIELDS)[number];
+
+function chainFieldPresent(token: CandidateToken, field: ChainFactField): boolean {
+  if (field === "devHoldingPct") return typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct);
+  return token[field] != null;
+}
+
+function chainFactFieldSet(token: CandidateToken): Set<ChainFactField> {
+  return new Set(CHAIN_FACT_FIELDS.filter((field) => chainFieldPresent(token, field)));
+}
+
+function copyChainField(target: CandidateToken, source: CandidateToken, field: ChainFactField): void {
+  if (field === "mintAuthorityRevoked") target.mintAuthorityRevoked = source.mintAuthorityRevoked;
+  else if (field === "freezeAuthorityRevoked") target.freezeAuthorityRevoked = source.freezeAuthorityRevoked;
+  else if (field === "top10HolderPct") target.top10HolderPct = source.top10HolderPct;
+  else if (field === "holderCount") {
+    target.holderCount = source.holderCount;
+    target.holderCountAtLeast = source.holderCountAtLeast;
+  } else if (field === "lpLockedOrBurned") {
+    target.lpLockedOrBurned = source.lpLockedOrBurned;
+    if (target.lpLockPct == null && source.lpLockPct != null) target.lpLockPct = source.lpLockPct;
+    if (!target.lpLockPool && source.lpLockPool) target.lpLockPool = source.lpLockPool;
+  } else {
+    target.devHoldingPct = source.devHoldingPct;
+    target.devHoldingUpperBound = source.devHoldingUpperBound;
+  }
+}
+
+function clearChainField(target: CandidateToken, field: ChainFactField): void {
+  if (field === "mintAuthorityRevoked") target.mintAuthorityRevoked = null;
+  else if (field === "freezeAuthorityRevoked") target.freezeAuthorityRevoked = null;
+  else if (field === "top10HolderPct") target.top10HolderPct = null;
+  else if (field === "holderCount") target.holderCount = null;
+  else if (field === "lpLockedOrBurned") target.lpLockedOrBurned = null;
+  else target.devHoldingPct = null;
 }
 
 function chainVerified(token: CandidateToken): boolean {
