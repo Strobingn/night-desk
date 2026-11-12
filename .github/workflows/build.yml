@@ -98,6 +98,10 @@ jobs:
             sleep 20
           done
 
+      - name: Android unit tests
+        working-directory: ./android
+        run: ./gradlew testDebugUnitTest --stacktrace
+
       - name: Rename APK Artifact
         id: apk_pkg
         run: |

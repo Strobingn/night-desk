@@ -9,7 +9,7 @@ export interface Variant {
   /** e.g. "launch-1": the Launch signal with a 1% stop. */
   id: string;
   signal: SignalKind;
-  /** Fraction below the fill, e.g. 0.01. Never looser than the desk's hard stop. */
+  /** Fraction below the entry mark, e.g. 0.01. Never looser than the desk's hard stop. */
   stopPct: number;
 }
 

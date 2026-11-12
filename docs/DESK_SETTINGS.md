@@ -278,7 +278,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.39** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.39, `versionCode` 1339, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Based on main `9bd6967` (PR 41, the 13.38 manual-buy timeout cap, which includes 13.37). Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.39** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.39, `versionCode` 1339, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -317,3 +317,13 @@ Search lookup no longer gives the whole chain read a 2s wall. Alchemy `getAccoun
 ## 13.35 notes
 
 Phone redesign. Five tabs (Home, Tape, Search, Engine, Settings); Recap, Link and Pump terminal are under Settings → More; the Engine tab holds the engine switch, sizing, scorecard, pipeline timings and Reset scorecard (`POST /api/strategy/reset`). No desk setting, limit or trading behavior changed. One field is added: `strategy.mainOpen` on `/api/state` and the `/api/strategy/*` answers is the number of engine positions open on the main paper book. A variant's own `open` is its shadow book, which can differ. `scripts/bench-snapshot.ts` measures snapshot cost.
+
+## 13.39 notes (Home charts)
+
+Phone only: the Home charts. Position cards get a time-based price chart (entry and stop levels, low and high, finger readout when expanded) and the equity curve gets 1H / 6H / 1D / All windows. No desk setting, endpoint or limit changed.
+
+Math audit, same version. The paper fill model was checked against an exact constant-product pool and matches. Three things were wrong and are fixed:
+
+- The engine's stop (1%, 3% or 6%) was measured from the fill. The fill sits above the mark by entry slippage, so the stop was closer than its percent, and in a pool under about $11,600 a $50 buy was already past its 1% stop at an unchanged price. It is now measured from the entry mark, the same as the hard stop. Shadow books use the same rule, so results before and after this version are not comparable; reset the scorecard.
+- A hard stop with a fraction (2.5%) was printed rounded ("limit -3%") in the stop message, the gap message, the custom-stop error and the start log. The line itself was always right. The labels now show 2.5%.
+- A position the engine opened showed the desk's hard stop as its stop. It now shows the tighter engine stop, the one that fires first. The advisor's stop distance also used the fill and now uses the entry mark.
