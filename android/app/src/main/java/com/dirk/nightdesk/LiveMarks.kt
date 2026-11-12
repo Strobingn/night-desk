@@ -133,7 +133,7 @@ private fun parseMarkRows(rows: org.json.JSONArray?): List<MarkDelta> {
                     marks = parsePricePoints(row),
                     safetyChip = row.optString("safetyChip"),
                     bundleChip = row.optString("bundleChip"),
-                    liquidityNote = row.optString("liquidityNote"),
+                    liquidityNote = row.optText("liquidityNote"),
                     liquidityNoteKnown = row.has("liquidityNote")
                 )
             )

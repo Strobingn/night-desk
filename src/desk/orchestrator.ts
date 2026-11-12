@@ -441,7 +441,7 @@ export class Desk {
    * v13.39: mint is still held, but the mid is not sellable value. Keyed by book+mint.
    * Cleared when quote-side liquidity or a sell route returns. Not a write-off.
    */
-  private liquidityGone = new Map<string, { at: number; residualUsd: number; reason: string }>();
+  private liquidityGone = new Map<string, { at: number; residualUsd: number; reason: string; anchorPrice: number }>();
   /** Latest quote-side USD from a Dex tick, used when a later NO_ROUTES has no quote on the request. */
   private lastQuoteUsd = new Map<string, number>();
   private startedAt = Date.now();
@@ -3822,8 +3822,17 @@ export class Desk {
     const residual = Math.max(0, Number.isFinite(residualUsd) ? residualUsd : 0);
     const prev = this.liquidityGone.get(key);
     const now = Date.now();
-    this.liquidityGone.set(key, { at: now, residualUsd: residual, reason });
     const px = residualMarkPrice(residual, pos.qty);
+    const current = book.price(mint, pos.entryPrice);
+    const anchorPrice =
+      prev?.anchorPrice && prev.anchorPrice > px * 1e6
+        ? prev.anchorPrice
+        : current > px * 1e6
+          ? current
+          : pos.entryMark != null && pos.entryMark > 0
+            ? pos.entryMark
+            : pos.entryPrice;
+    this.liquidityGone.set(key, { at: now, residualUsd: residual, reason, anchorPrice });
     if (prev) {
       const last = book.price(mint, pos.entryPrice);
       if (last > 0 && Math.abs(last - px) / Math.max(last, px, 1e-18) < 0.05) return;
@@ -3850,6 +3859,16 @@ export class Desk {
     this.liquidityGone.delete(bookKey(kind, mint));
   }
 
+  /** The residual mark is not a price. Put the pre-drain anchor back and drop the synthetic card mark. */
+  private restoreLiquidityAnchor(kind: BookKind, mint: string): void {
+    const key = bookKey(kind, mint);
+    const gone = this.liquidityGone.get(key);
+    if (!gone || !(gone.anchorPrice > 0)) return;
+    this.bk(kind).mark(mint, gone.anchorPrice);
+    const live = this.liveMarks.get(key);
+    if (live && (live.feed === "none" || !(live.price > gone.anchorPrice / 1e6))) this.liveMarks.delete(key);
+  }
+
   private applyMark(mint: string, priceUsd: number, origin?: MarkOrigin, advise = true): void {
     this.applyMarkIn("paper", mint, priceUsd, origin, advise);
     if (this.liveBook?.positions.has(mint)) this.applyMarkIn("live", mint, priceUsd, origin, false);
@@ -3861,41 +3880,6 @@ export class Desk {
     const pos = book.positions.get(mint);
     if (origin?.quoteUsd != null && Number.isFinite(origin.quoteUsd) && origin.quoteUsd >= 0) {
       this.lastQuoteUsd.set(mint, origin.quoteUsd);
-    }
-    if (pos) {
-      const midValue = pos.qty * priceUsd;
-      const drained = quoteSideDrained({
-        quoteUsd: origin?.quoteUsd,
-        midValueUsd: midValue,
-        liquidityUsd: origin?.liquidityUsd
-      });
-      const recovered =
-        origin?.quoteUsd != null &&
-        Number.isFinite(origin.quoteUsd) &&
-        origin.quoteUsd > QUOTE_SIDE_GONE_USD &&
-        !drained;
-      if (recovered) this.clearLiquidityGone(kind, mint);
-      else if (drained) {
-        this.noteLiquidityGone(kind, mint, residualExitUsd({ quoteUsd: origin?.quoteUsd, midValueUsd: midValue }), "quote_drained");
-        if (advise) this.publishAdvice(this.buildAdvice());
-        return;
-      } else if (this.liquidityGone.has(key)) {
-        // Still flagged (e.g. NO_ROUTES). A mid without a healthy quote side is not sellable value.
-        return;
-      }
-    }
-    if (markUnusable(priceUsd)) {
-      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", key)) {
-        this.log({
-          stage: "risk",
-          kind: "reject",
-          mint,
-          symbol: pos.symbol,
-          code: "PRICE_UNUSABLE",
-          message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${origin?.feed ?? "unknown"}. A non-positive mark is invalid data. Waiting for a valid mark.`
-        });
-      }
-      return;
     }
     let reanchored = false;
     if (pos && !sameMarkSource(pos, origin)) {
@@ -3940,6 +3924,43 @@ export class Desk {
       }
     } else if (pos) {
       this.reanchors.delete(key);
+    }
+    if (pos) {
+      const midValue = pos.qty * priceUsd;
+      const drained = quoteSideDrained({
+        quoteUsd: origin?.quoteUsd,
+        midValueUsd: midValue,
+        liquidityUsd: origin?.liquidityUsd
+      });
+      const recovered =
+        origin?.quoteUsd != null &&
+        Number.isFinite(origin.quoteUsd) &&
+        origin.quoteUsd > QUOTE_SIDE_GONE_USD &&
+        !drained;
+      if (recovered) {
+        this.restoreLiquidityAnchor(kind, mint);
+        this.clearLiquidityGone(kind, mint);
+      } else if (drained) {
+        this.noteLiquidityGone(kind, mint, residualExitUsd({ quoteUsd: origin?.quoteUsd, midValueUsd: midValue }), "quote_drained");
+        if (advise) this.publishAdvice(this.buildAdvice());
+        return;
+      } else if (this.liquidityGone.has(key)) {
+        // Still flagged (e.g. NO_ROUTES). A mid without a healthy quote side is not sellable value.
+        return;
+      }
+    }
+    if (markUnusable(priceUsd)) {
+      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", key)) {
+        this.log({
+          stage: "risk",
+          kind: "reject",
+          mint,
+          symbol: pos.symbol,
+          code: "PRICE_UNUSABLE",
+          message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${origin?.feed ?? "unknown"}. A non-positive mark is invalid data. Waiting for a valid mark.`
+        });
+      }
+      return;
     }
     if (pos && !pos.closing) {
       const lastGood = book.price(mint, pos.entryPrice);

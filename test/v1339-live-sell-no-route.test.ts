@@ -169,6 +169,60 @@ describe("v13.39 live sell no-route and drained quote side", () => {
     expect((pos?.marketValueUsd ?? 0) > 1).toBe(true);
   });
 
+  it("ignores a drained tick from a different pool", async () => {
+    const desk = armed();
+    await openLive(desk);
+    const held = desk.liveBook!.positions.get(MINT)!;
+    held.priceFeed = "dexscreener";
+    held.pairAddress = "HealthyPool111111111111111111111111111111";
+    const before = desk.snapshot().liveBook!.positions.find((p) => p.mint === MINT)!.markPrice;
+    desk.bus.emit("market.tick", {
+      mint: MINT,
+      priceUsd: 0.00001287,
+      at: Date.now(),
+      feed: "dexscreener",
+      pairAddress: "OtherPool111111111111111111111111111111111",
+      liquidityUsd: 1.39,
+      quoteUsd: 0.000013
+    });
+    const pos = desk.snapshot().liveBook?.positions.find((p) => p.mint === MINT);
+    expect(pos?.liquidityNote ?? null).toBeFalsy();
+    expect(pos?.markPrice).toBeCloseTo(before, 10);
+    expect(desk.liveBook?.positions.has(MINT)).toBe(true);
+  });
+
+  it("restores a real price when the anchored pool's quote side returns", async () => {
+    const desk = armed();
+    await openLive(desk);
+    const held = desk.liveBook!.positions.get(MINT)!;
+    held.priceFeed = "dexscreener";
+    held.pairAddress = "HealthyPool111111111111111111111111111111";
+    desk.bus.emit("market.tick", {
+      mint: MINT,
+      priceUsd: 0.00001287,
+      at: Date.now(),
+      feed: "dexscreener",
+      pairAddress: held.pairAddress,
+      liquidityUsd: 1.39,
+      quoteUsd: 0.000013
+    });
+    expect(desk.snapshot().liveBook?.positions.find((p) => p.mint === MINT)?.liquidityNote).toBe("Liquidity gone, no sell route");
+
+    desk.bus.emit("market.tick", {
+      mint: MINT,
+      priceUsd: 0.0000097,
+      at: Date.now(),
+      feed: "dexscreener",
+      pairAddress: held.pairAddress,
+      liquidityUsd: 4_000,
+      quoteUsd: 1_800
+    });
+    const pos = desk.snapshot().liveBook?.positions.find((p) => p.mint === MINT);
+    expect(pos?.liquidityNote ?? null).toBeFalsy();
+    expect(pos?.markPrice).toBeCloseTo(0.0000097, 8);
+    expect((pos?.marketValueUsd ?? 0) > 1).toBe(true);
+  });
+
   it("retries a live sell once a route returns", async () => {
     const desk = armed();
     await openLive(desk);
