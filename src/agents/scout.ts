@@ -285,13 +285,17 @@ export class Scout {
     const prior = this.seen.get(mint);
     if (prior?.state === "queued") {
       const target = this.queue.find((item) => item.mint === mint) ?? this.inflight.get(mint);
-      if (target && hint > (target.volume1hUsd ?? 0)) {
-        target.volume1hUsd = hint;
-        if ((raw.priceUsd ?? 0) > (target.priceUsd ?? 0)) target.priceUsd = raw.priceUsd;
-        if ((raw.liquidityUsd ?? 0) > (target.liquidityUsd ?? 0)) target.liquidityUsd = raw.liquidityUsd;
+      if (target) {
+        if (hint > (target.volume1hUsd ?? 0)) {
+          target.volume1hUsd = hint;
+          if ((raw.priceUsd ?? 0) > (target.priceUsd ?? 0)) target.priceUsd = raw.priceUsd;
+          if ((raw.liquidityUsd ?? 0) > (target.liquidityUsd ?? 0)) target.liquidityUsd = raw.liquidityUsd;
+        }
+        if ((raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
+        return;
       }
-      if (prior && (raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
-      return;
+      // A stop left the slot marked queued without a queue entry. Gate it again.
+      prior.state = "killed";
     }
     if (prior && !this.opts.prefilter) {
       if (!(hint > prior.volume && prior.volume <= 0 && prior.refreshes < 1)) return;
@@ -299,7 +303,10 @@ export class Scout {
       prior.state = "queued";
     } else if (prior) {
       const gate = this.gateRaw(raw, prior);
-      if (gate === "stop") return;
+      if (gate === "stop") {
+        this.unqueueGhost(mint);
+        return;
+      }
       if (gate === "wait") {
         prior.state = "waiting";
         prior.refreshes = Math.max(prior.refreshes, 1);
@@ -322,7 +329,10 @@ export class Scout {
         if (first) this.seen.delete(first);
       }
       const gate = this.opts.prefilter ? this.gateRaw(raw, slot) : "queue";
-      if (gate === "stop") return;
+      if (gate === "stop") {
+        this.unqueueGhost(mint);
+        return;
+      }
       if (gate === "wait") {
         slot.state = "waiting";
         slot.refreshes = 1;
@@ -330,6 +340,14 @@ export class Scout {
       }
     }
     this.enqueue(raw, origin);
+  }
+
+  /** A blocked mint must not stay `queued` or the next print skips the gate. */
+  private unqueueGhost(mint: string): void {
+    const slot = this.seen.get(mint);
+    if (!slot || slot.state !== "queued") return;
+    if (this.queue.some((item) => item.mint === mint) || this.inflight.has(mint)) return;
+    slot.state = "killed";
   }
 
   /**

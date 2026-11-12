@@ -323,6 +323,37 @@ describe("v13.34 prefilter", () => {
     }
   });
 
+  it("retries a soft kill after the seen slot was dropped", async () => {
+    let calls = 0;
+    const memory = new KillMemory();
+    memory.note(MINT, false, Date.now() - PREFILTER_BACKOFF_MS + 40, 100);
+    const bus = new EventBus<DeskEvents>();
+    const scout = new Scout({
+      bus,
+      feedMode: "live",
+      demo: false,
+      rpcUrl: HELIUS,
+      pumpWsUrl: "ws://unused",
+      enrichConcurrency: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return Response.json({ pairs: [] });
+      },
+      prefilter: () => thresholds,
+      killMemory: memory,
+      onStatus: () => {}
+    });
+    const rich = sighting({ volume1hUsd: 50_000, liquidityUsd: 50_000, priceUsd: 0.2 });
+    scout.ingest(rich);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(calls).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    scout.ingest(rich);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls).toBeGreaterThan(0);
+    scout.stop();
+  });
+
   it("estimates the RPC demand from the production kill mix", () => {
     // 120 sightings in a busy minute. 86% die on free data (pump creates with no volume,
     // or a printed volume/liquidity under the existing floors — volume is 32151 of 79571
