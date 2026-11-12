@@ -10,15 +10,15 @@
       "/api/live/ready",
       "/api/orders"
     ],
-    "code": "13.33. Equity polls are a cached 240-point SQL bucket (first, last, min, max). /api/wallet returns the cached balance and refreshes in the background. Helius priority-0 depth is capped at 24 with stale duplicate mints dropped. Caps stay 10 and 8. Live $5/$20, exit slippage 6%, cooldown 0, and the engine $10 paper-loss pause are unchanged. Engine and AI stay paper-only. The 13.32 manual override is unchanged. Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull. Engine behavior remains Claude's trading-engine tip 8b3fe9484c12e41efded821e223891907c3051d6.",
+    "code": "13.34. Free-feed pre-filter before Helius/Alchemy enrich. Existing volume, liquidity, and age floors only; no mcap floor was added. Hard kills are not enriched again. A soft VOLUME_TOO_LOW kill gets one recheck after 5 minutes if free-feed volume has grown past the floor. Search and manual buys still reach RPC. Chain marks stay for held coins and the watchlist. Caps stay 10 and 8. Live $5/$20, exit slippage 6%, cooldown 0, and the engine $10 paper-loss pause are unchanged. Engine and AI stay paper-only. The 13.32 manual override is unchanged. Rebased onto main 08233e1 after PR 33 (includes 5cca6d92: bucketed equity cache, snapshot seq, live-sell balance). Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull.",
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
     "appVersion": "13.34",
-    "androidVersionName": "13.33",
-    "androidVersionCode": 1333,
+    "androidVersionName": "13.34",
+    "androidVersionCode": 1334,
     "applicationId": "com.dirk.nightdesk",
-    "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. That deploy is liveOracleUntilThisRelease. 13.33 is a latency release on main 9fbd87b2. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
+    "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. That deploy is liveOracleUntilThisRelease. 13.34 is the pre-filter on top of 13.33 (PR 33). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
     "mainBeforeThisRelease": "2bc4475ec9819b5e56d9345ab6073156b473781d",
     "liveOracleUntilThisRelease": {
@@ -78,7 +78,7 @@
     "13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5/$20 limits.",
     "13.32: an explicit manual paper or live buy (POST /api/positions/buy) bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. A resting limit fill does not skip that ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path.",
     "13.33: poll latency only. equity(ts) index, SQL downsample to <=240 points. The cache keeps time buckets and widens them as the session grows. Snapshots carry seq; clients ignore an older snapshot, and a position mark drops the 1s cache. GET /api/orders and GET /api/settings skip the full snapshot. GET /api/wallet is non-blocking (balanceAgeMs, balanceStale). Live buys wait at most 4s then a 60s successful cache or refuse. Live sells may use an older successful SOL figure. Helius priority-0 queue max 24 with oldest-first drop and stale duplicate-mint drop. Caps stay 10+8. No trading, filter, slippage, cooldown, or engine-pause number changed.",
-    "13.34: phone redesign only (five tabs, Engine tab, Settings → More). No desk setting, endpoint, limit or trading behavior changed."
+    "13.34: the five-tab phone redesign (Home, Tape, Search, Engine, Settings; Recap, Link, and Pump terminal under Settings → More) and free-feed pre-filter. Cheap kills (volume, liquidity, age, ban, junk name, bogus price, already killed) run before Helius/Alchemy, with no numeric filter or trade setting changed. Caps stay 10+8; the engine and AI remain paper-only. Rebased onto main 08233e1 (PR 33, includes 5cca6d92)."
   ],
   "manualOverride": {
     "version": "13.32",
@@ -793,14 +793,16 @@
           "mode",
           "now",
           "publicUrl",
-          "eventLoopLag"
+          "eventLoopLag",
+          "prefilter"
         ],
-        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null. 13.33 eventLoopLag is {p50Ms, p99Ms, maxMs}."
+        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null. 13.33 eventLoopLag is {p50Ms, p99Ms, maxMs}. 13.34 prefilter is {kills, rpcSaved, heliusQueue, enrich:{count,p50Ms,p90Ms,maxMs}}."
       },
       {
         "method": "GET",
         "path": "/api/state",
         "keyFields": [
+          "seq",
           "appVersion",
           "mode",
           "liveScope",
@@ -822,6 +824,7 @@
           "killReasons",
           "recheck",
           "enrich",
+          "prefilter",
           "events",
           "advice",
           "watchlist",
@@ -1198,10 +1201,10 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.33",
-      "androidVersionCode": 1333,
+      "version": "13.34",
+      "androidVersionCode": 1334,
       "applicationId": "com.dirk.nightdesk",
-      "note": "Code in this branch (13.33). Not the host at the 1:46 PM ET pull. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6. main before this release is 9fbd87b2.",
+      "note": "Code in this branch (13.34). Not the host at the 1:46 PM ET pull. Rebased onto main 08233e1 (PR 33, includes 5cca6d92). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6. main before 13.33 is 9fbd87b2.",
       "liveOracleUntilThisRelease": {
         "version": "13.29",
         "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
@@ -1215,6 +1218,6 @@
   "filterSemantics1329": {
     "holders": "When enrich only sees the top 20 accounts (Alchemy today; HOLDER_PAGES_MAX=0), a full list of 20 counts as 20 or more.",
     "devShare": "Computed from the top-20 holders. Pool vaults are excluded. Any share over 100% fails closed.",
-    "recheck": "Coins that miss only the soft filters get one recheck. Counts are on /api/state.recheck (pending, ran, dropped)."
+    "recheck": "13.34: a volume, liquidity, or age miss is remembered and does not enter the RPC recheck queue. It gets one free-feed look after 5 minutes, and only if volume has grown past the floor. Holder soft misses still get one RPC recheck. Counts are on /api/state.recheck (pending, ran, dropped)."
   }
 }

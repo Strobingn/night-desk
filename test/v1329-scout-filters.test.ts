@@ -262,7 +262,23 @@ describe("v13.29 soft-gate recheck", () => {
   it("shows the recheck queue on /api/state and skips a hard rug", async () => {
     const desk = new Desk(testConfig());
     try {
+      // 13.34: a volume or liquidity miss is a free-feed kill. It does not take an RPC recheck slot.
       desk.bus.emit("scout.candidate", makeToken({ volume1hUsd: 0, liquidityUsd: 1_000 }));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(desk.snapshot().recheck).toEqual({ pending: 0, ran: 0, dropped: 0 });
+      const holders = desk.updateSettings({ minHolderCount: 20 });
+      expect(holders.ok).toBe(true);
+      desk.bus.emit(
+        "scout.candidate",
+        makeToken({
+          mint: "HolderMint11111111111111111111111111111111",
+          volume1hUsd: 50_000,
+          liquidityUsd: 50_000,
+          holderCount: 1,
+          holderCountAtLeast: false,
+          mintAuthorityRevoked: true
+        })
+      );
       await new Promise((resolve) => setTimeout(resolve, 40));
       expect(desk.snapshot().recheck).toEqual({ pending: 1, ran: 0, dropped: 0 });
       desk.bus.emit("scout.candidate", makeToken({ mint: "RugMint111111111111111111111111111111111", mintAuthorityRevoked: false, volume1hUsd: 0 }));
