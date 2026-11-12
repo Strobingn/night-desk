@@ -347,14 +347,27 @@ export class Scout {
       const admit = memory.admit(raw.mint, now, raw.volume1hUsd ?? 0, thresholds, age);
       if (admit !== "enrich") return "stop";
       const again = prefilterFree(raw, thresholds, now, prior.price);
-      return again.action === "pass" ? "queue" : "stop";
+      if (again.action === "pass") {
+        memory.commit(raw.mint);
+        return "queue";
+      }
+      if (again.action === "wait") return "wait";
+      memory.commit(raw.mint);
+      return "stop";
     }
     if (memory) {
       const admit = memory.admit(raw.mint, now, raw.volume1hUsd ?? 0, thresholds, age);
       if (admit === "block") return "stop";
       if (admit === "enrich") {
         const again = prefilterFree(raw, thresholds, now, prior.price);
-        return again.action === "pass" ? "queue" : "stop";
+        if (again.action === "pass") {
+          memory.commit(raw.mint);
+          return "queue";
+        }
+        if (again.action === "wait") return "wait";
+        memory.commit(raw.mint);
+        this.finishPrefilterKill(raw, again.reasons, again.hard);
+        return "stop";
       }
     }
     const decision = prefilterFree(raw, thresholds, now, prior.price);
@@ -381,10 +394,15 @@ export class Scout {
     return "queue";
   }
 
-  private finishPrefilterKill(raw: RawSighting, reasons: PrefilterReason[], hard: boolean): void {
+  private finishPrefilterKill(raw: RawSighting, reasons: PrefilterReason[], _hard: boolean): void {
     const slot = this.seen.get(raw.mint);
     if (slot) slot.state = "killed";
-    this.opts.killMemory?.note(raw.mint, hard, Date.now(), raw.volume1hUsd ?? 0);
+    // A cooldown ban expires. Remembering it as a hard kill would hide the mint after the slider clears.
+    const remembered = reasons.filter((reason) => reason.code !== "BANNED");
+    if (remembered.length) {
+      const stickyHard = remembered.some((reason) => reason.code !== "VOLUME_TOO_LOW" && reason.code !== "LIQUIDITY_TOO_THIN" && reason.code !== "TOKEN_TOO_NEW");
+      this.opts.killMemory?.note(raw.mint, stickyHard, Date.now(), raw.volume1hUsd ?? 0);
+    }
     for (const reason of reasons) this.prefilterKills[reason.code] = (this.prefilterKills[reason.code] ?? 0) + 1;
     this.rpcSaved += ENRICH_RPC_PER_COIN;
     this.opts.onPrefilterKill?.(raw, reasons);

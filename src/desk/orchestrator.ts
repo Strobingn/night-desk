@@ -1869,11 +1869,12 @@ export class Desk {
     return null;
   }
 
-  /** Held positions and the watchlist. Scout noise does not take a chain-mark slot. */
+  /** Held positions, the watchlist, and open limit buys. Scout noise does not take a chain-mark slot. */
   private chainMarkWanted(mint: string): boolean {
     if (!mint) return false;
     if (this.book?.positions.has(mint) || this.liveBook?.positions.has(mint)) return true;
-    return this.watchlist.some((item) => item.mint === mint);
+    if (this.watchlist.some((item) => item.mint === mint)) return true;
+    return this.orders.open().some((order) => order.side === "limit_buy" && order.mint === mint);
   }
 
   private prefilterThresholds(): PrefilterThresholds {

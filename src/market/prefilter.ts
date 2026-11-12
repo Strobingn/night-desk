@@ -45,14 +45,15 @@ function usd(n: number): string {
   return `$${Math.round(n).toLocaleString("en-US")}`;
 }
 
-/** Symbol or name that cannot be a ticker. A blank identity is not junk; a later free print may name it. */
+/**
+ * Symbol or name that cannot be a ticker. A blank identity is not junk; a later free print may name it.
+ * DexScreener profiles put the description in `name`. A URL in that blurb is not a junk ticker.
+ */
 export function junkIdentity(symbol?: string, name?: string): boolean {
   const s = (symbol ?? "").trim();
   const n = (name ?? "").trim();
   if (!s && !n) return false;
-  const blob = `${s} ${n}`;
-  if (/https?:\/\/|www\./i.test(blob)) return true;
-  if (s && !/[A-Za-z0-9]/.test(s)) return true;
+  if (s && (/https?:\/\/|www\./i.test(s) || !/[A-Za-z0-9]/.test(s))) return true;
   if (!s && n && !/[A-Za-z0-9]/.test(n)) return true;
   return false;
 }
@@ -202,9 +203,15 @@ export class KillMemory {
       this.blocked += 1;
       return "block";
     }
+    return "enrich";
+  }
+
+  /** The one soft recheck is spent only once the free gates pass and enrich is queued. */
+  commit(mint: string): void {
+    const row = this.soft.get(mint);
+    if (!row || row.used) return;
     row.used = true;
     this.rechecks += 1;
-    return "enrich";
   }
 }
 

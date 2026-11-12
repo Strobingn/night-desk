@@ -30,6 +30,8 @@ A missing volume or liquidity waits for one later free-feed print (DexScreener, 
 
 Today, a coin that reaches enrich costs, on the RPC host: `getAccountInfo`, `getTokenLargestAccounts`, and `getMultipleAccounts` (3 reads). Helius DAS `getTokenAccounts` pages are extra and only when `holderPagesMax` is set. RugCheck is a separate HTTP call and only after volume already clears the floor. A soft recheck used to run that enrich again (the queue holds 300). Priority-0 chain marks (`getMultipleAccounts`) also ran for Tape curves and pump sightings with no price, which is what pinned the 10/min read lane. Wallet reads stay priority -1. Manual Search and buy pre-checks now use that same priority so they jump ahead of marks. Held positions and the watchlist keep their chain marks.
 
+A cooldown ban is checked on each print and is not stored as a permanent kill, so clearing the cooldown (it is 0 in production) lets the mint through again. Chain marks stay for held coins, the watchlist, and an open limit buy.
+
 `/api/state` and `/api/health` include `prefilter`: kill counts by reason, `rpcSaved`, Helius priority-0 depth, and enrich p50/p90. The phone Settings screen adds one line for that. No control was removed.
 
 ## Backend

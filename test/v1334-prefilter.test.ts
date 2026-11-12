@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { Scout, enrichBefore } from "../src/agents/scout.js";
 import { EventBus } from "../src/bus.js";
+import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
+import type { TapeQuoter } from "../src/market/tape-quotes.js";
 import {
   ENRICH_RPC_PER_COIN,
   KillMemory,
   PREFILTER_BACKOFF_MS,
   estimateRpcDemand,
+  junkIdentity,
   prefilterFree,
   type PrefilterThresholds
 } from "../src/market/prefilter.js";
@@ -98,10 +101,14 @@ describe("v13.34 prefilter", () => {
     expect(memory.admit(MINT, PREFILTER_BACKOFF_MS - 1, 50_000, thresholds, null)).toBe("block");
     expect(memory.admit(MINT, PREFILTER_BACKOFF_MS, 9_000, thresholds, null)).toBe("block");
     expect(memory.admit(MINT, PREFILTER_BACKOFF_MS, 50_000, thresholds, null)).toBe("enrich");
+    expect(memory.admit(MINT, PREFILTER_BACKOFF_MS, 50_000, thresholds, null)).toBe("enrich");
+    memory.commit(MINT);
     expect(memory.admit(MINT, PREFILTER_BACKOFF_MS + 60_000, 80_000, thresholds, null)).toBe("block");
     memory.note("hard-mint", true, 0, 0);
     expect(memory.admit("hard-mint", PREFILTER_BACKOFF_MS * 4, 1_000_000, thresholds, null)).toBe("block");
     expect(prefilterFree(sighting({ symbol: "??", volume1hUsd: 99_000, liquidityUsd: 20_000, priceUsd: 1 }), thresholds, 0).action).toBe("kill");
+    expect(junkIdentity(undefined, "Visit https://example.com for project info")).toBe(false);
+    expect(junkIdentity("https://scam.example", "Ok")).toBe(true);
   });
 
   it("still calls RPC for Search and a manual buy of a prefiltered mint", async () => {
@@ -229,6 +236,91 @@ describe("v13.34 prefilter", () => {
     expect(manualAt).toBeGreaterThanOrEqual(0);
     expect(markAt).toBeGreaterThan(manualAt);
     expect(net.heliusQueue().priority0).toBe(0);
+  });
+
+  it("does not spend the soft retry on an incomplete free print", async () => {
+    let calls = 0;
+    const memory = new KillMemory();
+    memory.note(MINT, false, Date.now() - PREFILTER_BACKOFF_MS - 1, 100);
+    const bus = new EventBus<DeskEvents>();
+    const scout = new Scout({
+      bus,
+      feedMode: "live",
+      demo: false,
+      rpcUrl: HELIUS,
+      pumpWsUrl: "ws://unused",
+      enrichConcurrency: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return Response.json({ pairs: [] });
+      },
+      prefilter: () => thresholds,
+      killMemory: memory,
+      onStatus: () => {}
+    });
+    scout.ingest(sighting({ volume1hUsd: 50_000, priceUsd: 0.2 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(0);
+    expect(memory.admit(MINT, Date.now(), 50_000, thresholds, null)).toBe("enrich");
+    scout.ingest(sighting({ volume1hUsd: 50_000, liquidityUsd: 50_000, priceUsd: 0.2 }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls).toBeGreaterThan(0);
+    scout.stop();
+  });
+
+  it("lets a cooldown ban expire instead of hard-killing the mint", async () => {
+    let calls = 0;
+    const banned = new Set<string>([MINT]);
+    const bus = new EventBus<DeskEvents>();
+    const scout = new Scout({
+      bus,
+      feedMode: "live",
+      demo: false,
+      rpcUrl: HELIUS,
+      pumpWsUrl: "ws://unused",
+      enrichConcurrency: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return Response.json({ pairs: [] });
+      },
+      prefilter: () => ({ ...thresholds, bannedMints: banned }),
+      killMemory: new KillMemory(),
+      onStatus: () => {}
+    });
+    const rich = sighting({ volume1hUsd: 50_000, liquidityUsd: 50_000, priceUsd: 0.2 });
+    scout.ingest(rich);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(0);
+    banned.delete(MINT);
+    scout.ingest(rich);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls).toBeGreaterThan(0);
+    scout.stop();
+  });
+
+  it("still reads the curve for an open limit buy that is not held", async () => {
+    const pump = "J1c4tDDUziWwZQ4D8c6kxuAXHg5hcBX8GTNFUEaBpump";
+    const chainBodies: string[] = [];
+    const desk = new Desk(testConfig({ rpcUrl: HELIUS, feedMode: "live" }), {
+      lookupFetch: async () => Response.json({ pairs: [] }),
+      chainFetch: async (_url, init) => {
+        chainBodies.push(String(init?.body ?? ""));
+        return Response.json({ jsonrpc: "2.0", result: { value: [null, null] } });
+      }
+    });
+    try {
+      expect(desk.updateSettings({ autoBuy: false }).ok).toBe(true);
+      desk.bus.emit("scout.candidate", makeToken({ mint: pump, source: "pumpfun", symbol: "PUMP", priceUsd: 0.002, volume1hUsd: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const placed = desk.placeOrder({ side: "limit_buy", mint: pump, basis: "price", value: 0.001, sizeUsd: 5, book: "paper" });
+      if (!placed.ok) throw new Error(placed.error);
+      const tape = (desk as unknown as { tape?: TapeQuoter }).tape;
+      expect(tape).toBeTruthy();
+      await tape!.tick();
+      expect(chainBodies.some((body) => body.includes("getMultipleAccounts"))).toBe(true);
+    } finally {
+      desk.stop();
+    }
   });
 
   it("estimates the RPC demand from the production kill mix", () => {
