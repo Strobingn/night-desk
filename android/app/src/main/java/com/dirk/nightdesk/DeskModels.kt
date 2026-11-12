@@ -1107,4 +1107,3 @@ internal fun parseOrders(rows: JSONArray?): List<DeskOrder> {
     }
     return out
 }
-
