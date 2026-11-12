@@ -5,9 +5,9 @@ import { testConfig } from "./helpers.js";
 
 describe("v13.24 crash card", () => {
   it("shows a crash only when its version is the installed version", () => {
-    expect(APP_VERSION).toBe("13.36");
+    expect(APP_VERSION).toBe("13.37");
     const old = { version: "13.24", dismissed: false };
-    const current = { version: "13.36", dismissed: false };
+    const current = { version: "13.37", dismissed: false };
     expect(crashOnHome(old, APP_VERSION)).toBe(false);
     expect(crashOnHome(current, APP_VERSION)).toBe(true);
     expect(crashOnHome({ ...current, dismissed: true }, APP_VERSION)).toBe(false);
@@ -27,7 +27,7 @@ describe("v13.24 crash card", () => {
       expect(kept.text).toMatch(/NetworkOnMainThreadException/);
       expect(kept.dismissed).toBe(false);
 
-      desk.recordClientCrash("13.36", "java.lang.IllegalStateException: fresh");
+      desk.recordClientCrash("13.37", "java.lang.IllegalStateException: fresh");
       expect(crashOnHome(desk.snapshot().lastClientCrash, APP_VERSION)).toBe(true);
       desk.dismissClientCrash();
       expect(crashOnHome(desk.snapshot().lastClientCrash, APP_VERSION)).toBe(false);
@@ -44,7 +44,7 @@ describe("v13.24 crash card", () => {
       expect(stored.dismissed).toBe(true);
       expect(stored.brief).toMatch(/fresh/);
       expect(crashOnHome(again.snapshot().lastClientCrash, APP_VERSION)).toBe(false);
-      again.recordClientCrash("13.36", "java.lang.IllegalStateException: newer");
+      again.recordClientCrash("13.37", "java.lang.IllegalStateException: newer");
       expect(crashOnHome(again.snapshot().lastClientCrash, APP_VERSION)).toBe(true);
       expect((again.store.readJson("lastClientCrash") as { dismissed?: boolean }).dismissed).toBe(false);
     } finally {

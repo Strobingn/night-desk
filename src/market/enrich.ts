@@ -283,7 +283,7 @@ export async function enrichSighting(raw: RawSighting, deps: EnrichDeps): Promis
       const prior = token.top10HolderPct;
       token.top10HolderPct = prior == null ? holders.top10HolderPct : Math.max(prior, holders.top10HolderPct);
     }
-    if (holders.holderCount != null) {
+    if (holders.holderCount != null && token.holderCount == null) {
       token.holderCount = holders.holderCount;
       token.holderCountAtLeast = holders.holderCountAtLeast === true;
     }
@@ -457,6 +457,10 @@ function mergeRug(token: CandidateToken, report: unknown, mint: string, pools?: 
     token.devHoldingUpperBound = false;
   }
   if (rug.devRug) token.devRug = rug.devRug;
+  if (rug.totalHolders != null) {
+    token.holderCount = rug.totalHolders;
+    token.holderCountAtLeast = false;
+  }
 }
 
 function hintsFromDex(payload: unknown, mint: string): AuthorityHints {
