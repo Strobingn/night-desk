@@ -381,7 +381,15 @@ describe("v13.5 HTTP and web helpers", () => {
       const body = await wallet.text();
       expect(wallet.status).toBe(200);
       expect(body).not.toContain(b58.slice(0, 16));
-      expect(JSON.parse(body)).toMatchObject({ keyLoaded: true, publicKey: key.publicKey.toBase58(), solBalance: 0.3, usdcBalance: 12, live: false });
+      // v13.33 the route answers with the cache and reads in the background.
+      expect(JSON.parse(body)).toMatchObject({ keyLoaded: true, publicKey: key.publicKey.toBase58(), live: false, balanceStale: true });
+      let filled = JSON.parse(body) as { solBalance: number | null; usdcBalance: number | null; balanceStale?: boolean };
+      for (let i = 0; i < 20 && filled.solBalance == null; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        const next = await fetch(`http://127.0.0.1:${port}/api/wallet`);
+        filled = (await next.json()) as typeof filled;
+      }
+      expect(filled).toMatchObject({ solBalance: 0.3, usdcBalance: 12, balanceStale: false });
       const state = await (await fetch(`http://127.0.0.1:${port}/api/state`)).text();
       expect(state).not.toContain(b58.slice(0, 16));
       const ok = await fetch(`http://127.0.0.1:${port}/api/settings`, {

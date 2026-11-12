@@ -2,7 +2,75 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { capEquitySeries } from "../desk/equity-series.js";
 import type { ClosedTrade, EquityPoint, FeedEvent, Position } from "../types.js";
+
+/** Points the phone chart reads. Snapshot never ships the raw equity table. */
+export const EQUITY_CURVE_POINTS = 240;
+
+interface EquityBucket {
+  first: EquityPoint;
+  last: EquityPoint;
+  min: EquityPoint;
+  max: EquityPoint;
+}
+
+interface EquityCurveCache {
+  since: number;
+  max: number;
+  origin: number;
+  bucketMs: number;
+  span: number;
+  buckets: Map<number, EquityBucket>;
+  points: EquityPoint[];
+}
+
+function bucketIndex(t: number, origin: number, bucketMs: number, span: number): number {
+  if (!(bucketMs > 0)) return 0;
+  return Math.max(0, Math.min(span, Math.floor((t - origin) / bucketMs)));
+}
+
+function touchEquityBucket(buckets: Map<number, EquityBucket>, index: number, point: EquityPoint): void {
+  const current = buckets.get(index);
+  if (!current) {
+    buckets.set(index, { first: point, last: point, min: point, max: point });
+    return;
+  }
+  if (point.t < current.first.t) current.first = point;
+  if (point.t >= current.last.t) current.last = point;
+  if (point.equity < current.min.equity) current.min = point;
+  if (point.equity > current.max.equity) current.max = point;
+}
+
+function flattenEquityBuckets(buckets: Map<number, EquityBucket>): EquityPoint[] {
+  const byTime = new Map<number, EquityPoint>();
+  for (const index of [...buckets.keys()].sort((a, b) => a - b)) {
+    const bucket = buckets.get(index)!;
+    for (const point of [bucket.first, bucket.last, bucket.min, bucket.max]) {
+      if (point && Number.isFinite(point.t)) byTime.set(point.t, point);
+    }
+  }
+  return [...byTime.values()].sort((a, b) => a.t - b.t);
+}
+
+/** Place one new ledger row. Widen the grid from the points already kept, never from a 240-cap. */
+function absorbEquityPoint(cache: EquityCurveCache, point: EquityPoint): void {
+  if (cache.buckets.size === 0) cache.origin = point.t;
+  const end = cache.origin + cache.bucketMs * cache.span;
+  if (point.t > end) {
+    const nextMs = Math.max(cache.bucketMs * 1.000001, (point.t - cache.origin) / cache.span);
+    const widened = new Map<number, EquityBucket>();
+    for (const bucket of cache.buckets.values()) {
+      for (const kept of [bucket.first, bucket.last, bucket.min, bucket.max]) {
+        touchEquityBucket(widened, bucketIndex(kept.t, cache.origin, nextMs, cache.span), kept);
+      }
+    }
+    cache.buckets = widened;
+    cache.bucketMs = nextMs;
+  }
+  touchEquityBucket(cache.buckets, bucketIndex(point.t, cache.origin, cache.bucketMs, cache.span), point);
+  cache.points = capEquitySeries(flattenEquityBuckets(cache.buckets), cache.max);
+}
 
 export interface PersistedBook {
   cashUsd: number;
@@ -16,6 +84,12 @@ export interface PersistedBook {
 
 export class DeskStore {
   readonly db: DatabaseSync;
+  /**
+   * Time buckets for one `since`. Inserts update the bucket that owns the timestamp
+   * and widen the grid when the session grows. The capped `points` array is derived
+   * once per insert, not by resampling the previous cap.
+   */
+  private curveCache: EquityCurveCache | null = null;
 
   constructor(
     private readonly dbPath: string,
@@ -26,6 +100,7 @@ export class DeskStore {
     if (jsonlPath !== ":memory:") mkdirSync(path.dirname(jsonlPath), { recursive: true });
     if (logPath !== ":memory:") mkdirSync(path.dirname(logPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    this.installEquityAggregate();
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS events (
@@ -47,6 +122,7 @@ export class DeskStore {
         cash_usd REAL NOT NULL
       );
       CREATE INDEX IF NOT EXISTS equity_ts ON equity(ts);
+      CREATE INDEX IF NOT EXISTS equity_ts_value ON equity(ts, equity_usd, cash_usd);
       CREATE TABLE IF NOT EXISTS trades (
         id TEXT PRIMARY KEY,
         mint TEXT NOT NULL,
@@ -192,13 +268,138 @@ export class DeskStore {
 
   insertEquity(point: EquityPoint): void {
     this.db.prepare(`INSERT INTO equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`).run(point.t, point.equity, point.cash);
+    const cache = this.curveCache;
+    if (!cache || point.t < cache.since) return;
+    if (cache.buckets.size > 0 && point.t < cache.origin) {
+      this.curveCache = null;
+      return;
+    }
+    absorbEquityPoint(cache, point);
   }
 
+  /** Full rows. Recap and the paper-reset archive still want the ledger. The poll path uses [equityCurve]. */
   equitySince(sinceTs: number): EquityPoint[] {
     const rows = this.db
       .prepare(`SELECT ts as t, equity_usd as equity, cash_usd as cash FROM equity WHERE ts >= ? ORDER BY ts ASC`)
       .all(sinceTs) as unknown as EquityPoint[];
     return rows;
+  }
+
+  /**
+   * v13.33 poll curve. One indexed read, bucketed by time, at most `max` points.
+   * Each bucket keeps its first, last, minimum and maximum equity so a spike is not averaged away.
+   * The result is cached until the next insert for the same `since`.
+   */
+  equityCurve(sinceTs: number, max = EQUITY_CURVE_POINTS): EquityPoint[] {
+    const hit = this.curveCache;
+    if (hit && hit.since === sinceTs && hit.max === max) return hit.points;
+    const cache = this.loadCurveCache(sinceTs, max);
+    this.curveCache = cache;
+    return cache.points;
+  }
+
+  /** Cold SQL downsample. Tests time this against [equitySince] on a large table. */
+  queryEquityCurve(sinceTs: number, max = EQUITY_CURVE_POINTS): EquityPoint[] {
+    const limit = Math.max(2, Math.min(2000, Math.floor(max)));
+    const span = limit - 1;
+    const rows = this.db
+      .prepare(
+        `WITH bounds AS (
+           SELECT MIN(ts) AS lo, MAX(ts) AS hi
+           FROM equity
+           WHERE ts >= ?
+         )
+         SELECT nd_equity_bucket(e.ts, e.equity_usd, e.cash_usd) AS packed
+         FROM equity e
+         CROSS JOIN bounds b
+         WHERE e.ts >= ?
+         GROUP BY CASE
+           WHEN b.hi IS NULL OR b.hi <= b.lo THEN 0
+           ELSE MIN(?, CAST((e.ts - b.lo) * ? / (b.hi - b.lo) AS INTEGER))
+         END`
+      )
+      .all(sinceTs, sinceTs, span, span) as Array<{ packed: string }>;
+    const byTime = new Map<number, EquityPoint>();
+    for (const row of rows) {
+      const packed = JSON.parse(row.packed) as EquityPoint[];
+      for (const point of packed) {
+        if (point && Number.isFinite(point.t)) byTime.set(point.t, point);
+      }
+    }
+    const ordered = [...byTime.values()].sort((a, b) => a.t - b.t);
+    return capEquitySeries(ordered, limit);
+  }
+
+  /** Cold SQL read stored as time buckets so later inserts do not resample a 240-point cap. */
+  private loadCurveCache(sinceTs: number, max: number): EquityCurveCache {
+    const limit = Math.max(2, Math.min(2000, Math.floor(max)));
+    const span = limit - 1;
+    const rows = this.db
+      .prepare(
+        `WITH bounds AS (
+           SELECT MIN(ts) AS lo, MAX(ts) AS hi
+           FROM equity
+           WHERE ts >= ?
+         )
+         SELECT nd_equity_bucket(e.ts, e.equity_usd, e.cash_usd) AS packed
+         FROM equity e
+         CROSS JOIN bounds b
+         WHERE e.ts >= ?
+         GROUP BY CASE
+           WHEN b.hi IS NULL OR b.hi <= b.lo THEN 0
+           ELSE MIN(?, CAST((e.ts - b.lo) * ? / (b.hi - b.lo) AS INTEGER))
+         END`
+      )
+      .all(sinceTs, sinceTs, span, span) as Array<{ packed: string }>;
+    const buckets = new Map<number, EquityBucket>();
+    let origin = Number.POSITIVE_INFINITY;
+    let hi = Number.NEGATIVE_INFINITY;
+    const seen: EquityPoint[] = [];
+    for (const row of rows) {
+      const packed = JSON.parse(row.packed) as Array<EquityPoint | null>;
+      for (const point of packed) {
+        if (!point || !Number.isFinite(point.t)) continue;
+        seen.push(point);
+        if (point.t < origin) origin = point.t;
+        if (point.t > hi) hi = point.t;
+      }
+    }
+    const bucketMs = seen.length === 0 || hi <= origin ? 1 : Math.max(1, (hi - origin) / span);
+    if (seen.length) {
+      for (const point of seen) touchEquityBucket(buckets, bucketIndex(point.t, origin, bucketMs, span), point);
+    }
+    const cache: EquityCurveCache = {
+      since: sinceTs,
+      max: limit,
+      origin: seen.length ? origin : sinceTs,
+      bucketMs,
+      span,
+      buckets,
+      points: []
+    };
+    cache.points = capEquitySeries(flattenEquityBuckets(buckets), limit);
+    return cache;
+  }
+
+  /**
+   * One pass per time bucket. Keeps the first and last rows and the min and max equity
+   * rows (with their cash). Registered once; SQLite calls start() per group.
+   */
+  private installEquityAggregate(): void {
+    type Acc = { first: EquityPoint | null; last: EquityPoint | null; min: EquityPoint | null; max: EquityPoint | null };
+    // node:sqlite types the accumulator as a SQL scalar. The object stays in-process between step calls.
+    this.db.aggregate("nd_equity_bucket", {
+      start: (): Acc => ({ first: null, last: null, min: null, max: null }),
+      step: (ctx: Acc, ts: number, equity: number, cash: number): Acc => {
+        const point = { t: Number(ts), equity: Number(equity), cash: Number(cash) };
+        if (!ctx.first) ctx.first = point;
+        ctx.last = point;
+        if (!ctx.min || point.equity < ctx.min.equity) ctx.min = point;
+        if (!ctx.max || point.equity > ctx.max.equity) ctx.max = point;
+        return ctx;
+      },
+      result: (ctx: Acc): string => JSON.stringify([ctx.first, ctx.last, ctx.min, ctx.max])
+    } as never);
   }
 
   openTrade(trade: { id: string; mint: string; symbol: string; openedAt: number; costUsd: number; score: number; mode: "paper" | "live" }): void {

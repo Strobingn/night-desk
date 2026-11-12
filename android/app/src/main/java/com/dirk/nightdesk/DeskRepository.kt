@@ -98,6 +98,25 @@ internal fun parseHealthPublicUrl(body: String): String? = runCatching {
     json.optString("publicUrl").trim().trimEnd('/').takeIf { Regex("""^https://[a-z0-9-]+\.trycloudflare\.com$""").matches(it) }
 }.getOrNull()
 
+/**
+ * v13.33 The Home banner follows /api/state. A slow /api/wallet poll (Helius) must not
+ * replace a good state read with "Desk is slow", and a state failure keeps the state error.
+ */
+internal fun deskLinkError(stateOk: Boolean, stateError: String?, walletError: String?): String? {
+    if (stateOk) return walletError?.let { null }
+    val message = stateError?.trim().orEmpty()
+    return message.ifBlank { "Desk did not answer" }
+}
+
+/**
+ * v13.33 A snapshot applies only when its seq is newer. seq 0 (an older desk) still applies.
+ * A cached snapshot keeps the seq it was built with, so it cannot roll back a later mark.
+ */
+internal fun acceptSnapshot(seenSeq: Long, seq: Long): Boolean {
+    if (seq <= 0L || seenSeq <= 0L) return true
+    return seq > seenSeq
+}
+
 class DeskRepository private constructor(private val context: Context) {
     private val crashHandler = CoroutineExceptionHandler { _, error ->
         if (error is CancellationException) return@CoroutineExceptionHandler
@@ -134,6 +153,15 @@ class DeskRepository private constructor(private val context: Context) {
         .build()
     /** Search must fail with a sentence, not sit on the 12s paper-buy client until OkHttp says "timeout". */
     private val lookupHttp = OkHttpClient.Builder()
+        .callTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .build()
+    /**
+     * v13.33 Wallet reads use their own client. A hung /api/wallet cannot occupy the
+     * state poll's dispatcher, and its timeout is not the Home banner.
+     */
+    private val walletHttp = OkHttpClient.Builder()
         .callTimeout(8, TimeUnit.SECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
@@ -177,6 +205,11 @@ class DeskRepository private constructor(private val context: Context) {
     private var socket: WebSocket? = null
     private var reconnecting = false
     private var poll: Job? = null
+    private var walletPollJob: Job? = null
+    /** Last wallet-poll failure. Never copied into [_error] while /api/state is succeeding. */
+    @Volatile private var walletPollError: String? = null
+    /** Highest snapshot seq applied. A replay of the 1s cache is ignored. */
+    private var seenSnapshotSeq = 0L
     @Volatile private var link = DeskLink("", "")
     private val generation = AtomicInteger(0)
     private var pollMisses = 0
@@ -216,6 +249,8 @@ class DeskRepository private constructor(private val context: Context) {
             reconnecting = false
             poll?.cancel()
             poll = null
+            walletPollJob?.cancel()
+            walletPollJob = null
             val current = socket
             socket = null
             current
@@ -325,6 +360,7 @@ class DeskRepository private constructor(private val context: Context) {
 
     private fun restartTransport(gen: Int) {
         poll?.cancel()
+        walletPollJob?.cancel()
         socket?.close(1000, "reconnect")
         socket = null
         pollMisses = 0
@@ -346,6 +382,13 @@ class DeskRepository private constructor(private val context: Context) {
                 delay(3_000)
             }
         }
+        walletPollJob = scope.launch {
+            while (isActive && gen == generation.get()) {
+                delay(30_000)
+                if (!isActive || gen != generation.get()) return@launch
+                pollWallet()
+            }
+        }
     }
 
     suspend fun refresh(): Boolean {
@@ -357,7 +400,7 @@ class DeskRepository private constructor(private val context: Context) {
                 apply(it)
                 persistSnapshot(body)
             }
-            _error.value = null
+            _error.value = deskLinkError(true, null, walletPollError)
             rememberGood(base)
             backoffMs = 1_000L
         }.onFailure { err ->
@@ -370,10 +413,34 @@ class DeskRepository private constructor(private val context: Context) {
                 _error.value = null
                 _status.value = "Reconnecting"
             } else {
-                _error.value = message.ifBlank { "Desk did not answer" }
+                _error.value = deskLinkError(false, message, walletPollError)
             }
         }
         return result.isSuccess
+    }
+
+    /**
+     * v13.33 Separate from [refresh]. Failure stays on [walletPollError] and does not
+     * mark the desk slow when /api/state is answering.
+     */
+    private suspend fun pollWallet() {
+        val base = link.baseUrl
+        if (base.isBlank()) return
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder().url(withToken("$base/api/wallet")).authed().build()
+                walletHttp.newCall(request).execute().use { response ->
+                    val body = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) error("HTTP ${response.code}")
+                    body
+                }
+            }
+        }
+        result.onSuccess {
+            walletPollError = null
+        }.onFailure { err ->
+            walletPollError = err.message?.ifBlank { "timeout" } ?: "timeout"
+        }
     }
 
     /** url -> the desk's reported public URL ("" when it reports none), for each URL whose /api/health answered ok. */
@@ -913,6 +980,8 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     private fun apply(next: DeskSnapshot) {
+        if (!acceptSnapshot(seenSnapshotSeq, next.seq)) return
+        if (next.seq > seenSnapshotSeq) seenSnapshotSeq = next.seq
         val merged = synchronized(tapeLock) {
             for (event in next.events) {
                 val id = event.id.ifBlank { "event-${event.ts}-${tape.size}" }

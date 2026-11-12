@@ -56,6 +56,16 @@ export function liveAgeMs(pos: PositionView, nowMs: number): number {
   return pos.markAgeMs ?? Number.POSITIVE_INFINITY;
 }
 
+/**
+ * v13.33 a snapshot applies only when its seq is newer. seq 0 (an older desk) still applies.
+ * A cached snapshot keeps the seq it was built with, so it cannot roll back a later mark.
+ */
+export function acceptSnapshot(seenSeq: number, snap: { seq?: number }): boolean {
+  const seq = snap.seq ?? 0;
+  if (!(seq > 0) || !(seenSeq > 0)) return true;
+  return seq > seenSeq;
+}
+
 /** Stamps each position with the local time its mark was taken. */
 export function stampSnapshot(snap: DeskSnapshot, receivedAt: number): DeskSnapshot {
   const stamp = (rows: PositionView[]) => rows.map((pos) => ({ ...pos, markLocalAt: receivedAt - Math.max(0, pos.markAgeMs ?? 0) }));

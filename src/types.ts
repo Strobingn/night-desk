@@ -658,6 +658,10 @@ export interface WalletView {
   /** When that SOL/USD print was cached. Display only. */
   solPriceAt?: number | null;
   balanceAt: number | null;
+  /** v13.33 milliseconds since the cached balance was read. Null when no read has landed. */
+  balanceAgeMs?: number | null;
+  /** v13.33 true when the figure is missing, failed, or older than the live-check cache window. */
+  balanceStale?: boolean;
   balanceError: string | null;
   /** Desk is placing real swaps (LIVE_TRADING=true and a usable key at boot). */
   live: boolean;
@@ -677,6 +681,12 @@ export interface WalletView {
 }
 
 export interface DeskSnapshot {
+  /**
+   * v13.33 monotonic id. A cached snapshot keeps the id it was built with.
+   * Clients ignore a snapshot whose seq is not newer than the one they already applied,
+   * so a 1s cache cannot roll a position mark backwards.
+   */
+  seq?: number;
   /** Trading engine: settings, what it is watching, and the shadow-book scorecard. */
   strategy?: import("./strategy/engine.js").ScorecardView;
   /** Timing per pipeline step, in ms. Measurement only. */

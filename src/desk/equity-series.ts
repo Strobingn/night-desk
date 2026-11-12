@@ -28,6 +28,44 @@ export function visibleEquity(points: EquityPoint[]): EquityPoint[] {
   return out;
 }
 
+/**
+ * v13.33 chart cap. Keeps the first and last points and the min and max equity
+ * so a bucketed series still shows the session ends and the spike.
+ */
+export function capEquitySeries(points: EquityPoint[], max: number): EquityPoint[] {
+  if (points.length <= max) return points;
+  if (max < 2) return points.slice(0, Math.max(0, max));
+  const first = points[0]!;
+  const last = points[points.length - 1]!;
+  let minP = first;
+  let maxP = first;
+  for (const point of points) {
+    if (point.equity < minP.equity) minP = point;
+    if (point.equity > maxP.equity) maxP = point;
+  }
+  const pinned = new Set<EquityPoint>([first, last, minP, maxP]);
+  if (pinned.size >= max) {
+    return [...pinned].sort((a, b) => a.t - b.t).slice(0, max);
+  }
+  const middle = points.filter((point) => !pinned.has(point));
+  const room = max - pinned.size;
+  const sampled = downsamplePoints(middle, room);
+  const uniq = new Map<number, EquityPoint>();
+  for (const point of [...pinned, ...sampled]) uniq.set(point.t, point);
+  const out = [...uniq.values()].sort((a, b) => a.t - b.t);
+  return out.length <= max ? out : out.slice(0, max);
+}
+
+function downsamplePoints(rows: EquityPoint[], max: number): EquityPoint[] {
+  if (rows.length <= max) return rows;
+  if (max <= 0) return [];
+  if (max === 1) return [rows[0]!];
+  const out: EquityPoint[] = [];
+  const step = (rows.length - 1) / (max - 1);
+  for (let i = 0; i < max; i += 1) out.push(rows[Math.round(i * step)]!);
+  return out;
+}
+
 function absurdEquityJump(prev: EquityPoint, next: EquityPoint): boolean {
   const prevMv = Math.max(0, prev.equity - prev.cash);
   const mv = Math.max(0, next.equity - next.cash);

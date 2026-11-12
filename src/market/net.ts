@@ -226,6 +226,27 @@ export const BACKOFF_CAP_MS = 120_000;
 const MIN_RATE_FACTOR = 0.25;
 const RATE_STEP_UP = 0.05;
 const MAX_QUEUE = 200;
+/**
+ * v13.33 priority-0 Helius reads (marks). Wallet (-1) and the exec lane are outside this cap.
+ * The 10/min and 8/min ceilings are unchanged.
+ */
+export const HELIUS_P0_QUEUE_MAX = 24;
+
+/** Pubkeys inside a JSON-RPC body, used to collapse duplicate mark polls. */
+const PUBKEY_RE = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
+
+/**
+ * Identity of a priority-0 Helius poll. Same mint set means the older queued call is stale.
+ * Returns null when the body is not a background poll.
+ */
+export function heliusPollKey(body: unknown): string | null {
+  if (typeof body !== "string") return null;
+  const method = rpcMethod(body);
+  if (!method || !SOLANA_POLL_METHODS.has(method)) return null;
+  const ids = body.match(PUBKEY_RE);
+  if (!ids || ids.length === 0) return method;
+  return `${method}:${[...new Set(ids)].sort().join(",")}`;
+}
 
 export interface NetClock {
   now: () => number;
@@ -244,6 +265,8 @@ interface Waiter {
   seq: number;
   resolve: () => void;
   reject: (err: Error) => void;
+  /** Set for priority-0 Helius polls so a newer read of the same accounts replaces this one. */
+  key?: string;
 }
 
 interface CachedResponse {
@@ -364,9 +387,12 @@ export class NetLimiter {
   }
 
   /** Wait for a token in this bucket. Lower priority number goes first. */
-  acquire(spec: BucketSpec, priority: Priority = 1): Promise<void> {
+  acquire(spec: BucketSpec, priority: Priority = 1, coalesceKey?: string): Promise<void> {
     const b = this.bucket(spec);
     return new Promise<void>((resolve, reject) => {
+      if (spec.id === "helius" && priority === 0) {
+        this.shedHeliusPriority0(b, coalesceKey);
+      }
       if (b.queue.length >= MAX_QUEUE) {
         // Shed the newest lowest-priority waiter so marks and lookups never wait behind a pile.
         const worst = b.queue.reduce((acc, w) => (w.priority > acc.priority || (w.priority === acc.priority && w.seq > acc.seq) ? w : acc));
@@ -377,10 +403,46 @@ export class NetLimiter {
         b.queue.splice(b.queue.indexOf(worst), 1);
         worst.reject(new RateLimitError(`${spec.id} budget queue full`));
       }
-      b.queue.push({ priority, seq: this.seq++, resolve, reject });
+      b.queue.push({ priority, seq: this.seq++, resolve, reject, key: coalesceKey });
       b.queue.sort((a, c) => a.priority - c.priority || a.seq - c.seq);
       this.pump(b);
     });
+  }
+
+  /**
+   * Priority-0 Helius marks only. Drop an older queued call for the same accounts, then drop
+   * the oldest mark until the lane is back under HELIUS_P0_QUEUE_MAX. Wallet (-1) and exec stay.
+   */
+  private shedHeliusPriority0(b: Bucket, coalesceKey: string | undefined): void {
+    if (coalesceKey) {
+      for (let i = b.queue.length - 1; i >= 0; i -= 1) {
+        const waiter = b.queue[i]!;
+        if (waiter.priority === 0 && waiter.key === coalesceKey) {
+          b.queue.splice(i, 1);
+          waiter.reject(new RateLimitError("helius dropped stale duplicate"));
+        }
+      }
+    }
+    while (b.queue.some((waiter) => waiter.priority === 0) && this.priority0Depth(b) >= HELIUS_P0_QUEUE_MAX) {
+      let oldest = -1;
+      let oldestSeq = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < b.queue.length; i += 1) {
+        const waiter = b.queue[i]!;
+        if (waiter.priority === 0 && waiter.seq < oldestSeq) {
+          oldestSeq = waiter.seq;
+          oldest = i;
+        }
+      }
+      if (oldest < 0) break;
+      const dropped = b.queue.splice(oldest, 1)[0]!;
+      dropped.reject(new RateLimitError("helius priority-0 queue full"));
+    }
+  }
+
+  private priority0Depth(b: Bucket): number {
+    let depth = 0;
+    for (const waiter of b.queue) if (waiter.priority === 0) depth += 1;
+    return depth;
   }
 
   /**
@@ -614,7 +676,8 @@ export class NetLimiter {
       if (priority === 0 && this.pausedUntil(spec)) {
         return { status: 429, statusText: "Desk backing off", headers: [["x-nd-local", "1"]], body: "" };
       }
-      await this.acquire(spec, priority);
+      const coalesceKey = spec.id === "helius" && priority === 0 ? heliusPollKey(init.body) ?? undefined : undefined;
+      await this.acquire(spec, priority, coalesceKey);
       const { signal: _ignored, ...rest } = init;
       const res = await this.baseFetch(url, { ...rest, signal: AbortSignal.timeout(timeoutMs) });
       const cached: CachedResponse = {

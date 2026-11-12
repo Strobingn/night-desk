@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { mergeMarks, stampSnapshot } from "./marks";
+import { acceptSnapshot, mergeMarks, stampSnapshot } from "./marks";
 import type { MarksDelta } from "../../src/types";
 import { formatBuyNotice } from "../../src/desk/buy-notice";
 import { api, authHeaders, withToken } from "./api";
@@ -152,8 +152,11 @@ export function App() {
   useEffect(() => {
     let ws: WebSocket | null = null;
     let stopped = false;
+    let seenSeq = 0;
     const apply = (data: DeskSnapshot) => {
       if (stopped) return;
+      if (!acceptSnapshot(seenSeq, data)) return;
+      if ((data.seq ?? 0) > seenSeq) seenSeq = data.seq ?? 0;
       setSnap(stampSnapshot(data, Date.now()));
       setHistory((prev) => mergeEvents(prev, data.events));
       setOffline(false);

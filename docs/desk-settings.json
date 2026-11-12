@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "lastUpdatedET": "2026-11-11 4:15 PM ET",
-  "lastUpdated": "2026-11-11T16:15:00-05:00",
+  "lastUpdatedET": "2026-11-11 6:35 PM ET",
+  "lastUpdated": "2026-11-11T18:35:00-05:00",
   "pulledFrom": {
     "oracleApi": [
       "/api/state",
@@ -10,15 +10,15 @@
       "/api/live/ready",
       "/api/orders"
     ],
-    "code": "13.32. Manual paper and live buys bypass engine watch, analyst score, soft filter, and the hard-stop ban. Hard kills still need Buy anyway. Engine and AI stay paper-only. Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull. Engine behavior remains Claude's trading-engine tip 8b3fe9484c12e41efded821e223891907c3051d6.",
-    "note": "GET /api/settings is not a JSON route; it falls through to the web app. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
+    "code": "13.33. Equity polls are a cached 240-point SQL bucket (first, last, min, max). /api/wallet returns the cached balance and refreshes in the background. Helius priority-0 depth is capped at 24 with stale duplicate mints dropped. Caps stay 10 and 8. Live $5/$20, exit slippage 6%, cooldown 0, and the engine $10 paper-loss pause are unchanged. Engine and AI stay paper-only. The 13.32 manual override is unchanged. Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull. Engine behavior remains Claude's trading-engine tip 8b3fe9484c12e41efded821e223891907c3051d6.",
+    "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.32",
-    "androidVersionName": "13.32",
-    "androidVersionCode": 1332,
+    "appVersion": "13.33",
+    "androidVersionName": "13.33",
+    "androidVersionCode": 1333,
     "applicationId": "com.dirk.nightdesk",
-    "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. That deploy is liveOracleUntilThisRelease. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
+    "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. That deploy is liveOracleUntilThisRelease. 13.33 is a latency release on main 9fbd87b2. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
     "mainBeforeThisRelease": "2bc4475ec9819b5e56d9345ab6073156b473781d",
     "liveOracleUntilThisRelease": {
@@ -76,7 +76,8 @@
     "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current.",
     "13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard ready flag arms nothing.",
     "13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5/$20 limits.",
-    "13.32: an explicit manual paper or live buy (POST /api/positions/buy) bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. A resting limit fill does not skip that ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path."
+    "13.32: an explicit manual paper or live buy (POST /api/positions/buy) bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. A resting limit fill does not skip that ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path.",
+    "13.33: poll latency only. equity(ts) index, SQL downsample to <=240 points. The cache keeps time buckets and widens them as the session grows. Snapshots carry seq; clients ignore an older snapshot, and a position mark drops the 1s cache. GET /api/orders and GET /api/settings skip the full snapshot. GET /api/wallet is non-blocking (balanceAgeMs, balanceStale). Live buys wait at most 4s then a 60s successful cache or refuse. Live sells may use an older successful SOL figure. Helius priority-0 queue max 24 with oldest-first drop and stale duplicate-mint drop. Caps stay 10+8. No trading, filter, slippage, cooldown, or engine-pause number changed."
   ],
   "manualOverride": {
     "version": "13.32",
@@ -760,7 +761,7 @@
     }
   },
   "api": {
-    "note": "All of these require the desk token when DESK_TOKEN is set. GET /api/settings is not implemented; it serves the SPA HTML.",
+    "note": "All of these require the desk token when DESK_TOKEN is set. 13.33 GET /api/settings returns the settings object and does not serve the SPA.",
     "endpoints": [
       {
         "method": "GET",
@@ -769,9 +770,10 @@
           "ok",
           "mode",
           "now",
-          "publicUrl"
+          "publicUrl",
+          "eventLoopLag"
         ],
-        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null."
+        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null. 13.33 eventLoopLag is {p50Ms, p99Ms, maxMs}."
       },
       {
         "method": "GET",
@@ -819,7 +821,7 @@
           "startedAt",
           "now"
         ],
-        "notes": "Full desk snapshot. This is how clients read settings (prefs + rules). Paper cash/equity are cashUsd / equityUsd. Live book is liveBook. strategy is the trading engine scorecard (settings, watch count, six shadow-book rows, stats, note). perf is timing per pipeline step (sightingToCandidate, candidateToDecision, watchToSignal, signalToFill)."
+        "notes": "Full desk snapshot, cached about 1s unless a log or desk change landed. equity is at most 240 points {t, equity, cash}. This is how clients read settings (prefs + rules). Paper cash/equity are cashUsd / equityUsd. Live book is liveBook. strategy is the trading engine scorecard (settings, watch count, six shadow-book rows, stats, note). perf is timing per pipeline step (sightingToCandidate, candidateToDecision, watchToSignal, signalToFill). Poll paths do not COUNT(*) the events table."
       },
       {
         "method": "GET",
@@ -873,6 +875,15 @@
           "events"
         ],
         "notes": "Default limit 800."
+      },
+      {
+        "method": "GET",
+        "path": "/api/settings",
+        "keyFields": [
+          "ok",
+          "settings"
+        ],
+        "notes": "13.33. The saved settings object only. No equity series and no SPA HTML."
       },
       {
         "method": "POST",
@@ -991,7 +1002,7 @@
           "ok",
           "orders"
         ],
-        "notes": "v13.11 limit / take-profit / stop orders, paper and live."
+        "notes": "v13.11 limit / take-profit / stop orders, paper and live. 13.33 returns that list only and does not build /api/state."
       },
       {
         "method": "POST",
@@ -1028,6 +1039,8 @@
           "usdcBalance",
           "solPriceUsd",
           "balanceAt",
+          "balanceAgeMs",
+          "balanceStale",
           "balanceError",
           "live",
           "liveScope",
@@ -1041,7 +1054,7 @@
           "liveSpentTodayUsd",
           "minFeeSol"
         ],
-        "notes": "Never returns the private key."
+        "notes": "Never returns the private key. 13.33 returns the cached balance immediately (balanceAgeMs, balanceStale) and refreshes off the request."
       },
       {
         "method": "GET",
@@ -1163,10 +1176,10 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.32",
-      "androidVersionCode": 1332,
+      "version": "13.33",
+      "androidVersionCode": 1333,
       "applicationId": "com.dirk.nightdesk",
-      "note": "Code in this branch. Not the host at the 1:46 PM ET pull. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
+      "note": "Code in this branch (13.33). Not the host at the 1:46 PM ET pull. Claude tip 8b3fe9484c12e41efded821e223891907c3051d6. main before this release is 9fbd87b2.",
       "liveOracleUntilThisRelease": {
         "version": "13.29",
         "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
