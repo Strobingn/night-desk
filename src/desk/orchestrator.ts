@@ -395,6 +395,8 @@ export class Desk {
   private liveStartedAt = Date.now();
   /** v13.7 false (default): only Dirk's manual buys go live; the AI keeps buying on paper. */
   private liveAutoBuy = false;
+  /** v13.33 bumped on every snapshot() so a cached copy stays older than the next build. */
+  private snapshotSeq = 0;
   /** v13.5 last read-only wallet balance read. */
   private walletBalances: WalletBalances | null = null;
   private walletInflight: Promise<WalletBalances | null> | null = null;
@@ -1524,7 +1526,7 @@ export class Desk {
     }
     const now = Date.now();
     if (o.book === "live") {
-      const read = await this.liveBalance(false);
+      const read = await this.liveBalance(o.side === "limit_buy" ? "buy" : "exit");
       if (!read || read.error != null || read.sol == null) {
         o.status = "open";
         o.note = `Refused: wallet balance not current${read?.error ? ` (${read.error})` : ""}. Nothing was sent.`;
@@ -2531,7 +2533,9 @@ export class Desk {
     const equityUsd = this.displayEquity();
     const sessionPnlUsd = equityUsd - this.config.startingBalanceUsd;
     const positions = [...this.book.positions.values()].map((pos) => this.view(pos));
+    const seq = ++this.snapshotSeq;
     return {
+      seq,
       liveScope: this.liveBook ? "manual" : null,
       liveBook: this.liveBookView(),
       liveNotArmed: this.liveNotArmedReason(),
@@ -3248,7 +3252,7 @@ export class Desk {
           pos.closing = false;
           return;
         }
-        const read = await this.liveBalance(false);
+        const read = await this.liveBalance("exit");
         if (!read || read.error != null || read.sol == null) {
           throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
         }
@@ -4599,16 +4603,18 @@ export class Desk {
 
   /**
    * A live check still reads the wallet. The wait is bounded so a full Helius queue cannot
-   * hold the buy open. A recent successful cache is used only after that wait, and the
-   * dollar and SOL checks still run on those figures. An error or an empty cache refuses.
+   * hold the order open. Buys fall back only to a successful cache younger than 60s, and the
+   * dollar and SOL checks still run. Exits may use an older successful SOL figure so a stop
+   * is not left open when the last good read is past that window. An error or an empty cache refuses.
    */
-  private async liveBalance(pump: boolean): Promise<WalletBalances | null> {
+  private async liveBalance(kind: "buy" | "exit", pump = false): Promise<WalletBalances | null> {
     const read = await this.refreshWalletBounded(LIVE_BALANCE_WAIT_MS);
-    if (read && read.error == null && read.sol != null && (pump || read.usdc != null)) return read;
+    const usable = (row: WalletBalances | null): row is WalletBalances =>
+      !!row && row.error == null && row.sol != null && (kind === "exit" || pump || row.usdc != null);
+    if (usable(read)) return read;
     const cached = this.walletBalances;
-    if (!cached || cached.error != null || cached.sol == null) return null;
-    if (!pump && cached.usdc == null) return null;
-    if (Date.now() - cached.at > LIVE_BALANCE_CACHE_MS) return null;
+    if (!usable(cached)) return null;
+    if (kind === "buy" && Date.now() - cached.at > LIVE_BALANCE_CACHE_MS) return null;
     return cached;
   }
 
@@ -4639,7 +4645,7 @@ export class Desk {
         };
       }
     }
-    const read = await this.liveBalance(pump);
+    const read = await this.liveBalance("buy", pump);
     if (!read || read.error != null || read.sol == null || (!pump && read.usdc == null)) {
       return { ok: false, error: `Wallet balance unknown${read?.error ? ` (${read.error})` : ""}. Live buy refused.`, code: "LIVE_WALLET" };
     }

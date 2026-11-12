@@ -108,6 +108,15 @@ internal fun deskLinkError(stateOk: Boolean, stateError: String?, walletError: S
     return message.ifBlank { "Desk did not answer" }
 }
 
+/**
+ * v13.33 A snapshot applies only when its seq is newer. seq 0 (an older desk) still applies.
+ * A cached snapshot keeps the seq it was built with, so it cannot roll back a later mark.
+ */
+internal fun acceptSnapshot(seenSeq: Long, seq: Long): Boolean {
+    if (seq <= 0L || seenSeq <= 0L) return true
+    return seq > seenSeq
+}
+
 class DeskRepository private constructor(private val context: Context) {
     private val crashHandler = CoroutineExceptionHandler { _, error ->
         if (error is CancellationException) return@CoroutineExceptionHandler
@@ -199,6 +208,8 @@ class DeskRepository private constructor(private val context: Context) {
     private var walletPollJob: Job? = null
     /** Last wallet-poll failure. Never copied into [_error] while /api/state is succeeding. */
     @Volatile private var walletPollError: String? = null
+    /** Highest snapshot seq applied. A replay of the 1s cache is ignored. */
+    private var seenSnapshotSeq = 0L
     @Volatile private var link = DeskLink("", "")
     private val generation = AtomicInteger(0)
     private var pollMisses = 0
@@ -969,6 +980,8 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     private fun apply(next: DeskSnapshot) {
+        if (!acceptSnapshot(seenSnapshotSeq, next.seq)) return
+        if (next.seq > seenSnapshotSeq) seenSnapshotSeq = next.seq
         val merged = synchronized(tapeLock) {
             for (event in next.events) {
                 val id = event.id.ifBlank { "event-${event.ts}-${tape.size}" }

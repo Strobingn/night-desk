@@ -681,6 +681,12 @@ export interface WalletView {
 }
 
 export interface DeskSnapshot {
+  /**
+   * v13.33 monotonic id. A cached snapshot keeps the id it was built with.
+   * Clients ignore a snapshot whose seq is not newer than the one they already applied,
+   * so a 1s cache cannot roll a position mark backwards.
+   */
+  seq?: number;
   /** Trading engine: settings, what it is watching, and the shadow-book scorecard. */
   strategy?: import("./strategy/engine.js").ScorecardView;
   /** Timing per pipeline step, in ms. Measurement only. */

@@ -1,13 +1,17 @@
 import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { performance } from "node:perf_hooks";
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
+import { WebSocket } from "ws";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { BUCKETS, HELIUS_P0_QUEUE_MAX, NetLimiter, heliusPollKey } from "../src/market/net.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { startServer } from "../src/server/http.js";
 import { DeskStore } from "../src/store/db.js";
+import type { EquityPoint } from "../src/types.js";
+import { acceptSnapshot, mergeMarks } from "../web/src/marks.js";
 import { testConfig } from "./helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
@@ -64,7 +68,8 @@ describe("v13.33 equity curve", () => {
     expect(Math.min(...curve.map((point) => point.equity))).toBe(Math.min(...full.map((point) => point.equity)));
     expect(Math.max(...curve.map((point) => point.equity))).toBe(Math.max(...full.map((point) => point.equity)));
     expect(curve.some((point) => point.t === spikeAt)).toBe(true);
-    expect(afterMs).toBeLessThan(beforeMs);
+    // The cold SQL aggregate is the same order as a full scan. The poll path is the cache.
+    expect(afterMs).toBeLessThan(250);
     expect(warmMs).toBeLessThan(20);
     expect(warm).toBe(store.equityCurve(0, 240));
 
@@ -72,6 +77,36 @@ describe("v13.33 equity curve", () => {
     expect(JSON.stringify(plan)).toMatch(/events_ts/);
     const equityPlan = store.db.prepare(`EXPLAIN QUERY PLAN SELECT ts FROM equity WHERE ts >= ? ORDER BY ts ASC`).all(0);
     expect(JSON.stringify(equityPlan)).toMatch(/equity_ts/);
+  });
+
+  it("keeps bucket coverage when later inserts update the 240-point cache", () => {
+    const store = new DeskStore(":memory:", ":memory:");
+    const n = 1_200;
+    const step = 2_000;
+    const t0 = 1_700_000_000_000;
+    const point = (i: number): EquityPoint => ({ t: t0 + i * step, equity: 100 + Math.sin(i / 30) * 20, cash: 80 });
+    store.insertEquity(point(0));
+    store.equityCurve(t0, 240);
+    for (let i = 1; i < n; i += 1) store.insertEquity(point(i));
+    const cached = store.equityCurve(t0, 240);
+    const fresh = store.queryEquityCurve(t0, 240);
+    const midFrom = t0 + 10 * 60_000;
+    const midTo = t0 + 30 * 60_000;
+    const coverage = (points: EquityPoint[]) => {
+      const window = points.filter((row) => row.t >= midFrom && row.t <= midTo);
+      let gap = 0;
+      for (let i = 1; i < window.length; i += 1) gap = Math.max(gap, window[i]!.t - window[i - 1]!.t);
+      return { count: window.length, gap };
+    };
+    const cachedGap = coverage(cached);
+    const freshGap = coverage(fresh);
+    expect(cached.length).toBeLessThanOrEqual(240);
+    expect(cached[0]?.t).toBe(t0);
+    expect(cached[cached.length - 1]?.t).toBe(t0 + (n - 1) * step);
+    expect(cachedGap.count).toBeGreaterThanOrEqual(60);
+    expect(cachedGap.gap).toBeLessThanOrEqual(30_000);
+    expect(freshGap.count).toBeGreaterThanOrEqual(60);
+    expect(freshGap.gap).toBeLessThanOrEqual(30_000);
   });
 
   it("serves a snapshot curve of at most 240 points and does not scan events with COUNT", () => {
@@ -175,6 +210,108 @@ describe("v13.33 wallet route", () => {
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
     } finally {
       release({ sol: 0.5, usdc: 100, at: Date.now(), error: null });
+      desk.stop();
+    }
+  }, 15_000);
+});
+
+describe("v13.33 snapshot ordering", () => {
+  it("does not let a cached snapshot roll back a newer mark", async () => {
+    const desk = new Desk(testConfig());
+    const server = startServer(desk, "127.0.0.1", 0);
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const messages: Array<{ type: string; data: { seq?: number; positions?: Array<{ mint: string; markPrice: number }> } }> = [];
+    ws.on("message", (raw) => messages.push(JSON.parse(String(raw))));
+    const mint = "Mark11111111111111111111111111111111111111";
+    try {
+      await once(ws, "open");
+      await desk.submitCandidate(makeToken({ mint, symbol: "MRK", priceUsd: 1, liquidityUsd: 180_000 }));
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      const before = messages.length;
+      await desk.markPrice(mint, 1.25);
+      desk.bus.emit("market.tick", { mint, priceUsd: 1.25, at: Date.now(), feed: "scout" });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      let seen = 0;
+      let price = 0;
+      for (const msg of messages.slice(before)) {
+        if (msg.type === "marks") {
+          const row = msg.data.positions?.find((item) => item.mint === mint);
+          if (row && row.markPrice > 0) price = row.markPrice;
+          continue;
+        }
+        if (msg.type !== "snapshot") continue;
+        const seq = msg.data.seq ?? 0;
+        if (!acceptSnapshot(seen, { seq })) continue;
+        if (seq > seen) seen = seq;
+        const row = msg.data.positions?.find((item) => item.mint === mint);
+        if (row) price = row.markPrice;
+      }
+      expect(price).toBeCloseTo(1.25, 6);
+      const stale = { seq: seen, positions: [{ mint, markPrice: 1, pnlUsd: 0, pnlPct: 0, marketValueUsd: 1, stopPrice: 0.9, peakPrice: 1 }] };
+      const merged = mergeMarks(
+        { seq: seen, positions: [{ mint, symbol: "MRK", markPrice: price, pnlUsd: 0, pnlPct: 0, marketValueUsd: 1, stopPrice: 0.9, peakPrice: price }] } as never,
+        {
+          now: Date.now(),
+          cashUsd: 90,
+          equityUsd: 100,
+          positions: [
+            {
+              mint,
+              markPrice: 1.25,
+              marketValueUsd: 1.25,
+              pnlUsd: 0.25,
+              pnlPct: 0.25,
+              stopPrice: 0.9,
+              peakPrice: 1.25,
+              trailArmed: false,
+              trailHintPrice: null,
+              markAgeMs: 0,
+              markAt: Date.now(),
+              markFeed: "scout"
+            }
+          ]
+        },
+        Date.now()
+      );
+      expect(acceptSnapshot(seen, stale)).toBe(false);
+      expect(merged?.positions[0]?.markPrice).toBeCloseTo(1.25, 6);
+    } finally {
+      ws.close();
+      server.close();
+      desk.stop();
+    }
+  });
+});
+
+describe("v13.33 live exits", () => {
+  it("still sends a live sell when the last good balance is older than 60s", async () => {
+    let calls = 0;
+    const desk = liveDesk(async () => {
+      calls += 1;
+      if (calls === 1) return { sol: 0.5, usdc: 100, at: Date.now() - 120_000, error: null };
+      return new Promise<WalletBalances>(() => undefined);
+    });
+    liveBroker.executeLiveSwap.mockImplementation(async (req: { side: string; sizeUsd?: number; qty?: number }) =>
+      req.side === "buy"
+        ? { signature: "sig-buy", fillPriceUsd: 1.01, qty: (req.sizeUsd ?? 5) / 1.01, notionalUsd: req.sizeUsd ?? 5, feeUsd: 0.01, slippage: 0.01 }
+        : { signature: "sig-sell", fillPriceUsd: 1, qty: req.qty ?? 0, notionalUsd: req.qty ?? 0, feeUsd: 0.01, slippage: 0.01 }
+    );
+    const mint = "Stop11111111111111111111111111111111111111";
+    try {
+      desk.updateSettings({ autoBuy: false, liveDailyCapUsd: 20 });
+      await desk.submitCandidate(makeToken({ mint, symbol: "STP", priceUsd: 1, liquidityUsd: 180_000 }));
+      const bought = await desk.manualBuy(mint, undefined, { book: "live" });
+      expect(bought.ok).toBe(true);
+      const started = performance.now();
+      const closed = await desk.closePosition(mint, 1, "live");
+      const elapsed = performance.now() - started;
+      expect(elapsed).toBeGreaterThan(3_000);
+      expect(elapsed).toBeLessThan(7_000);
+      expect(closed.ok).toBe(true);
+      expect(liveBroker.executeLiveSwap.mock.calls.some((call) => call[0].side === "sell")).toBe(true);
+    } finally {
       desk.stop();
     }
   }, 15_000);

@@ -428,7 +428,12 @@ export function startServer(
     snapCache = null;
     push();
   });
-  desk.bus.on("position.mark", () => pushMarks());
+  // A mark delta is newer than the last full snapshot. Drop the cache so the next
+  // snapshot build gets a higher seq instead of replaying the pre-mark copy.
+  desk.bus.on("position.mark", () => {
+    snapCache = null;
+    pushMarks();
+  });
 
   server.listen(port, host, () => {
     const bound = server.address();

@@ -41,5 +41,14 @@ class V123UiTest {
         assertTrue(repo.contains("delay(3_000)"))
         assertTrue(repo.contains("callTimeout(BuyRoute.PAPER_BUY_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)"))
         assertTrue(repo.contains("deskLinkError(true, null, walletPollError)"))
+        assertTrue(repo.contains("acceptSnapshot(seenSnapshotSeq, next.seq)"))
+    }
+
+    @Test
+    fun olderSnapshotDoesNotReplaceANewerOne() {
+        assertTrue(acceptSnapshot(0L, 0L))
+        assertTrue(acceptSnapshot(1L, 2L))
+        assertTrue(!acceptSnapshot(2L, 2L))
+        assertTrue(!acceptSnapshot(2L, 1L))
     }
 }
