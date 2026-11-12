@@ -26,21 +26,21 @@ function rows(count: number, amount = 10) {
 }
 
 describe("v13.29 top-20 holder count", () => {
-  it("counts a full page of real holders as 20 or more and an exact count below that", () => {
+  it("keeps the top-20 page as concentration only and does not invent a holder total", () => {
     const full = parseTop10Pct({ value: rows(LARGEST_HOLDER_CAP, 10) }, 10_000);
-    expect(full.holderCount).toBe(20);
-    expect(full.holderCountAtLeast).toBe(true);
+    expect(full.holderCount).toBeNull();
+    expect(full.holderCountAtLeast).toBe(false);
     expect(full.top10HolderPct).toBeCloseTo(0.01, 8);
 
     const exact = parseTop10Pct({ value: rows(19, 10) }, 10_000);
-    expect(exact.holderCount).toBe(19);
+    expect(exact.holderCount).toBeNull();
     expect(exact.holderCountAtLeast).toBe(false);
 
     const mixed = rows(20, 10);
     mixed[0] = { ...mixed[0]!, owner: "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1" };
     const partial = parseTop10Pct({ value: mixed }, 10_000, { owners: RESERVE_OWNER_SET });
-    expect(partial.holderCount).toBe(19);
-    expect(partial.holderCountAtLeast).toBe(false);
+    expect(partial.holderCount).toBeNull();
+    expect(partial.top10HolderPct).not.toBeNull();
   });
 
   it("passes a holder minimum up to 20 when the top 20 are all real holders", () => {
@@ -125,13 +125,13 @@ describe("v13.29 pool vaults and impossible shares", () => {
     );
     expect(parsed.excludedReserves).toBe(3);
     expect(parsed.top10HolderPct).toBeCloseTo(0.01, 8);
-    expect(parsed.holderCount).toBe(1);
+    expect(parsed.holderCount).toBeNull();
   });
 
   it("fails closed when a computed share is above 100%", () => {
     const parsed = parseTop10Pct({ value: [{ address: "A", owner: "W", uiAmount: 588 }] }, 100);
     expect(parsed.top10HolderPct).toBeNull();
-    expect(parsed.holderCount).toBe(1);
+    expect(parsed.holderCount).toBeNull();
     const result = evaluateFilter(makeToken({ top10HolderPct: parsed.top10HolderPct }), { status: "clean" }, rules);
     expect(result.reasons.map((reason) => reason.code)).toContain("HOLDER_CONCENTRATION");
     expect(result.reasons.find((reason) => reason.code === "HOLDER_CONCENTRATION")?.message).toMatch(/Fail closed/);
@@ -178,7 +178,7 @@ describe("v13.29 pool vaults and impossible shares", () => {
     };
     const token = await enrichSighting({ mint: MINT, source: "pumpfun", observedAt: 1 }, { rpcUrl: ALCHEMY, fetchImpl });
     expect(token.top10HolderPct).toBeNull();
-    expect(token.holderCount).toBe(1);
+    expect(token.holderCount).toBeNull();
   });
 });
 

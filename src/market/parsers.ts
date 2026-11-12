@@ -116,13 +116,13 @@ export function parseTop10Pct(
   const excludedReserves = rows.length - retail.length;
   const amounts = retail.slice(0, 10).map(rowAmount);
   const sum = amounts.reduce((a, b) => a + b, 0);
-  // A full page of 20 real holders is the RPC cap, not the whole set. Count it as 20+.
-  const holderCountAtLeast = rows.length >= LARGEST_HOLDER_CAP && excludedReserves === 0 && retail.length >= LARGEST_HOLDER_CAP;
+  // getTokenLargestAccounts is a top-20 sample. A short page is not the holder
+  // census (a 28k-holder coin has shown up here as 17). Leave the count unknown.
   return {
     top10HolderPct: shareOf(sum, supplyUi),
-    holderCount: retail.length,
+    holderCount: null,
     excludedReserves,
-    holderCountAtLeast
+    holderCountAtLeast: false
   };
 }
 
@@ -243,17 +243,23 @@ export interface ParsedRugcheck {
   devWallet: string | null;
   devHoldingPct: number | null;
   devRug: { rugged: boolean; evidence?: string } | null;
+  /** RugCheck's holder census. Null when the report has no positive total. */
+  totalHolders: number | null;
   riskText: string;
 }
+
+/** RugCheck's placeholder when a market has no LP token to lock. */
+const NO_LP_TOKEN = "11111111111111111111111111111111";
 
 /** Concentrated-liquidity markets have no traditional LP token. They are not an unlock. */
 export function isConcentratedLpMarket(market: Record<string, unknown>): boolean {
   const lp = market.lp as Record<string, unknown> | undefined;
+  if (typeof lp?.lpMint === "string" && lp.lpMint === NO_LP_TOKEN) return true;
   const blob = [market.marketType, market.type, market.dex, market.dexId, market.name, market.label, lp?.type]
     .filter((part) => part != null)
     .join(" ")
     .toLowerCase();
-  return /dlmm|clmm|whirlpool|concentrated|\bcl\b|bin-step|bin step/.test(blob);
+  return /dlmm|clmm|whirlpool|concentrated|damm[_ -]?v2|\bcl\b|bin-step|bin step/.test(blob);
 }
 
 function marketLiquidityUsd(market: Record<string, unknown>): number | null {
@@ -268,6 +274,14 @@ function marketLiquidityUsd(market: Record<string, unknown>): number | null {
   for (const value of [market.liquidityUsd, market.liquidity, lp?.liquidityUsd, lp?.usd]) {
     if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
   }
+  const base = typeof lp?.baseUSD === "number" && Number.isFinite(lp.baseUSD) ? lp.baseUSD : null;
+  const quote = typeof lp?.quoteUSD === "number" && Number.isFinite(lp.quoteUSD) ? lp.quoteUSD : null;
+  if (base != null || quote != null) {
+    const depth = (base ?? 0) + (quote ?? 0);
+    if (depth > 0) return depth;
+  }
+  const locked = typeof lp?.lpLockedUSD === "number" && Number.isFinite(lp.lpLockedUSD) ? lp.lpLockedUSD : null;
+  if (locked != null && locked > 0) return null;
   return null;
 }
 
@@ -394,8 +408,15 @@ export function parseRugcheckReport(report: unknown, mint?: string, extraAddress
     devWallet,
     devHoldingPct,
     devRug,
+    totalHolders: holderTotal((data as { totalHolders?: unknown }).totalHolders),
     riskText: names.join("\n")
   };
+}
+
+function holderTotal(value: unknown): number | null {
+  const count = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return Math.floor(count);
 }
 
 /**

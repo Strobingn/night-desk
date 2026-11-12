@@ -27,7 +27,7 @@ describe("Pump reserve exclusion", () => {
     );
     expect(parsed.excludedReserves).toBe(2);
     expect(parsed.top10HolderPct).toBeCloseTo(0.06, 8);
-    expect(parsed.holderCount).toBe(2);
+    expect(parsed.holderCount).toBeNull();
   });
 
   it("treats a curve-only largest-account list as measured, not missing", () => {
