@@ -68,7 +68,7 @@
   },
   "hardRules": [
     "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live. The 13.30 engine buys the paper book only and its exits do not set book live.",
-    "The desk hard stop is checked before an engine exit. A mark at or past that stop closes as STOP_LOSS or GAP_RUG. The engine stop (1% on the main paper book) can only be tighter. The $10 UTC-day paper-loss pause stays (STRATEGY.dailyMaxLossUsd).",
+    "The desk hard stop is checked before an engine exit. A mark at or past that stop closes as STOP_LOSS or GAP_RUG. The engine stop (1% on the main paper book) can only be tighter. Since 13.38 it is measured from the entry mark, like the hard stop, not from the fill. The $10 UTC-day paper-loss pause stays (STRATEGY.dailyMaxLossUsd).",
     "Never drop the v13.11 baseline controls: paper and live limit / take-profit / stop orders (GET/POST /api/orders, POST /api/orders/cancel), and the rest of the v13.11 book and ticket UI.",
     "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or ≤0) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25× or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
     "The hard stop cannot be loosened past 6%. LIVE_TRADING, the wallet secret, and mode cannot be changed from the API.",

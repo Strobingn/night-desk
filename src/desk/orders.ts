@@ -1,3 +1,4 @@
+import { pctText } from "../rules.js";
 /**
  * v13.11 limit and stop orders on the paper and live books.
  *
@@ -162,7 +163,7 @@ export function resolveOrder(
     if (floor != null && floor > 0 && trigger < floor * (1 - 1e-9)) {
       return {
         ok: false,
-        error: `Your −${(ctx.hardStopPct * 100).toFixed(0)}% hard stop at ${px(floor)} sells first. A custom stop can only be tighter: set it above ${px(floor)}.`
+        error: `Your −${pctText(ctx.hardStopPct)} hard stop at ${px(floor)} sells first. A custom stop can only be tighter: set it above ${px(floor)}.`
       };
     }
   }

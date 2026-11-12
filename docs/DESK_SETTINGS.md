@@ -310,4 +310,10 @@ Phone redesign. Five tabs (Home, Tape, Search, Engine, Settings); Recap, Link an
 
 ## 13.38 notes
 
-Phone only: the Home charts. Position cards get a time-based price chart (entry and stop levels, low and high, finger readout when expanded) and the equity curve gets 1H / 6H / 1D / All windows. No desk setting, endpoint, limit or trading behavior changed.
+Phone only: the Home charts. Position cards get a time-based price chart (entry and stop levels, low and high, finger readout when expanded) and the equity curve gets 1H / 6H / 1D / All windows. No desk setting, endpoint or limit changed.
+
+Math audit, same version. The paper fill model was checked against an exact constant-product pool and matches. Three things were wrong and are fixed:
+
+- The engine's stop (1%, 3% or 6%) was measured from the fill. The fill sits above the mark by entry slippage, so the stop was closer than its percent, and in a pool under about $11,600 a $50 buy was already past its 1% stop at an unchanged price. It is now measured from the entry mark, the same as the hard stop. Shadow books use the same rule, so results before and after this version are not comparable; reset the scorecard.
+- A hard stop with a fraction (2.5%) was printed rounded ("limit -3%") in the stop message, the gap message, the custom-stop error and the start log. The line itself was always right. The labels now show 2.5%.
+- A position the engine opened showed the desk's hard stop as its stop. It now shows the tighter engine stop, the one that fires first. The advisor's stop distance also used the fill and now uses the entry mark.

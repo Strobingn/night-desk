@@ -1,5 +1,5 @@
 import type { ReasonCode, Rejection } from "../types.js";
-import type { ResolvedRules } from "../rules.js";
+import { pctText, type ResolvedRules } from "../rules.js";
 
 export interface RiskPositionState {
   entryPrice: number;
@@ -62,7 +62,7 @@ export function assessPosition(
     return {
       action: "stop",
       code: "STOP_LOSS",
-      message: `Hard stop: mark is ${(fromMark * 100).toFixed(2)}% from the entry mark (limit -${(rules.stopLossPct * 100).toFixed(0)}%).`,
+      message: `Hard stop: mark is ${(fromMark * 100).toFixed(2)}% from the entry mark (limit -${pctText(rules.stopLossPct)}).`,
       pnlPct: fromMark,
       peakPrice: peak,
       trailArmed,

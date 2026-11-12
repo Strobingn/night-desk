@@ -384,3 +384,9 @@ export function liveTrailFromWire(raw: number): number {
   const fraction = raw >= 0.5 ? raw / 100 : raw;
   return Math.round(Math.min(LIVE_BAND.trailPct.max, Math.max(LIVE_BAND.trailPct.min, fraction)) * 10_000) / 10_000;
 }
+
+/** A fraction as a percent label without rounding a half away: 0.025 → "2.5%", 0.06 → "6%". */
+export function pctText(fraction: number): string {
+  if (!Number.isFinite(fraction)) return "—";
+  return `${Number((fraction * 100).toFixed(2))}%`;
+}

@@ -6,11 +6,11 @@ import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
 import { randomUUID } from "node:crypto";
 import { assessPosition, entryAllowed } from "../agents/risk.js";
-import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailArmFraction, TRAIL_ARM_MAX, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire } from "../rules.js";
+import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHours, clampDailyLossUsd, clampDevHoldingPct, clampEntrySlippage, clampExitSlippage, slippageFromWire, clampHolderCount, clampLiquidityUsd, clampOpenPositions, clampPnlAlertPct, clampPositionPct, clampExposurePct, clampPositionUsd, clampResetUsd, SIZING_BAND, clampScore, clampStopLossPct, clampTop10, clampTradesPerHour, clampTrailArmPct, clampTrailArmFraction, TRAIL_ARM_MAX, clampTrailGapPct, clampVolumeUsd, OPEN_POSITION_BAND, VOLUME_BOOST_BAND, clampVolumeBoost, POSITION_REFRESH_BAND, clampPositionRefreshMs, LIVE_BAND, clampLiveTradeUsd, clampLiveDailyCapUsd, liveTrailFromWire, pctText } from "../rules.js";
 import { autoBuyBlock } from "./auto-gates.js";
 import { STRATEGY } from "../strategy/config.js";
 import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
-import { assessStrategyExit, type StrategyMeta } from "../strategy/exits.js";
+import { assessStrategyExit, strategyStopPrice, type StrategyMeta } from "../strategy/exits.js";
 import { BoundedMap, LatencyStats } from "../strategy/latency.js";
 import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
@@ -851,7 +851,7 @@ export class Desk {
     }, 30_000);
     this.markEquity();
     console.log(
-      `[desk] ${this.config.mode.toUpperCase()} feed=${this.config.feedMode} demo=${this.config.demoFeed} cap=${(this.config.rules.maxPositionPct * 100).toFixed(0)}% stop=-${(this.config.rules.stopLossPct * 100).toFixed(0)}% winners=manual`
+      `[desk] ${this.config.mode.toUpperCase()} feed=${this.config.feedMode} demo=${this.config.demoFeed} cap=${(this.config.rules.maxPositionPct * 100).toFixed(0)}% stop=-${pctText(this.config.rules.stopLossPct)} winners=manual`
     );
   }
 
@@ -1362,6 +1362,7 @@ export class Desk {
     const net = realizablePnl({ markPrice: mark, qty: pos.qty, costUsd: pos.costUsd, liquidityUsd, markAt, now });
     const verdict = assessStrategyExit({
       entryPrice: pos.entryPrice,
+      entryMark: pos.entryMark,
       openedAt: pos.openedAt,
       mark,
       markFresh: now - markAt <= STRATEGY.watch.markFreshMs,
@@ -3546,7 +3547,7 @@ export class Desk {
     const vsEntry = (p: number) => (pos.entryPrice > 0 ? ` (${signedPctText(p / pos.entryPrice - 1)})` : "");
     const compared =
       exitCode === "GAP_RUG"
-        ? `Gap/${label.rug ? "rug" : "gap"}: stop line ${price(stopPrice)} (−${(this.config.rules.stopLossPct * 100).toFixed(0)}%), trigger mark ${price(order.markPrice)}${vsEntry(order.markPrice)}, true fill ${price(fillPrice)}${vsEntry(fillPrice)}. The price moved past the stop between marks; a stop cannot fill better than the market.`
+        ? `Gap/${label.rug ? "rug" : "gap"}: stop line ${price(stopPrice)} (−${pctText(this.config.rules.stopLossPct)}), trigger mark ${price(order.markPrice)}${vsEntry(order.markPrice)}, true fill ${price(fillPrice)}${vsEntry(fillPrice)}. The price moved past the stop between marks; a stop cannot fill better than the market.`
         : `Stop trigger ${price(stopPrice)} vs fill ${price(fillPrice)}.`;
     this.store.closeTrade(closed);
     const lesson = noteOutcome(this.advisor.memory, pos.mint, pnlPct, pnlPct > 0);
@@ -3665,7 +3666,8 @@ export class Desk {
       pnlPct: pos.entryPrice > 0 ? (markPrice - pos.entryPrice) / pos.entryPrice : 0,
       peakPrice: assessment.peakPrice,
       trailArmed: assessment.trailArmed,
-      stopPrice: assessment.stopPrice,
+      // An engine position sells at its own tighter stop first; show the line that actually fires.
+      stopPrice: pos.strategy ? Math.max(assessment.stopPrice, strategyStopPrice(pos.entryPrice, pos.entryMark, pos.strategy.stopPct)) : assessment.stopPrice,
       trailHintPrice: assessment.trailHintPrice,
       score: pos.score,
       source: pos.source,
@@ -3716,7 +3718,7 @@ export class Desk {
           symbol: pos.symbol,
           pnlPct: pos.entryPrice > 0 ? (markPrice - pos.entryPrice) / pos.entryPrice : 0,
           markPrice,
-          stopPrice: pos.entryPrice * (1 - stopLoss),
+          stopPrice: (pos.entryMark != null && pos.entryMark > 0 ? pos.entryMark : pos.entryPrice) * (1 - stopLoss),
           entryPrice: pos.entryPrice,
           entryLiquidityUsd: pos.liquidityUsd,
           markLiquidityUsd: this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd,

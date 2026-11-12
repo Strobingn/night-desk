@@ -27,7 +27,7 @@ describe("shadow book", () => {
     const b = book("launch-1");
     const opened = b.open(coin(), t0);
     if (!opened.ok) throw new Error("no fill");
-    const entry = opened.position.entryPrice;
+    const entry = opened.position.entryMark;
     expect(b.onMark("A", entry * 0.995, t0 + 5_000)).toBeNull();
     const mark = entry * 0.989;
     const trade = b.onMark("A", mark, t0 + 10_000);
@@ -44,7 +44,7 @@ describe("shadow book", () => {
     const tight = book("launch-1");
     const wide = book("launch-6");
     for (const b of [tight, wide]) b.open(coin(), t0);
-    const entry = tight.positions.get("A")!.entryPrice;
+    const entry = tight.positions.get("A")!.entryMark;
     expect(tight.onMark("A", entry * 0.98, t0 + 5_000)?.exitCode).toBe("STRATEGY_STOP");
     expect(wide.onMark("A", entry * 0.98, t0 + 5_000)).toBeNull();
     expect(wide.onMark("A", entry * 0.94, t0 + 9_000)?.exitCode).toBe("STRATEGY_STOP");

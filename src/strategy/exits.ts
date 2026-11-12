@@ -1,3 +1,4 @@
+import { pctText } from "../rules.js";
 import { STRATEGY, type SignalKind, type StrategyConfig } from "./config.js";
 
 /** Saved on a position the engine opened. */
@@ -14,6 +15,8 @@ export type StrategyExitCode = "TAKE_PROFIT" | "STRATEGY_STOP" | "BREAKEVEN_STOP
 
 export interface StrategyExitInput {
   entryPrice: number;
+  /** The mark the buy was sized against. The stop is measured from it; the fill when it is missing. */
+  entryMark?: number;
   openedAt: number;
   mark: number;
   /** False when the mark is too old to act on for anything but the stop. */
@@ -35,6 +38,16 @@ export interface StrategyExit {
 const usd = (n: number) => `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
 
 /**
+ * The engine stop line. Measured from the mark the buy was priced at, like the desk's hard stop.
+ * The fill sits above that mark by entry slippage, so a stop measured from the fill is closer than
+ * its percent says, and in a thin pool it is already hit on the first unchanged mark.
+ */
+export function strategyStopPrice(entryPrice: number, entryMark: number | undefined, stopPct: number): number {
+  const basis = entryMark != null && entryMark > 0 && Number.isFinite(entryMark) ? entryMark : entryPrice;
+  return basis * (1 - stopPct);
+}
+
+/**
  * The engine's own exits, checked after the desk's hard stop. Order: stop, take-profit,
  * breakeven, time limit. Only the stop may act on a mark that is not fresh.
  */
@@ -43,12 +56,13 @@ export function assessStrategyExit(input: StrategyExitInput, cfg: StrategyConfig
   const hold = (armBreakeven = false): StrategyExit => ({ action: "hold", message: "Holding.", armBreakeven });
   if (!(mark > 0) || !Number.isFinite(mark) || !(entryPrice > 0) || !Number.isFinite(entryPrice)) return hold();
 
-  const stopPrice = entryPrice * (1 - meta.stopPct);
+  const stopPrice = strategyStopPrice(entryPrice, input.entryMark, meta.stopPct);
   if (mark <= stopPrice * (1 + 1e-9)) {
+    const basis = stopPrice / (1 - meta.stopPct);
     return {
       action: "exit",
       code: "STRATEGY_STOP",
-      message: `${(meta.stopPct * 100).toFixed(0)}% stop: mark is ${((mark / entryPrice - 1) * 100).toFixed(2)}% from the fill.`,
+      message: `${pctText(meta.stopPct)} stop: mark is ${((mark / basis - 1) * 100).toFixed(2)}% from the entry mark.`,
       armBreakeven: false
     };
   }

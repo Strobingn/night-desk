@@ -69,7 +69,7 @@ With the engine on, a coin that passes Filter and Analyst is not bought on sight
 | Launch | under 30 minutes old | up 2% or more across 3+ quotes spanning 20 s or more, with 5m volume at 1.5× the hourly pace |
 | Momentum | 30 minutes or older | up 3% or more inside 5 minutes (90 s or more of history), 5m volume at 1.5× the hourly pace, 1h change positive |
 
-A signal opens a $50 paper position, two open at most. It closes on its own at the first of: $3 net of modeled fees and slippage, its stop (1% from the fill by default), breakeven once the trade has been halfway to target, or a time limit (10 minutes for Launch, 30 for Momentum). The −6% hard stop is checked first and is unchanged. New engine buys pause for the rest of the UTC day once the paper book is $10 down.
+A signal opens a $50 paper position, two open at most. It closes on its own at the first of: $3 net of modeled fees and slippage, its stop (1% under the mark it was bought at by default), breakeven once the trade has been halfway to target, or a time limit (10 minutes for Launch, 30 for Momentum). The −6% hard stop is checked first and is unchanged. New engine buys pause for the rest of the UTC day once the paper book is $10 down.
 
 Six shadow books take every signal at the same time, Launch and Momentum each with a 1%, 3% and 6% stop. They use the same fill model, start at $100 each, and place no orders. The scorecard shows trades, win rate, average win and loss, net and worst drawdown per book, and marks a book Ready at 200 trades with a net profit. Ready is information. It does not arm live trading.
 

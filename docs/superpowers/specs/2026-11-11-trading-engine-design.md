@@ -50,7 +50,7 @@ Thresholds above are starting values and live in one config object.
 All automatic, checked on the existing position loop:
 
 1. **Take-profit.** Estimated net P&L (existing net-of-costs math) reaches the target, $3.
-2. **Stop.** Mark falls the variant's stop percent below the fill. Never looser than the
+2. **Stop.** Mark falls the variant's stop percent below the entry mark (13.38; it was the fill). Never looser than the
    desk's 6% hard stop, which is untouched.
 3. **Breakeven.** Once net P&L reaches half the target, the stop moves up to the price where
    the trade nets zero.

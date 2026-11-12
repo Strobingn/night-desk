@@ -16,6 +16,8 @@ export interface ShadowPosition {
   symbol: string;
   qty: number;
   entryPrice: number;
+  /** The mark the buy was priced at. The stop is measured from it. */
+  entryMark: number;
   costUsd: number;
   openedAt: number;
   liquidityUsd: number;
@@ -94,6 +96,7 @@ export class ShadowBook {
       symbol: token.symbol,
       qty: quote.qty,
       entryPrice: quote.fillPrice,
+      entryMark: token.priceUsd,
       costUsd: sizeUsd,
       openedAt: now,
       liquidityUsd: token.liquidityUsd,
@@ -148,6 +151,7 @@ export class ShadowBook {
     const verdict = assessStrategyExit(
       {
         entryPrice: pos.entryPrice,
+        entryMark: pos.entryMark,
         openedAt: pos.openedAt,
         mark: pos.lastMark,
         markFresh,
