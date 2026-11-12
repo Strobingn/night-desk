@@ -810,8 +810,11 @@ private fun EngineLine(engine: com.dirk.nightdesk.StrategyView, open: Int, onOpe
 private fun HeroCard(snap: DeskSnapshot?, openPnl: Double) {
     val equity = snap?.equityUsd ?: 0.0
     val start = snap?.startingBalanceUsd ?: 100.0
-    val midnight = java.time.LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    val base = com.dirk.nightdesk.dayBase(snap?.equityPoints.orEmpty(), start, midnight)
+    // Worked out when the curve changes, not on every redraw of Home.
+    val base = remember(snap?.equityPoints, start) {
+        val midnight = java.time.LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        com.dirk.nightdesk.dayBase(snap?.equityPoints.orEmpty(), start, midnight)
+    }
     val day = equity - base
     val session = snap?.sessionPnlUsd ?: 0.0
     fun tint(n: Double) = if (n > 0) P.up else if (n < 0) P.down else P.ink
@@ -835,7 +838,7 @@ private fun HeroCard(snap: DeskSnapshot?, openPnl: Double) {
                 Text(signed(day) + (if (base > 0) "  ${pct(day / base)}" else ""), color = tint(day), fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
             }
         }
-        Sparkline(snap?.equityPoints.orEmpty().map { it.equity }, start, Modifier.padding(top = 8.dp, bottom = 8.dp))
+        PerformanceChart(snap?.equityPoints.orEmpty(), start, Modifier.padding(top = 8.dp, bottom = 10.dp))
         Row(Modifier.fillMaxWidth()) {
             Stat("Cash", money(snap?.cashUsd))
             Stat("Open", "${snap?.positions?.size ?: 0} · ${signed(openPnl)}", tint(openPnl))
@@ -1261,7 +1264,7 @@ private fun OpenPositionCard(
             }
         }
         MarkUpdated(pos)
-        CoinSpark(pos.marks, pos.entryPrice, height = if (expanded) 36.dp else 20.dp)
+        CoinChart(pos, expanded)
         if (!expanded) {
             // Collapsed: how far the mark sits above the stop, as a thin bar.
             val room = stopRoom(pos)
@@ -1363,34 +1366,6 @@ private fun OpenPositionCard(
             },
             dismissButton = { TextButton(onClick = { sellAsk = null }) { Text("Cancel", color = Dim) } }
         )
-    }
-}
-
-@Composable
-private fun CoinSpark(points: List<PricePoint>, entry: Double, height: androidx.compose.ui.unit.Dp = 36.dp) {
-    if (points.isEmpty()) return
-    val drawn = if (points.size >= 2) points else listOf(points[0], points[0])
-    val up = drawn.last().priceUsd >= entry
-    val color = if (up) P.up else P.down
-    Canvas(Modifier.fillMaxWidth().height(height).padding(top = 4.dp)) {
-        var min = drawn[0].priceUsd
-        var max = drawn[0].priceUsd
-        for (p in drawn) {
-            if (p.priceUsd < min) min = p.priceUsd
-            if (p.priceUsd > max) max = p.priceUsd
-        }
-        if (entry.isFinite() && entry > 0.0) {
-            if (entry < min) min = entry
-            if (entry > max) max = entry
-        }
-        val span = if (max - min > 0.0) max - min else 1.0
-        val path = Path()
-        drawn.forEachIndexed { i, p ->
-            val x = i.toFloat() / (drawn.size - 1).toFloat() * size.width
-            val y = size.height - ((p.priceUsd - min) / span).toFloat() * size.height
-            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-        }
-        drawPath(path, color, style = Stroke(width = 2.5f))
     }
 }
 
