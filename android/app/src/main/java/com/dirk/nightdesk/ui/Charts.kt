@@ -21,6 +21,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -76,15 +79,19 @@ fun LineChart(
     scrub: Boolean = false,
     onScrub: (Int) -> Unit = {}
 ) {
-    var scrubAt by remember(model) { mutableIntStateOf(-1) }
+    // The finger's place is kept as a share of the width, not as a point index, and the gesture is
+    // not keyed on the model: a new sample every few seconds must not cancel a held finger.
+    var scrubX by remember(scrub) { mutableFloatStateOf(-1f) }
+    val scrubAt = if (scrubX >= 0f && model.points.size >= 2) ChartMath.nearest(model, scrubX) else -1
+    val report by rememberUpdatedState(onScrub)
+    LaunchedEffect(scrubAt) { report(scrubAt) }
     val measurer = rememberTextMeasurer()
     val labelStyle = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     val ink = P.ink
     val card = P.card
-    val gesture = if (!scrub || model.points.size < 2) Modifier else Modifier.pointerInput(model) {
+    val gesture = if (!scrub) Modifier else Modifier.pointerInput(Unit) {
         fun at(x: Float) {
-            val i = ChartMath.nearest(model, if (size.width > 0) x / size.width else 0f)
-            if (i != scrubAt) { scrubAt = i; onScrub(i) }
+            scrubX = if (size.width > 0) (x / size.width).coerceIn(0f, 1f) else 0f
         }
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
@@ -100,8 +107,7 @@ fun LineChart(
                     at(change.position.x)
                 }
             }
-            scrubAt = -1
-            onScrub(-1)
+            scrubX = -1f
         }
     }
     Box(
@@ -177,7 +183,7 @@ fun CoinChart(pos: PositionRow, expanded: Boolean) {
     if (model.empty) return
     val up = model.last >= pos.entryPrice
     val color = if (up) P.up else P.down
-    var scrubAt by remember(model) { mutableIntStateOf(-1) }
+    var scrubAt by remember { mutableIntStateOf(-1) }
     val levels = if (expanded) {
         listOf(ChartLevel(pos.entryPrice, P.muted, "entry"), ChartLevel(pos.stopPrice, P.down, "stop"))
     } else {
@@ -237,7 +243,7 @@ fun PerformanceChart(points: List<EquityPoint>, startBalance: Double, modifier: 
     val from = if (range == ChartRange.ALL || model.empty) startBalance else model.first
     val change = (if (model.empty) startBalance else model.last) - from
     val color = if (change >= 0) P.up else P.down
-    var scrubAt by remember(model) { mutableIntStateOf(-1) }
+    var scrubAt by remember { mutableIntStateOf(-1) }
     val point = model.points.getOrNull(scrubAt)
     Column(modifier.fillMaxWidth().testTag("performance-chart")) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
