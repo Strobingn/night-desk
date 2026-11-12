@@ -25,7 +25,10 @@ data class MarkDelta(
     /** Null when this delta omitted marks. */
     val marks: List<PricePoint>? = null,
     val safetyChip: String = "",
-    val bundleChip: String = ""
+    val bundleChip: String = "",
+    val liquidityNote: String = "",
+    /** True when this delta included liquidityNote (including JSON null / empty). */
+    val liquidityNoteKnown: Boolean = false
 )
 
 data class MarksMessage(
@@ -129,7 +132,9 @@ private fun parseMarkRows(rows: org.json.JSONArray?): List<MarkDelta> {
                     netKnown = row.has("netPnlUsd"),
                     marks = parsePricePoints(row),
                     safetyChip = row.optString("safetyChip"),
-                    bundleChip = row.optString("bundleChip")
+                    bundleChip = row.optString("bundleChip"),
+                    liquidityNote = row.optString("liquidityNote"),
+                    liquidityNoteKnown = row.has("liquidityNote")
                 )
             )
         }
@@ -180,7 +185,8 @@ private fun mergeMarkRows(rows: List<PositionRow>, deltas: List<MarkDelta>, rece
             exitSlippage = if (d.netKnown) d.exitSlippage else row.exitSlippage,
             marks = d.marks ?: row.marks,
             safetyChip = d.safetyChip.ifBlank { row.safetyChip },
-            bundleChip = d.bundleChip.ifBlank { row.bundleChip }
+            bundleChip = d.bundleChip.ifBlank { row.bundleChip },
+            liquidityNote = if (d.liquidityNoteKnown) d.liquidityNote else row.liquidityNote
         )
     }
     return Pair(merged, touched)

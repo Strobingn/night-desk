@@ -5,6 +5,17 @@ export const QUOTE_TIMEOUT_MS = 8_000;
 export const SWAP_TIMEOUT_MS = 8_000;
 /** Confirmation used to wait until the blockhash expired. Bound it so the desk can answer. */
 export const CONFIRM_TIMEOUT_MS = 20_000;
+/**
+ * v13.39: a live *sell* must answer in a few seconds — no route, liquidity gone, or
+ * exit impact — so the phone's live client can show the reason instead of "timeout".
+ * Live buys keep the 8s quote budget. This cap covers decimals, token-account, and quote
+ * before a transaction exists. A send already in flight is not aborted.
+ */
+export const SELL_PRE_SEND_MS = 4_000;
+export const NO_SELL_ROUTE_MESSAGE = "Liquidity gone, no sell route. Nothing was sent.";
+export const SELL_QUOTE_TIMEOUT_MESSAGE = "Live sell quote timed out. Nothing was sent.";
+export const SELL_EXIT_IMPACT_MESSAGE = (slippage: number, cap: number): string =>
+  `Live exit would cost ${(slippage * 100).toFixed(2)}%, more than your ${(cap * 100).toFixed(2)}% exit slippage setting. Nothing was sent.`;
 
 /**
  * A live swap that did not become a booked fill.
@@ -54,6 +65,34 @@ export function unconfirmedSend(signature: string | null, side: "buy" | "sell"):
 
 export function rejectedSend(signature: string, side: "buy" | "sell"): LiveSubmitError {
   return new LiveSubmitError(`Live ${side} transaction ${signature} failed on chain. Nothing was filled.`, "rejected", signature);
+}
+
+/** Jupiter lite-api returns HTTP 400 `{ errorCode: "NO_ROUTES_FOUND" }` when the pool cannot be sold. */
+export function isNoRoutesBody(status: number, body: unknown): boolean {
+  if (status !== 400 && status !== 404) return false;
+  const text =
+    typeof body === "string"
+      ? body
+      : body && typeof body === "object"
+        ? `${(body as { errorCode?: unknown; error?: unknown }).errorCode ?? ""} ${(body as { error?: unknown }).error ?? ""} ${JSON.stringify(body)}`
+        : "";
+  return /NO_ROUTES_FOUND|No routes found/i.test(text);
+}
+
+export function isNoSellRouteMessage(message: string): boolean {
+  return /liquidity gone, no sell route|NO_ROUTES_FOUND|No routes found/i.test(message);
+}
+
+export function noSellRouteError(): LiveSubmitError {
+  return new LiveSubmitError(NO_SELL_ROUTE_MESSAGE, "not_submitted", null);
+}
+
+export function sellQuoteTimeoutError(): LiveSubmitError {
+  return new LiveSubmitError(SELL_QUOTE_TIMEOUT_MESSAGE, "not_submitted", null);
+}
+
+export function sellExitImpactError(slippage: number, cap: number): LiveSubmitError {
+  return new LiveSubmitError(SELL_EXIT_IMPACT_MESSAGE(slippage, cap), "not_submitted", null);
 }
 
 export function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {

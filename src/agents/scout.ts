@@ -270,7 +270,7 @@ export class Scout {
   tick(
     mint: string,
     priceUsd: number,
-    origin?: { feed?: string; pairAddress?: string; dex?: string; liquidityUsd?: number }
+    origin?: { feed?: string; pairAddress?: string; dex?: string; liquidityUsd?: number; quoteUsd?: number }
   ): void {
     this.opts.bus.emit("market.tick", { mint, priceUsd, at: Date.now(), ...origin });
   }

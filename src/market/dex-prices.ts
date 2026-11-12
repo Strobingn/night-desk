@@ -13,6 +13,33 @@ export interface DexQuote {
   dex?: string;
   /** v13.2: SOL per token when the pool is quoted in SOL (DexScreener priceNative). */
   priceNative?: number;
+  /** v13.39: quote-token liquidity in USD. Distinct from liquidity.usd, which can be tokens × a stale mid. */
+  quoteUsd?: number;
+}
+
+/**
+ * Quote-side USD from a DexScreener pair: quote-token units × implied quote-token price
+ * (priceUsd / priceNative). A USDC-quoted pool with no priceNative treats quote units as dollars.
+ * This is the residual a seller can actually take — not tokens × mid.
+ */
+export function quoteUsdFromDexPair(pair: {
+  priceUsd?: string | number;
+  priceNative?: string | number;
+  liquidity?: { usd?: number; base?: number; quote?: number } | null;
+}): number | undefined {
+  const liq = pair.liquidity;
+  if (!liq) return undefined;
+  const quoteAmt = Number(liq.quote);
+  if (!Number.isFinite(quoteAmt) || quoteAmt < 0) return undefined;
+  const priceUsd = Number(pair.priceUsd);
+  const priceNative = Number(pair.priceNative);
+  if (priceUsd > 0 && priceNative > 0 && Number.isFinite(priceUsd) && Number.isFinite(priceNative)) {
+    const usd = quoteAmt * (priceUsd / priceNative);
+    if (Number.isFinite(usd) && usd >= 0) return usd;
+    return undefined;
+  }
+  // No native price: quote units are already the quote mint (typically USDC).
+  return quoteAmt;
 }
 
 /**
@@ -35,7 +62,7 @@ export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fet
     const rows = (await res.json()) as Array<{
       baseToken?: { address?: string };
       priceUsd?: string | number;
-      liquidity?: { usd?: number };
+      liquidity?: { usd?: number; base?: number; quote?: number };
       pairAddress?: string;
       dexId?: string;
       priceNative?: string | number;
@@ -50,6 +77,7 @@ export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fet
       const liquidityUsd = Number(row.liquidity?.usd) || 0;
       const prev = best.get(mint);
       if (!prev || liquidityUsd > prev.liquidityUsd) {
+        const quoteUsd = quoteUsdFromDexPair(row);
         best.set(mint, {
           priceUsd,
           liquidityUsd,
@@ -58,7 +86,8 @@ export async function fetchDexQuotes(mints: string[], fetchImpl: FetchLike = fet
           dex: typeof row.dexId === "string" ? row.dexId : undefined,
           ...(row.quoteToken?.address === WSOL && Number(row.priceNative) > 0 && Number.isFinite(Number(row.priceNative))
             ? { priceNative: Number(row.priceNative) }
-            : {})
+            : {}),
+          ...(quoteUsd != null ? { quoteUsd } : {})
         });
       }
     }

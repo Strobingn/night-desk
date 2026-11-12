@@ -49,7 +49,9 @@ data class PositionRow(
     /** v13.23 "Safe", "Blocked: …", or "Unknown". */
     val safetyChip: String = "",
     /** v13.23 "Bundled 24%" when the creation slot is flagged. */
-    val bundleChip: String = ""
+    val bundleChip: String = "",
+    /** v13.39: quote side drained or no sell route. Mid is not sellable value. */
+    val liquidityNote: String = ""
 ) {
     val stopDistancePct: Double
         get() {
@@ -988,7 +990,8 @@ internal fun parsePositionRows(positions: org.json.JSONArray?, receivedAt: Long,
                         exitSlippage = row.optNullableFinite("exitSlippage"),
                         marks = parsePricePoints(row) ?: emptyList(),
                         safetyChip = row.optText("safetyChip"),
-                        bundleChip = row.optText("bundleChip")
+                        bundleChip = row.optText("bundleChip"),
+                        liquidityNote = row.optText("liquidityNote")
                     )
                 )
             }

@@ -1236,9 +1236,14 @@ private fun OpenPositionCard(
                 }
             }
             Column(horizontalAlignment = Alignment.End) {
+                if (pos.liquidityNote.isNotBlank()) {
+                    Text(pos.liquidityNote, color = P.down, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+                } else {
                 PnlChip(pos.pnlUsd, pos.pnlPct)
                 Text(money(pos.marketValueUsd), color = P.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
-                if (expanded) {
+                }
+                if (expanded && pos.liquidityNote.isBlank()) {
                     val net = pos.netPnlUsd
                     val netText = if (net != null && net.isFinite()) {
                         val pct = pos.netPnlPct
@@ -1279,7 +1284,7 @@ private fun OpenPositionCard(
         ) {
             Row {
                 PosStat("Entry", px(pos.entryPrice))
-                PosStat("Mark", px(pos.markPrice), if (up) P.up else P.down)
+                PosStat("Mark", if (pos.liquidityNote.isNotBlank()) "—" else px(pos.markPrice), if (pos.liquidityNote.isNotBlank()) P.down else if (up) P.up else P.down)
                 PosStat("Stop", fmtPx(pos.stopPrice), P.down)
             }
             Row {

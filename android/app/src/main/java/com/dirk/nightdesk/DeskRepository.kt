@@ -815,7 +815,9 @@ class DeskRepository private constructor(private val context: Context) {
             val body = JSONObject().put("mint", mint).put("percent", 100).put("idemKey", OneTap.newIdemKey())
             if (live) body.put("book", "live")
             val started = System.nanoTime()
-            val notice = sendRaw("$base/api/positions/sell", body.toString()).fold(
+            // v13.39: live sells use the 45s client so a 4s no-route refusal is shown, not "timeout".
+            val client = if (live) liveHttp else http
+            val notice = sendRaw("$base/api/positions/sell", body.toString(), client).fold(
                 onSuccess = { (code, raw) ->
                     val json = runCatching { JSONObject(raw) }.getOrNull()
                     val ok = code in 200..299 && json?.optBoolean("ok", false) == true
@@ -963,8 +965,26 @@ class DeskRepository private constructor(private val context: Context) {
         // v13.7: a live-book position names its book; no book = the paper book.
         val body = JSONObject().put("mint", mint)
         if (live) body.put("book", "live")
-        post("$base/api/positions/close", body.toString()).map { }
-            .also { refresh() }
+        // v13.39: live closes use the 45s client and surface the refusal text, not a 12s timeout.
+        val client = if (live) liveHttp else http
+        sendRaw("$base/api/positions/close", body.toString(), client).fold(
+            onSuccess = { (code, raw) ->
+                val json = runCatching { JSONObject(raw) }.getOrNull()
+                val ok = code in 200..299 && json?.optBoolean("ok", true) != false
+                if (!ok) {
+                    val text = OneTap.sellText(json?.optString("symbol")?.ifBlank { mint } ?: mint, json, false, 0)
+                    _notice.value = DeskNotice(false, text)
+                    Result.failure(IllegalStateException(text))
+                } else {
+                    Result.success(Unit)
+                }
+            },
+            onFailure = { err ->
+                val text = "$mint: ${err.message ?: "close failed"}"
+                _notice.value = DeskNotice(false, text)
+                Result.failure(err)
+            }
+        ).also { refresh() }
     }
 
     suspend fun resetPaperBook(): Result<Double> = withContext(Dispatchers.IO) {

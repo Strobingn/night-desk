@@ -356,6 +356,11 @@ export interface PositionView {
   safetyChip?: string;
   /** v13.23 "Bundled 24%" when the creation slot is flagged. */
   bundleChip?: string | null;
+  /**
+   * v13.39: set when the pool's quote side is drained or Jupiter has no sell route.
+   * The mid is not sellable value. The position stays open so a later retry can fill.
+   */
+  liquidityNote?: string | null;
 }
 
 export interface MarkPoint {
@@ -815,6 +820,7 @@ export interface MarksDelta {
     marks?: MarkPoint[];
     safetyChip?: string;
     bundleChip?: string | null;
+    liquidityNote?: string | null;
   }>;
 }
 
@@ -832,6 +838,8 @@ export type DeskEvents = {
     pairAddress?: string;
     dex?: string;
     liquidityUsd?: number;
+    /** v13.39: quote-token liquidity in USD, when the pair printed it. */
+    quoteUsd?: number;
   };
   "filter.result": FilterResult;
   "analyst.report": AnalystReport;
