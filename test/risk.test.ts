@@ -91,11 +91,12 @@ describe("Risk stop, trail, and no averaging down", () => {
     try {
       await desk.submitCandidate(makeToken({ mint, symbol: "MOONKIT", priceUsd: 1 }));
       await desk.markPrice(mint, 1.31);
-      const entry = desk.book.positions.get(mint)!.entryPrice;
+      const held = desk.book.positions.get(mint)!;
+      const basis = held.entryMark != null && held.entryMark > 0 ? held.entryMark : held.entryPrice;
       const open = desk.snapshot().positions.find((pos) => pos.mint === mint);
       expect(open?.peakPrice).toBeCloseTo(1.31, 8);
       expect(open?.trailArmed).toBe(true);
-      expect(open?.stopPrice).toBeCloseTo(entry * 0.94, 8);
+      expect(open?.stopPrice).toBeCloseTo(basis * 0.94, 8);
       expect(desk.store.loadBook()?.positions.find((pos) => pos.mint === mint)?.peakPrice).toBeCloseTo(1.31, 8);
 
       await desk.submitCandidate(makeToken({ mint, symbol: "MOONKIT", priceUsd: 1.31 * 0.96 }));
@@ -103,7 +104,7 @@ describe("Risk stop, trail, and no averaging down", () => {
       expect(desk.book.positions.get(mint)?.peakPrice).toBeCloseTo(1.31, 8);
       expect(desk.snapshot().events.some((event) => event.code === "TRAIL_STOP")).toBe(false);
 
-      await desk.markPrice(mint, entry * 0.94);
+      await desk.markPrice(mint, basis * 0.94);
       expect(desk.book.positions.has(mint)).toBe(false);
       expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS")).toBe(true);
     } finally {

@@ -10,17 +10,17 @@
       "/api/live/ready",
       "/api/orders"
     ],
-    "code": "13.34. Free-feed pre-filter before Helius/Alchemy enrich. Existing volume, liquidity, and age floors only; no mcap floor was added. Hard kills are not enriched again. A soft VOLUME_TOO_LOW kill gets one recheck after 5 minutes if free-feed volume has grown past the floor. Search and manual buys still reach RPC. Chain marks stay for held coins and the watchlist. Caps stay 10 and 8. Live $5/$20, exit slippage 6%, cooldown 0, and the engine $10 paper-loss pause are unchanged. Engine and AI stay paper-only. The 13.32 manual override is unchanged. Rebased onto main 08233e1 after PR 33 (includes 5cca6d92: bucketed equity cache, snapshot seq, live-sell balance). Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull.",
+    "code": "13.36. Lookup chain reads are not cancelled by a slow RugCheck. Alchemy getAccountInfo starts immediately; holders and RugCheck run beside it; budget is the time left inside the phone lookup client's 8s timeout. Reusing a sighting does not refresh that field's age. Partial fields are kept. A full timeout reuses a successful enrich of that mint from the last 30 minutes. LP lock is the deepest traditional pool; DLMM and concentrated-liquidity pools are not an unlock. desk.log lookup and MANUAL_BUY lines include chainTimedOut, providers, and checks. /api/health unverifiedKills counts fail-closed 'could not be verified' kills. The hard stop is measured from the entry mark, not the slipped fill. No numeric threshold, allowUnlockedLp, stop percent, Helius cap, live $5/$20, exit slippage, cooldown, or engine pause changed. Engine and AI stay paper-only. The 13.32 manual override is unchanged. Rebased onto main bfd761ab21d16163c16335e1635a1aeeda30c214 (PR 36, the 13.35 phone redesign: five tabs, Engine tab, strategy.mainOpen). 13.34. Free-feed pre-filter before Helius/Alchemy enrich. Existing volume, liquidity, and age floors only; no mcap floor was added. Hard kills are not enriched again. A soft VOLUME_TOO_LOW kill gets one recheck after 5 minutes if free-feed volume has grown past the floor. Search and manual buys still reach RPC. Chain marks stay for held coins and the watchlist. Caps stay 10 and 8. Live $5/$20, exit slippage 6%, cooldown 0, and the engine $10 paper-loss pause are unchanged. Engine and AI stay paper-only. The 13.32 manual override is unchanged. Rebased onto main 08233e1 after PR 33 (includes 5cca6d92: bucketed equity cache, snapshot seq, live-sell balance). Prefs and rules are still the 13.29 Oracle pull at 2026-11-11 1:46 PM ET (merge 02ba1c0f0adc21460a20801854e1c9fe79fcf1fd). No new pull.",
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.35",
-    "androidVersionName": "13.34",
-    "androidVersionCode": 1334,
+    "appVersion": "13.36",
+    "androidVersionName": "13.36",
+    "androidVersionCode": 1336,
     "applicationId": "com.dirk.nightdesk",
-    "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. That deploy is liveOracleUntilThisRelease. 13.34 is the pre-filter on top of 13.33 (PR 33). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
+    "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. 13.36 is the lookup, primary-pool LP, and entry-mark stop fix on top of the 13.35 redesign (main bfd761a, PR 36). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
-    "mainBeforeThisRelease": "2bc4475ec9819b5e56d9345ab6073156b473781d",
+    "mainBeforeThisRelease": "bfd761ab21d16163c16335e1635a1aeeda30c214",
     "liveOracleUntilThisRelease": {
       "appVersion": "13.29",
       "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",
@@ -34,7 +34,7 @@
   "backend": {
     "publicBaseUrl": "https://night-desk.157-151-200-171.sslip.io",
     "tls": "Caddy on :443, Let's Encrypt ACME (HTTP-01 disabled). No :80 listener; HTTP redirects are disabled.",
-    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme … disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
+    "caddyfileSite": "https://night-desk.157-151-200-171.sslip.io { tls { issuer acme \u2026 disable_http_challenge } reverse_proxy 127.0.0.1:4721 }",
     "deskBind": "127.0.0.1:4721",
     "envHost": "127.0.0.1",
     "envPort": 4721,
@@ -70,7 +70,7 @@
     "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live. The 13.30 engine buys the paper book only and its exits do not set book live.",
     "The desk hard stop is checked before an engine exit. A mark at or past that stop closes as STOP_LOSS or GAP_RUG. The engine stop (1% on the main paper book) can only be tighter. The $10 UTC-day paper-loss pause stays (STRATEGY.dailyMaxLossUsd).",
     "Never drop the v13.11 baseline controls: paper and live limit / take-profit / stop orders (GET/POST /api/orders, POST /api/orders/cancel), and the rest of the v13.11 book and ticket UI.",
-    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or ≤0) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25× or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
+    "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or \u22640) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25\u00d7 or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
     "The hard stop cannot be loosened past 6%. LIVE_TRADING, the wallet secret, and mode cannot be changed from the API.",
     "Do not print secrets. RPC URLs may carry API keys in the path or query; publish hostnames only.",
     "Every Night Desk release PR must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR so these files stay current.",
@@ -79,7 +79,8 @@
     "13.32: an explicit manual paper or live buy (POST /api/positions/buy) bypasses the engine watch (SIGNAL_WATCH), analyst score, soft filter kills, and the hard-stop ban. A resting limit fill does not skip that ban. The fill logs MANUAL_OVERRIDE and may include a warning. Hard kills still need Buy anyway (confirmHardKill), including on the live book. The engine and AI stay paper-only. The $5 default, $20 daily cap, wallet check, slippage, pool depth, idempotency, operator auth, and bogus-price rejection are unchanged. No new Helius cap and no new engine live path.",
     "13.33: poll latency only. equity(ts) index, SQL downsample to <=240 points. The cache keeps time buckets and widens them as the session grows. Snapshots carry seq; clients ignore an older snapshot, and a position mark drops the 1s cache. GET /api/orders and GET /api/settings skip the full snapshot. GET /api/wallet is non-blocking (balanceAgeMs, balanceStale). Live buys wait at most 4s then a 60s successful cache or refuse. Live sells may use an older successful SOL figure. Helius priority-0 queue max 24 with oldest-first drop and stale duplicate-mint drop. Caps stay 10+8. No trading, filter, slippage, cooldown, or engine-pause number changed.",
     "13.34: pre-filter only. Cheap kills (volume, liquidity, age, ban, junk name, bogus price, already killed) run before Helius/Alchemy. No numeric filter or trade setting changed. Caps stay 10+8. Rebased onto main 08233e1 (PR 33, includes 5cca6d92).",
-    "13.35: phone redesign only (five tabs, Engine tab, Settings → More). Adds strategy.mainOpen (engine positions on the main paper book). No desk setting, limit or trading behavior changed."
+    "13.35: phone redesign only (five tabs, Engine tab, Settings \u2192 More). Adds strategy.mainOpen (engine positions on the main paper book). No desk setting, limit or trading behavior changed.",
+    "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign)."
   ],
   "manualOverride": {
     "version": "13.32",
@@ -114,7 +115,7 @@
         "raw": 5000,
         "display": "$5,000",
         "source": "rules",
-        "notes": "8:22 PM ET tuning. Band $1,000–$500,000."
+        "notes": "8:22 PM ET tuning. Band $1,000\u2013$500,000."
       },
       "minLiquidityUsd": {
         "raw": 4000,
@@ -138,7 +139,7 @@
         "raw": 0.1,
         "display": "10%",
         "source": "prefs",
-        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 → 0.1)."
+        "notes": "Set after the 13.29 deploy via POST /api/settings {\"maxDevHoldingPct\": 10} only. 0 = off. Stored as a fraction (10 \u2192 0.1)."
       },
       "minTokenAgeMin": {
         "raw": 0,
@@ -162,7 +163,7 @@
         "raw": 0.35,
         "display": "0.35",
         "source": "rules",
-        "notes": "Trade line. Band 0.10–0.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
+        "notes": "Trade line. Band 0.10\u20130.95. Scores below this reject with SCORE_BELOW_THRESHOLD."
       },
       "volumeBoost": {
         "raw": 0.5,
@@ -208,7 +209,7 @@
         "raw": 20,
         "display": "20",
         "source": "prefs",
-        "notes": "Band 1–24."
+        "notes": "Band 1\u201324."
       },
       "maxTradesPerHour": {
         "raw": 34,
@@ -230,7 +231,7 @@
         "raw": 1000,
         "display": "1 s",
         "source": "prefs",
-        "notes": "Band 1,000–10,000 ms."
+        "notes": "Band 1,000\u201310,000 ms."
       }
     },
     "liveCaps": {
@@ -238,7 +239,7 @@
         "raw": 5,
         "display": "$5",
         "source": "prefs",
-        "notes": "Per live trade. Band $1–$100. Do not change unless Dirk approves."
+        "notes": "Per live trade. Band $1\u2013$100. Do not change unless Dirk approves."
       },
       "liveDailyCapUsd": {
         "raw": 20,
@@ -253,7 +254,7 @@
       },
       "liveScope": {
         "raw": "manual",
-        "display": "Live: manual only · AI: paper"
+        "display": "Live: manual only \u00b7 AI: paper"
       },
       "liveSpentTodayUsd": {
         "raw": 0,
@@ -289,7 +290,7 @@
         "raw": 0.06,
         "display": "6%",
         "source": "rules",
-        "notes": "Band 0.5–50%."
+        "notes": "Band 0.5\u201350%."
       },
       "maxExitSlippage": {
         "raw": 0.06,
@@ -353,21 +354,21 @@
       "targetNetUsd": {
         "raw": 3,
         "display": "$3.00 net",
-        "band": "$0.25–$50",
+        "band": "$0.25\u2013$50",
         "source": "strategy",
         "notes": "After modeled fees and slippage."
       },
       "tradeUsd": {
         "raw": 50,
         "display": "$50 paper",
-        "band": "$5–$500",
+        "band": "$5\u2013$500",
         "source": "strategy",
         "notes": "Paper. Up to the 50% auto ceiling; the exposure cap still applies."
       },
       "maxOpen": {
         "raw": 2,
         "display": "2",
-        "band": "1–6",
+        "band": "1\u20136",
         "source": "strategy",
         "notes": "Engine positions only. maxOpenPositions still caps the whole book."
       },
@@ -714,7 +715,7 @@
         "name": "SCOUT_ENRICH_CONCURRENCY",
         "secret": false,
         "present": false,
-        "default": "8 (code default, clamped 1–16)"
+        "default": "8 (code default, clamped 1\u201316)"
       },
       {
         "name": "SCOUT_ENRICH_QUEUE",
@@ -797,7 +798,7 @@
           "eventLoopLag",
           "prefilter"
         ],
-        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null. 13.33 eventLoopLag is {p50Ms, p99Ms, maxMs}. 13.34 prefilter is {kills, rpcSaved, heliusQueue, enrich:{count,p50Ms,p90Ms,maxMs}}."
+        "notes": "publicUrl is a trycloudflare tunnel URL when data/public-url.txt has one; production Caddy host reports null. 13.33 eventLoopLag is {p50Ms, p99Ms, maxMs}. 13.34 prefilter is {kills, rpcSaved, heliusQueue, enrich:{count,p50Ms,p90Ms,maxMs}}. 13.36 unverifiedKills is fail-closed 'could not be verified' counts by reason code. The same map is pipeline.unverifiedKills on /api/state."
       },
       {
         "method": "GET",
@@ -1123,7 +1124,7 @@
           "archivePath",
           "error"
         ],
-        "notes": "Paper book only. Live mode is refused. startingUsd 100–10,000."
+        "notes": "Paper book only. Live mode is refused. startingUsd 100\u201310,000."
       },
       {
         "method": "GET",
@@ -1202,10 +1203,10 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.34",
-      "androidVersionCode": 1334,
+      "version": "13.36",
+      "androidVersionCode": 1336,
       "applicationId": "com.dirk.nightdesk",
-      "note": "Code in this branch (13.34). Not the host at the 1:46 PM ET pull. Rebased onto main 08233e1 (PR 33, includes 5cca6d92). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6. main before 13.33 is 9fbd87b2.",
+      "note": "Code in this branch (13.36). Not the host at the 1:46 PM ET pull. Rebased onto main bfd761a (PR 36, the 13.35 redesign). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {
         "version": "13.29",
         "mergeSha": "02ba1c0f0adc21460a20801854e1c9fe79fcf1fd",

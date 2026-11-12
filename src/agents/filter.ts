@@ -53,11 +53,12 @@ export function evaluateFilter(
     });
   }
 
+  const poolNote = token.lpLockPool ? ` Judged ${token.lpLockPool}.` : "";
   if (token.lpLockedOrBurned === false) {
     checks.push({
       code: "LP_NOT_LOCKED",
       pass: false,
-      message: "LP is not locked or burned, so the pool can be pulled."
+      message: `LP is not locked or burned, so the pool can be pulled.${poolNote}`
     });
   } else if (token.lpLockedOrBurned == null && token.onBondingCurve) {
     checks.push({
@@ -77,7 +78,7 @@ export function evaluateFilter(
     checks.push({
       code: "LP_NOT_LOCKED",
       pass: true,
-      message: `LP is locked or burned.${extra}`
+      message: `LP is locked or burned.${extra}${poolNote}`
     });
   }
 

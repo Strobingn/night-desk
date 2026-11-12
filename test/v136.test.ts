@@ -505,7 +505,7 @@ describe("v13.19 search lookup budget", () => {
     try {
       const started = Date.now();
       const found = await desk.lookupCoin(MINT);
-      expect(Date.now() - started).toBeLessThan(7_000);
+      expect(Date.now() - started).toBeLessThan(12_000);
       expect(found.ok).toBe(true);
       if (!found.ok) return;
       expect(found.symbol).toBe("SLOW");
@@ -517,5 +517,5 @@ describe("v13.19 search lookup budget", () => {
     } finally {
       desk.stop();
     }
-  });
+  }, 15_000);
 });

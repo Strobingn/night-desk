@@ -417,13 +417,14 @@ describe("v13.2 the fast loop cannot create a false stop", () => {
     const desk = dexDesk(() => p);
     try {
       await desk.submitCandidate(entryToken());
-      const entry = desk.book.positions.get(MINT)!.entryPrice;
+      const held = desk.book.positions.get(MINT)!;
+      const basis = held.entryMark != null && held.entryMark > 0 ? held.entryMark : held.entryPrice;
       vi.setSystemTime(1_800_000_020_000);
-      p = String(entry * 0.95);
+      p = String(basis * 0.95);
       await desk.repricePositions();
       expect(desk.book.positions.has(MINT)).toBe(true);
       vi.setSystemTime(1_800_000_021_500);
-      p = String(entry * 0.935);
+      p = String(basis * 0.935);
       await desk.repricePositions();
       expect(desk.book.positions.has(MINT)).toBe(false);
       expect(desk.snapshot().events.some((e) => (e.code === "STOP_LOSS" || e.code === "GAP_RUG"))).toBe(true);

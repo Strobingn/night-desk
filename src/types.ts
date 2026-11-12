@@ -111,6 +111,8 @@ export interface CandidateToken {
   /** Pump mint still on the bonding curve, with no AMM pool LP to lock. */
   onBondingCurve?: boolean;
   lpLockPct?: number | null;
+  /** Pool the LP lock was judged on (primary by liquidity). Display only. */
+  lpLockPool?: string | null;
   /** Fraction of supply, 0–1. null = could not verify. A share above 100% is stored as null. */
   top10HolderPct: number | null;
   holderCount: number | null;
@@ -426,6 +428,11 @@ export interface PipelineCounts {
   executorSkips: number;
   /** v13.3 stop exits that filled past the stop line (gap/rug). */
   gapExits?: number;
+  /**
+   * v13.35 filter kills whose message was "could not be verified", by reason code.
+   * A real miss (mint still active, LP actually unlocked) is not counted here.
+   */
+  unverifiedKills?: Record<string, number>;
 }
 
 export interface AdviceNote {

@@ -183,8 +183,9 @@ describe("v12 add coin: lookup and manual buy guards", () => {
       const view = desk.snapshot().positions.find((p) => p.mint === MINT);
       expect(view?.tag).toBe("manual · pump.fun");
       expect(view?.entry).toBe("manual");
-      // −6% stop still applies to a manual add.
-      expect(view!.stopPrice).toBeCloseTo(view!.entryPrice * (1 - HARD_RULES.stopLossPct), 12);
+      // −6% stop still applies to a manual add, measured from the mark the buy was priced at.
+      const basis = desk.book.positions.get(MINT)?.entryMark ?? view!.entryPrice;
+      expect(view!.stopPrice).toBeCloseTo(basis * (1 - HARD_RULES.stopLossPct), 12);
     } finally {
       desk.stop();
     }
