@@ -1,6 +1,16 @@
 import WebSocket from "ws";
 import type { EventBus } from "../bus.js";
 import { EnrichDeferred, EnrichMeter, enrichSighting, isHeliusUrl, rpcHostname } from "../market/enrich.js";
+import {
+  ENRICH_RPC_PER_COIN,
+  KillMemory,
+  freeFeedScore,
+  prefilterFree,
+  sightingAgeSeconds,
+  type PrefilterReason,
+  type PrefilterThresholds
+} from "../market/prefilter.js";
+import { LatencyStats } from "../strategy/latency.js";
 import { DexTokenBatcher } from "../market/dex-batch.js";
 import { classifyHttpFailure, isPumpDiscoveryUrl, PUMP_API_CHALLENGE } from "../market/http-class.js";
 import { bucketFor, type NetLimiter, type SourceId } from "../market/net.js";
@@ -116,6 +126,15 @@ export interface ScoutOptions {
    */
   onTape?: (row: RawTapeRow) => void;
   /**
+   * v13.34 cheap gates. When set, a sighting that already fails them never calls RPC.
+   * Manual Search and buys do not go through ingest, so they are not gated here.
+   */
+  prefilter?: () => PrefilterThresholds;
+  killMemory?: KillMemory;
+  /** True when the Helius lane is already queued or at its cap. Best free-feed scores go first. */
+  laneBusy?: () => boolean;
+  onPrefilterKill?: (raw: RawSighting, reasons: PrefilterReason[]) => void;
+  /**
    * Every raw PumpPortal frame, on the socket Scout already opened.
    * Pump core listens here. It must not open a second PumpPortal socket.
    */
@@ -124,10 +143,13 @@ export interface ScoutOptions {
 
 /**
  * Scout is the only publisher of `scout.candidate`.
- * Live sightings are enriched, then handed to Filter. They never skip ahead.
+ * Live sightings that survive the free-feed pre-filter are enriched, then handed to Filter.
  */
 export class Scout {
-  private seen = new Map<string, { state: "queued" | "done"; volume: number; refreshes: number }>();
+  private seen = new Map<string, { state: "queued" | "waiting" | "done" | "killed"; volume: number; refreshes: number; price: number }>();
+  private readonly prefilterKills: Record<string, number> = {};
+  private rpcSaved = 0;
+  private readonly enrichLatency = new LatencyStats();
   private queue: RawSighting[] = [];
   private inflight = new Map<string, RawSighting>();
   private active = 0;
@@ -204,6 +226,20 @@ export class Scout {
     return { host: rpcHostname(this.opts.rpcUrl), callsPerMin: this.meter.callsPerMin(now) };
   }
 
+  /** v13.34 pre-filter counters. Enrich latency is the RPC stage only, after a coin has passed. */
+  prefilterView(): {
+    kills: Record<string, number>;
+    rpcSaved: number;
+    enrich: { count: number; p50Ms: number; p90Ms: number; maxMs: number };
+  } {
+    const row = this.enrichLatency.view().enrich;
+    return {
+      kills: { ...this.prefilterKills },
+      rpcSaved: this.rpcSaved,
+      enrich: row ?? { count: 0, p50Ms: 0, p90Ms: 0, maxMs: 0 }
+    };
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.pumpTimer) clearTimeout(this.pumpTimer);
@@ -247,30 +283,118 @@ export class Scout {
     this.opts.onTape?.(draftFromRaw(raw, "pending"));
     const hint = raw.volume1hUsd ?? 0;
     const prior = this.seen.get(mint);
-    if (prior) {
-      if (prior.state === "queued") {
-        const target = this.queue.find((item) => item.mint === mint) ?? this.inflight.get(mint);
-        if (target && hint > (target.volume1hUsd ?? 0)) {
-          target.volume1hUsd = hint;
-          if ((raw.priceUsd ?? 0) > (target.priceUsd ?? 0)) target.priceUsd = raw.priceUsd;
-          if ((raw.liquidityUsd ?? 0) > (target.liquidityUsd ?? 0)) target.liquidityUsd = raw.liquidityUsd;
-        }
-        return;
+    if (prior?.state === "queued") {
+      const target = this.queue.find((item) => item.mint === mint) ?? this.inflight.get(mint);
+      if (target && hint > (target.volume1hUsd ?? 0)) {
+        target.volume1hUsd = hint;
+        if ((raw.priceUsd ?? 0) > (target.priceUsd ?? 0)) target.priceUsd = raw.priceUsd;
+        if ((raw.liquidityUsd ?? 0) > (target.liquidityUsd ?? 0)) target.liquidityUsd = raw.liquidityUsd;
       }
+      if (prior && (raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
+      return;
+    }
+    if (prior && !this.opts.prefilter) {
       if (!(hint > prior.volume && prior.volume <= 0 && prior.refreshes < 1)) return;
       prior.refreshes += 1;
       prior.state = "queued";
+    } else if (prior) {
+      const gate = this.gateRaw(raw, prior);
+      if (gate === "stop") return;
+      if (gate === "wait") {
+        prior.state = "waiting";
+        prior.refreshes = Math.max(prior.refreshes, 1);
+        if ((raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
+        if (hint > prior.volume) prior.volume = hint;
+        return;
+      }
+      prior.state = "queued";
+      if ((raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
     } else {
-      this.seen.set(mint, { state: "queued", volume: 0, refreshes: 0 });
+      const slot: { state: "queued" | "waiting" | "done" | "killed"; volume: number; refreshes: number; price: number } = {
+        state: "queued",
+        volume: hint,
+        refreshes: 0,
+        price: raw.priceUsd ?? 0
+      };
+      this.seen.set(mint, slot);
       if (this.seen.size > 8000) {
         const first = this.seen.keys().next().value;
         if (first) this.seen.delete(first);
       }
+      const gate = this.opts.prefilter ? this.gateRaw(raw, slot) : "queue";
+      if (gate === "stop") return;
+      if (gate === "wait") {
+        slot.state = "waiting";
+        slot.refreshes = 1;
+        return;
+      }
     }
+    this.enqueue(raw, origin);
+  }
+
+  /**
+   * `queue` spends an enrich slot. `wait` holds for one later free print.
+   * `stop` means the coin is dead for RPC (already counted when it was killed).
+   */
+  private gateRaw(raw: RawSighting, prior: { state: string; volume: number; refreshes: number; price: number }): "queue" | "wait" | "stop" {
+    const thresholds = this.opts.prefilter?.();
+    if (!thresholds) return "queue";
+    const now = Date.now();
+    const memory = this.opts.killMemory;
+    const age = sightingAgeSeconds(raw, now);
+    if (prior.state === "done") {
+      if (!memory) return "stop";
+      const admit = memory.admit(raw.mint, now, raw.volume1hUsd ?? 0, thresholds, age);
+      if (admit !== "enrich") return "stop";
+      const again = prefilterFree(raw, thresholds, now, prior.price);
+      return again.action === "pass" ? "queue" : "stop";
+    }
+    if (memory) {
+      const admit = memory.admit(raw.mint, now, raw.volume1hUsd ?? 0, thresholds, age);
+      if (admit === "block") return "stop";
+      if (admit === "enrich") {
+        const again = prefilterFree(raw, thresholds, now, prior.price);
+        return again.action === "pass" ? "queue" : "stop";
+      }
+    }
+    const decision = prefilterFree(raw, thresholds, now, prior.price);
+    if (decision.action === "kill") {
+      this.finishPrefilterKill(raw, decision.reasons, decision.hard);
+      return "stop";
+    }
+    if (decision.action === "wait") {
+      if (prior.refreshes >= 1) {
+        this.finishPrefilterKill(
+          raw,
+          [
+            {
+              code: decision.missing === "liquidityUsd" ? "LIQUIDITY_TOO_THIN" : decision.missing === "age" ? "TOKEN_TOO_NEW" : "VOLUME_TOO_LOW",
+              message: `Free feeds still have no ${decision.missing}. Not spending an RPC read.`
+            }
+          ],
+          false
+        );
+        return "stop";
+      }
+      return "wait";
+    }
+    return "queue";
+  }
+
+  private finishPrefilterKill(raw: RawSighting, reasons: PrefilterReason[], hard: boolean): void {
+    const slot = this.seen.get(raw.mint);
+    if (slot) slot.state = "killed";
+    this.opts.killMemory?.note(raw.mint, hard, Date.now(), raw.volume1hUsd ?? 0);
+    for (const reason of reasons) this.prefilterKills[reason.code] = (this.prefilterKills[reason.code] ?? 0) + 1;
+    this.rpcSaved += ENRICH_RPC_PER_COIN;
+    this.opts.onPrefilterKill?.(raw, reasons);
+  }
+
+  private enqueue(raw: RawSighting, origin?: SourceId): void {
     this.status.sightings += 1;
     if (origin) this.health.sighting(origin);
     if (this.queue.length >= this.queueCap) {
-      const dropped = this.queue.splice(worstIndex(this.queue), 1)[0];
+      const dropped = this.queue.splice(worstIndex(this.queue, this.laneBusy()), 1)[0];
       if (dropped) {
         this.seen.delete(dropped.mint);
         this.opts.onTape?.(draftFromRaw(dropped, "queue_full"));
@@ -282,10 +406,15 @@ export class Scout {
     this.drain();
   }
 
+  private laneBusy(): boolean {
+    if (this.active >= this.concurrency && this.queue.length > 0) return true;
+    return this.opts.laneBusy?.() === true;
+  }
+
   private drain(): void {
     if (Date.now() < this.holdUntil) return;
     while (this.active < this.concurrency && this.queue.length) {
-      const raw = this.queue.splice(bestIndex(this.queue), 1)[0]!;
+      const raw = this.queue.splice(bestIndex(this.queue, this.laneBusy()), 1)[0]!;
       this.inflight.set(raw.mint, raw);
       this.active += 1;
       void this.enrich(raw).finally(() => {
@@ -302,9 +431,9 @@ export class Scout {
     if (slot) slot.state = "queued";
     if (!this.queue.some((item) => item.mint === raw.mint)) {
       if (this.queue.length >= this.queueCap) {
-        const idx = worstIndex(this.queue);
+        const idx = worstIndex(this.queue, this.laneBusy());
         const dropped = this.queue[idx];
-        if (dropped && enrichBefore(raw, dropped) > 0) {
+        if (dropped && enrichBefore(raw, dropped, this.laneBusy()) > 0) {
           this.seen.delete(raw.mint);
           this.opts.onTape?.(draftFromRaw(raw, "queue_full"));
           this.status.dropped += 1;
@@ -330,6 +459,7 @@ export class Scout {
   }
 
   private async enrich(raw: RawSighting): Promise<void> {
+    const started = Date.now();
     try {
       const token = await enrichSighting(raw, {
         rpcUrl: this.opts.rpcUrl,
@@ -362,6 +492,7 @@ export class Scout {
         )
       );
       this.publish(token);
+      this.enrichLatency.record("enrich", Date.now() - started);
     } catch (err) {
       if (err instanceof EnrichDeferred) {
         this.defer(raw, err.retryMs);
@@ -686,25 +817,33 @@ export class Scout {
   }
 }
 
-/** Positive when `b` should be enriched before `a`: newer sighting, then higher 1h volume. */
-export function enrichBefore(a: RawSighting, b: RawSighting): number {
+/**
+ * Positive when `b` should be enriched before `a`.
+ * Idle: newer sighting, then higher 1h volume.
+ * Busy: higher free-feed volume and liquidity momentum, then the idle order.
+ */
+export function enrichBefore(a: RawSighting, b: RawSighting, busy = false): number {
+  if (busy) {
+    const score = freeFeedScore(b) - freeFeedScore(a);
+    if (score !== 0) return score;
+  }
   const age = (b.observedAt || 0) - (a.observedAt || 0);
   if (age !== 0) return age;
   return (b.volume1hUsd || 0) - (a.volume1hUsd || 0);
 }
 
-function bestIndex(queue: RawSighting[]): number {
+function bestIndex(queue: RawSighting[], busy: boolean): number {
   let idx = 0;
   for (let i = 1; i < queue.length; i += 1) {
-    if (enrichBefore(queue[idx]!, queue[i]!) > 0) idx = i;
+    if (enrichBefore(queue[idx]!, queue[i]!, busy) > 0) idx = i;
   }
   return idx;
 }
 
-function worstIndex(queue: RawSighting[]): number {
+function worstIndex(queue: RawSighting[], busy: boolean): number {
   let idx = 0;
   for (let i = 1; i < queue.length; i += 1) {
-    if (enrichBefore(queue[i]!, queue[idx]!) > 0) idx = i;
+    if (enrichBefore(queue[i]!, queue[idx]!, busy) > 0) idx = i;
   }
   return idx;
 }

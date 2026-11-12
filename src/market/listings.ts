@@ -16,6 +16,16 @@ function num(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function createdMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 1e12) return value;
+  if (typeof value === "number" && Number.isFinite(value) && value > 1e9) return value * 1000;
+  if (typeof value === "string" && value.trim()) {
+    const n = Date.parse(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
 function sourceFor(mint: string, label: string | undefined): RawSighting["source"] {
   if (/pump/i.test(label ?? "") || mint.endsWith("pump")) return "pumpfun";
   return "raydium";
@@ -62,6 +72,7 @@ export function parseGeckoPools(payload: unknown, now = Date.now()): RawSighting
     const liquidity = num(attrs.reserve_in_usd);
     const mcap = num(attrs.market_cap_usd) || num(attrs.fdv_usd);
     const dex = text(rec.relationships?.dex?.data?.id);
+    const created = createdMs(attrs.pool_created_at);
     out.push({
       mint,
       symbol: symbol?.slice(0, 16),
@@ -72,7 +83,8 @@ export function parseGeckoPools(payload: unknown, now = Date.now()): RawSighting
       priceUsd: price > 0 ? price : undefined,
       liquidityUsd: liquidity > 0 ? liquidity : undefined,
       marketCapUsd: mcap > 0 ? mcap : undefined,
-      priceFeed: price > 0 ? "gecko" : undefined
+      priceFeed: price > 0 ? "gecko" : undefined,
+      ...(created ? { createdAt: created } : {})
     });
   }
   return out;
@@ -95,6 +107,8 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
       mcap?: unknown;
       fdv?: unknown;
       stats1h?: { buyVolume?: unknown; sellVolume?: unknown };
+      createdAt?: unknown;
+      firstPool?: { createdAt?: unknown };
     };
     const mint = text(rec.id);
     if (!mint || QUOTE_MINTS.has(mint)) continue;
@@ -102,6 +116,7 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
     const price = num(rec.usdPrice);
     const liquidity = num(rec.liquidity);
     const mcap = num(rec.mcap) || num(rec.fdv);
+    const created = createdMs(rec.createdAt) ?? createdMs(rec.firstPool?.createdAt);
     out.push({
       mint,
       symbol: text(rec.symbol)?.slice(0, 16),
@@ -113,7 +128,8 @@ export function parseJupiterRecent(payload: unknown, now = Date.now()): RawSight
       priceUsd: price > 0 ? price : undefined,
       liquidityUsd: liquidity > 0 ? liquidity : undefined,
       marketCapUsd: mcap > 0 ? mcap : undefined,
-      priceFeed: price > 0 ? "jupiter" : undefined
+      priceFeed: price > 0 ? "jupiter" : undefined,
+      ...(created ? { createdAt: created } : {})
     });
   }
   return out;
