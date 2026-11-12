@@ -1,6 +1,6 @@
 import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
-import { LiveSubmitError } from "../market/live-submit.js";
+import { LiveSubmitError, isNoSellRouteMessage } from "../market/live-submit.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
@@ -35,10 +35,13 @@ import { ReplayFeed } from "../demo/replay.js";
 import { advise, AdvisorBook, noteEntry, noteKill, noteNearMissSurface, noteNearMissTaken, noteOutcome, notePass, type Advice, type FeatureSample, type WeakSurvivor } from "./advisor.js";
 import { classifyNearMiss } from "./near-miss.js";
 import { phraseAdvice } from "./commentary.js";
-import { ABSURD_RISE, LOG_THROTTLE_MS, LIVE_FRESH_MS, QUOTE_CONFIRM_MS, REANCHOR_SILENT_MS, SHOCK_MOVE, absurdScale, entryAnchor, isJump, markUnusable, needsShockConfirm, outlierReason, quoteConfirms, reanchorCandidate, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
+import { ABSURD_RISE, LOG_THROTTLE_MS, LIVE_FRESH_MS, QUOTE_CONFIRM_MS, QUOTE_SIDE_GONE_USD, REANCHOR_SILENT_MS, SHOCK_MOVE, absurdScale, entryAnchor, isJump, markUnusable, needsShockConfirm, outlierReason, quoteConfirms, quoteSideDrained, reanchorCandidate, residualExitUsd, residualMarkPrice, sameMarkSource, type MarkOrigin, type ReanchorCandidate } from "../market/mark-guard.js";
 
 /** Shown when a sell would fill on a mark dozens of times entry that no other feed confirms. */
 const UNVERIFIED_SELL = "Price unverified - sell refused, retry";
+
+/** v13.39 card copy when the quote side is drained or Jupiter has no sell route. */
+const LIQUIDITY_GONE_NOTE = "Liquidity gone, no sell route";
 
 /** Paper gate refusal. Carries EXIT_IMPACT so the banner is not labeled LIVE_SWAP_FAILED. */
 class GateError extends Error {
@@ -434,6 +437,13 @@ export class Desk {
   private positionRefreshMs: number = POSITION_REFRESH_BAND.fallback;
   /** v13.3 operator exit-impact tolerance; null keeps entry cap + 3%. */
   private maxExitSlippage: number | null = null;
+  /**
+   * v13.39: mint is still held, but the mid is not sellable value. Keyed by book+mint.
+   * Cleared when quote-side liquidity or a sell route returns. Not a write-off.
+   */
+  private liquidityGone = new Map<string, { at: number; residualUsd: number; reason: string; anchorPrice: number }>();
+  /** Latest quote-side USD from a Dex tick, used when a later NO_ROUTES has no quote on the request. */
+  private lastQuoteUsd = new Map<string, number>();
   private startedAt = Date.now();
   /** Earliest instant the current paper book owns. Recaps never look past it. */
   private resetAt = 0;
@@ -730,7 +740,8 @@ export class Desk {
           feed: quote?.feed,
           pairAddress: quote?.pairAddress,
           dex: quote?.dex,
-          liquidityUsd: quote?.liquidityUsd
+          liquidityUsd: quote?.liquidityUsd,
+          quoteUsd: quote?.quoteUsd
         }),
       fetchImpl: deps.priceFetch ?? this.net.fetchAt(0),
       pollMs: () => this.positionRefreshMs,
@@ -2888,7 +2899,8 @@ export class Desk {
         feed: tick.feed,
         pairAddress: tick.pairAddress,
         dex: tick.dex,
-        liquidityUsd: tick.liquidityUsd
+        liquidityUsd: tick.liquidityUsd,
+        quoteUsd: tick.quoteUsd
       });
     });
 
@@ -3503,12 +3515,21 @@ export class Desk {
         code,
         message: `Executor could not close ${pos.symbol}. ${message}`
       });
+      // v13.39: no route is not a write-off. The tokens stay in the wallet; a later retry can fill.
+      // A healthy cached quote is not residual value. Only a quote we already know is drained counts.
+      if (kind === "live" && isNoSellRouteMessage(message)) {
+        const cached = this.lastQuoteUsd.get(pos.mint);
+        const quoteUsd = cached != null && Number.isFinite(cached) && cached <= QUOTE_SIDE_GONE_USD ? cached : 0;
+        const mid = pos.qty * this.bk(kind).price(pos.mint, pos.entryPrice);
+        this.noteLiquidityGone(kind, pos.mint, residualExitUsd({ quoteUsd, midValueUsd: mid }), "no_routes");
+      }
     }
   }
 
   private applySell(pos: Position, fill: Fill, order: ExitOrder, proceeds?: number): void {
     const book = this.bk(order.book === "live" ? "live" : "paper");
     if (!book.positions.has(pos.mint)) return;
+    this.clearLiquidityGone(order.book === "live" ? "live" : "paper", pos.mint);
     const rawProceeds = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     const proceedsUsd = typeof rawProceeds === "number" && Number.isFinite(rawProceeds) && rawProceeds > 0 ? roundUsd(rawProceeds) : 0;
     if (fill.mode === "paper" && this.paperProceedsUnverified(pos, proceedsUsd, fill.priceUsd, pos.costUsd)) {
@@ -3687,13 +3708,25 @@ export class Desk {
       openedAt: pos.openedAt,
       ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {}),
       ...this.cardChips(pos.mint),
-      ...this.netFields(pos, kind, shown, markPrice)
+      ...this.netFields(pos, kind, shown, markPrice),
+      ...(this.liquidityGone.has(bookKey(kind, pos.mint)) ? { liquidityNote: LIQUIDITY_GONE_NOTE } : {})
     };
   }
 
   /** After-slippage P&L for the card. A restored or stale mark stays blank. */
   private netFields(pos: Position, kind: BookKind, shown: { price: number; at: number }, markPrice: number): Pick<PositionView, "netPnlUsd" | "netPnlPct" | "exitSlippage" | "entrySlippage" | "marks"> {
     const book = this.bk(kind);
+    const gone = this.liquidityGone.get(bookKey(kind, pos.mint));
+    if (gone) {
+      const netPnl = gone.residualUsd - pos.costUsd;
+      return {
+        netPnlUsd: roundUsd(netPnl),
+        netPnlPct: pos.costUsd > 0 ? netPnl / pos.costUsd : 0,
+        exitSlippage: 1,
+        entrySlippage: Number.isFinite(pos.entrySlippage) ? pos.entrySlippage! : null,
+        marks: book.points(pos.mint).map((p) => ({ t: p.t, priceUsd: p.priceUsd }))
+      };
+    }
     const fresh = this.freshMark(kind, pos.mint, shown.at);
     const net = fresh
       ? realizablePnl({
@@ -3779,6 +3812,65 @@ export class Desk {
   }
 
   /** v13.7 one feed print marks the paper book and, when held there, the live book. */
+  /**
+   * v13.39: the mid is no longer sellable value. Write the residual into the book so
+   * equity and P&L see it. The position stays open for a later retry, so this does
+   * not run the stop. A later drained tick with the same residual does not rewrite.
+   */
+  private noteLiquidityGone(kind: BookKind, mint: string, residualUsd: number, reason: string): void {
+    const book = this.bk(kind);
+    const pos = book.positions.get(mint);
+    if (!pos) return;
+    const key = bookKey(kind, mint);
+    const residual = Math.max(0, Number.isFinite(residualUsd) ? residualUsd : 0);
+    const prev = this.liquidityGone.get(key);
+    const now = Date.now();
+    const px = residualMarkPrice(residual, pos.qty);
+    const current = book.price(mint, pos.entryPrice);
+    const anchorPrice =
+      prev?.anchorPrice && prev.anchorPrice > px * 1e6
+        ? prev.anchorPrice
+        : current > px * 1e6
+          ? current
+          : pos.entryMark != null && pos.entryMark > 0
+            ? pos.entryMark
+            : pos.entryPrice;
+    this.liquidityGone.set(key, { at: now, residualUsd: residual, reason, anchorPrice });
+    if (prev) {
+      const last = book.price(mint, pos.entryPrice);
+      if (last > 0 && Math.abs(last - px) / Math.max(last, px, 1e-18) < 0.05) return;
+    }
+    book.mark(mint, px);
+    if (!pos.closing) book.noteMark(mint, px, now);
+    this.riskFeed.set(key, "none");
+    this.liveMarks.set(key, { price: px, at: now, feed: "none" });
+    if (!this.quiet("LIQUIDITY_GONE", key)) {
+      this.log({
+        stage: "risk",
+        kind: "reject",
+        mint,
+        symbol: pos.symbol,
+        code: "LIQUIDITY_GONE",
+        message: `${LIQUIDITY_GONE_NOTE}. ${pos.symbol} is still held — a later sell can retry if a route returns.`
+      });
+    }
+    this.bus.emit("position.mark", { mint, at: now });
+  }
+
+  private clearLiquidityGone(kind: BookKind, mint: string): void {
+    this.liquidityGone.delete(bookKey(kind, mint));
+  }
+
+  /** The residual mark is not a price. Put the pre-drain anchor back and drop the synthetic card mark. */
+  private restoreLiquidityAnchor(kind: BookKind, mint: string): void {
+    const key = bookKey(kind, mint);
+    const gone = this.liquidityGone.get(key);
+    if (!gone || !(gone.anchorPrice > 0)) return;
+    this.bk(kind).mark(mint, gone.anchorPrice);
+    const live = this.liveMarks.get(key);
+    if (live && (live.feed === "none" || !(live.price > gone.anchorPrice / 1e6))) this.liveMarks.delete(key);
+  }
+
   private applyMark(mint: string, priceUsd: number, origin?: MarkOrigin, advise = true): void {
     this.applyMarkIn("paper", mint, priceUsd, origin, advise);
     if (this.liveBook?.positions.has(mint)) this.applyMarkIn("live", mint, priceUsd, origin, false);
@@ -3788,19 +3880,6 @@ export class Desk {
     const book = this.bk(kind);
     const key = bookKey(kind, mint);
     const pos = book.positions.get(mint);
-    if (markUnusable(priceUsd)) {
-      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", key)) {
-        this.log({
-          stage: "risk",
-          kind: "reject",
-          mint,
-          symbol: pos.symbol,
-          code: "PRICE_UNUSABLE",
-          message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${origin?.feed ?? "unknown"}. A non-positive mark is invalid data. Waiting for a valid mark.`
-        });
-      }
-      return;
-    }
     let reanchored = false;
     if (pos && !sameMarkSource(pos, origin)) {
       const now = Date.now();
@@ -3844,6 +3923,46 @@ export class Desk {
       }
     } else if (pos) {
       this.reanchors.delete(key);
+    }
+    if (origin?.quoteUsd != null && Number.isFinite(origin.quoteUsd) && origin.quoteUsd >= 0) {
+      this.lastQuoteUsd.set(mint, origin.quoteUsd);
+    }
+    if (pos) {
+      const midValue = pos.qty * priceUsd;
+      const drained = quoteSideDrained({
+        quoteUsd: origin?.quoteUsd,
+        midValueUsd: midValue,
+        liquidityUsd: origin?.liquidityUsd
+      });
+      const recovered =
+        origin?.quoteUsd != null &&
+        Number.isFinite(origin.quoteUsd) &&
+        origin.quoteUsd > QUOTE_SIDE_GONE_USD &&
+        !drained;
+      if (recovered) {
+        this.restoreLiquidityAnchor(kind, mint);
+        this.clearLiquidityGone(kind, mint);
+      } else if (drained) {
+        this.noteLiquidityGone(kind, mint, residualExitUsd({ quoteUsd: origin?.quoteUsd, midValueUsd: midValue }), "quote_drained");
+        if (advise) this.publishAdvice(this.buildAdvice());
+        return;
+      } else if (this.liquidityGone.has(key)) {
+        // Still flagged (e.g. NO_ROUTES). A mid without a healthy quote side is not sellable value.
+        return;
+      }
+    }
+    if (markUnusable(priceUsd)) {
+      if (pos && !pos.closing && !this.quiet("PRICE_UNUSABLE", key)) {
+        this.log({
+          stage: "risk",
+          kind: "reject",
+          mint,
+          symbol: pos.symbol,
+          code: "PRICE_UNUSABLE",
+          message: `Risk ignored a ${pos.symbol} mark of ${price(priceUsd)} from ${origin?.feed ?? "unknown"}. A non-positive mark is invalid data. Waiting for a valid mark.`
+        });
+      }
+      return;
     }
     if (pos && !pos.closing) {
       const lastGood = book.price(mint, pos.entryPrice);
@@ -3932,6 +4051,7 @@ export class Desk {
     const key = bookKey(kind, mint);
     const pos = book.positions.get(mint);
     if (!pos || pos.closing || markUnusable(priceUsd)) return;
+    if (this.liquidityGone.has(key)) return;
     const lastGood = book.price(mint, pos.entryPrice);
     const anchor = entryAnchor(pos.entryPrice, lastGood);
     const quotes = [
@@ -3982,6 +4102,10 @@ export class Desk {
   private displayMark(pos: Position, kind: BookKind = "paper"): { price: number; at: number; feed: string } {
     const book = this.bk(kind);
     const key = bookKey(kind, pos.mint);
+    const gone = this.liquidityGone.get(key);
+    if (gone) {
+      return { price: residualMarkPrice(gone.residualUsd, pos.qty), at: gone.at, feed: "none" };
+    }
     const riskAt = book.markedAt(pos.mint) ?? pos.openedAt;
     const risk = { price: book.price(pos.mint, pos.entryPrice), at: riskAt, feed: this.riskFeed.get(key) ?? pos.priceFeed ?? pos.source };
     const live = this.liveMarks.get(key);
@@ -4038,7 +4162,8 @@ export class Desk {
       exitSlippage: p.exitSlippage ?? null,
       marks: p.marks ?? [],
       safetyChip: p.safetyChip,
-      bundleChip: p.bundleChip
+      bundleChip: p.bundleChip,
+      liquidityNote: p.liquidityNote ?? null
     });
     return {
       now: Date.now(),

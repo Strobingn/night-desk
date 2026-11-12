@@ -9,6 +9,8 @@ export interface MarkOrigin {
   pairAddress?: string;
   dex?: string;
   liquidityUsd?: number;
+  /** v13.39: quote-token liquidity in USD, when the pair printed it. */
+  quoteUsd?: number;
 }
 
 export interface MarkAnchor {
@@ -161,3 +163,44 @@ export function reanchorCandidate(
   if (now - pending.at < REANCHOR_GAP_MS) return { verdict: "wait", next: pending };
   return { verdict: "adopt" };
 }
+
+/**
+ * v13.39: quote-side USD below this, while a mid still looks valuable, is a drained
+ * pool — not a sellable price. Real rugs (a mid that actually crashed) still pass.
+ */
+export const QUOTE_SIDE_GONE_USD = 0.05;
+
+/** A mark the book can store when residual USD is 0, so applyMark and stops still run. */
+export const DUST_MARK_USD = 1e-18;
+
+export function quoteSideDrained(input: {
+  quoteUsd?: number | null;
+  midValueUsd?: number | null;
+  liquidityUsd?: number | null;
+}): boolean {
+  const quote = input.quoteUsd;
+  if (quote == null || !Number.isFinite(quote) || quote < 0) return false;
+  if (quote > QUOTE_SIDE_GONE_USD) return false;
+  const mid = input.midValueUsd ?? 0;
+  const liq = input.liquidityUsd ?? 0;
+  // Empty quote side, or a mid/token-side that still prints dollars on a drained pool.
+  return quote <= 0.01 || mid > 1 || liq > 1;
+}
+
+/** Honest residual a seller could take from the quote side. Never the stale mid. */
+export function residualExitUsd(input: { quoteUsd?: number | null; midValueUsd?: number | null }): number {
+  const quote = input.quoteUsd;
+  if (quote != null && Number.isFinite(quote) && quote >= 0) {
+    const mid = input.midValueUsd;
+    if (mid != null && Number.isFinite(mid) && mid >= 0) return Math.min(quote, mid);
+    return quote;
+  }
+  return 0;
+}
+
+export function residualMarkPrice(residualUsd: number, qty: number): number {
+  if (!(qty > 0)) return DUST_MARK_USD;
+  const px = Math.max(0, residualUsd) / qty;
+  return px > 0 && Number.isFinite(px) ? px : DUST_MARK_USD;
+}
+

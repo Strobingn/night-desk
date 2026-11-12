@@ -1,6 +1,6 @@
 import { entryPriceAllowed } from "../agents/execution-math.js";
 import { HARD_RULES, clampEntrySlippage } from "../rules.js";
-import { CONFIRM_TIMEOUT_MS, QUOTE_TIMEOUT_MS, SWAP_TIMEOUT_MS, isAmbiguousSendError, preSendFailure, rejectedSend, unconfirmedSend, withTimeout } from "./live-submit.js";
+import { CONFIRM_TIMEOUT_MS, QUOTE_TIMEOUT_MS, SELL_PRE_SEND_MS, SWAP_TIMEOUT_MS, isAmbiguousSendError, isNoRoutesBody, isNoSellRouteMessage, noSellRouteError, preSendFailure, rejectedSend, sellExitImpactError, sellQuoteTimeoutError, unconfirmedSend, withTimeout } from "./live-submit.js";
 import { loadDeskKeypair, type WalletKeyInput } from "./wallet-key.js";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -57,12 +57,30 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     ? new web3.Connection(req.rpcUrl, { commitment: "confirmed", fetch: req.rpcFetch })
     : new web3.Connection(req.rpcUrl, "confirmed");
   const owner = keypair.publicKey.toBase58();
+  // v13.39: a live sell's pre-send work (decimals, token accounts, Jupiter quote) must
+  // finish inside SELL_PRE_SEND_MS so the desk can answer with a reason. A send already
+  // in flight is not aborted. Live buys keep the existing 8s quote budget.
+  const sellDeadline = req.side === "sell" ? Date.now() + SELL_PRE_SEND_MS : null;
+  const remainMs = (): number => (sellDeadline == null ? QUOTE_TIMEOUT_MS : Math.max(50, sellDeadline - Date.now()));
+  const sellPreSend = async <T>(work: Promise<T>, label: string): Promise<T> => {
+    try {
+      return await withTimeout(work, remainMs(), label);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (req.side === "sell" && /timed out/i.test(message)) throw sellQuoteTimeoutError();
+      throw err;
+    }
+  };
   // v13.5: decimals come from the chain, not the scout feed (a wrong guess sells 1000x off).
   let decimals: number | null = null;
   try {
-    const supply = await connection.getTokenSupply(new web3.PublicKey(req.mint));
+    const supply =
+      req.side === "sell"
+        ? await sellPreSend(connection.getTokenSupply(new web3.PublicKey(req.mint)), "token decimals")
+        : await connection.getTokenSupply(new web3.PublicKey(req.mint));
     decimals = supply.value.decimals;
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && (err as { code?: string }).code === "LIVE_NOT_SUBMITTED") throw err;
     decimals = req.decimals ?? null;
   }
   if (decimals == null || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
@@ -83,7 +101,10 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     outputMint = USDC_MINT;
     amount = Math.floor(req.qty * 10 ** decimals);
     // v13.5: never try to sell more than the wallet holds (fees, rounding, or a manual wallet move).
-    const held = await connection.getParsedTokenAccountsByOwner(keypair.publicKey, { mint: new web3.PublicKey(req.mint) });
+    const held = await sellPreSend(
+      connection.getParsedTokenAccountsByOwner(keypair.publicKey, { mint: new web3.PublicKey(req.mint) }),
+      "wallet token balance"
+    );
     let raw = 0;
     for (const row of held.value) {
       const amt = (row.account.data as { parsed?: { info?: { tokenAmount?: { amount?: string } } } }).parsed?.info?.tokenAmount?.amount;
@@ -103,13 +124,30 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   const slipCap = req.side === "buy" ? entryCap : exitCap;
   quoteEndpoint.searchParams.set("slippageBps", String(Math.round(slipCap * 10_000)));
   let quoteRes: Response;
+  const quoteMs = req.side === "sell" ? Math.min(QUOTE_TIMEOUT_MS, remainMs()) : QUOTE_TIMEOUT_MS;
   try {
-    quoteRes = await fetch(quoteEndpoint, { signal: AbortSignal.timeout(QUOTE_TIMEOUT_MS) });
+    quoteRes = await fetch(quoteEndpoint, { signal: AbortSignal.timeout(quoteMs) });
   } catch {
-    throw preSendFailure("quote", "timeout");
+    throw req.side === "sell" ? sellQuoteTimeoutError() : preSendFailure("quote", "timeout");
   }
-  if (!quoteRes.ok) throw preSendFailure("quote", quoteRes.status);
-  const quote = (await quoteRes.json()) as { outAmount?: string; inAmount?: string; error?: string };
+  if (!quoteRes.ok) {
+    let body: unknown = null;
+    try {
+      body = await quoteRes.json();
+    } catch {
+      /* body optional */
+    }
+    if (req.side === "sell" && isNoRoutesBody(quoteRes.status, body)) throw noSellRouteError();
+    throw preSendFailure("quote", quoteRes.status);
+  }
+  const quote = (await quoteRes.json()) as {
+    outAmount?: string;
+    inAmount?: string;
+    error?: string;
+    errorCode?: string;
+    priceImpactPct?: string | number;
+  };
+  if (req.side === "sell" && isNoSellRouteMessage(`${quote.error ?? ""} ${quote.errorCode ?? ""}`)) throw noSellRouteError();
   if (!quote.outAmount || quote.error) throw new Error(`LIVE_SWAP_FAILED: ${quote.error ?? "empty quote"}`);
 
   if (req.side === "buy") {
@@ -118,6 +156,16 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     const mark = req.markPriceUsd ?? 0;
     const gate = entryPriceAllowed(mark, quotedPrice, entryCap);
     if (!gate.ok) throw new Error(gate.message);
+  } else {
+    // v13.39: refuse a live sell whose quoted fill exceeds the exit slippage cap. Nothing is sent.
+    const outUsd = Number(quote.outAmount) / 1_000_000;
+    const soldQty = amount / 10 ** decimals;
+    const midValue = (req.markPriceUsd ?? 0) * soldQty;
+    const vsMark = midValue > 0 && Number.isFinite(outUsd) ? 1 - outUsd / midValue : null;
+    const impactRaw = Number(quote.priceImpactPct);
+    const impact = Number.isFinite(impactRaw) ? (impactRaw > 1 ? impactRaw / 100 : impactRaw) : null;
+    const worst = Math.max(vsMark ?? 0, impact ?? 0);
+    if ((vsMark != null || impact != null) && worst > exitCap + 1e-9) throw sellExitImpactError(worst, exitCap);
   }
 
   let swapRes: Response;
