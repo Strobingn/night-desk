@@ -271,6 +271,12 @@ const MINT_SAFETY_MS = 2_500;
 const ENGINE_SAFETY_MS = 8_000;
 /** Engine live launch-bundle check. Two read-lane calls at 10/min, then fail closed. Manual buys stay on launchBundleSoon. */
 const ENGINE_LIVE_BUNDLE_MS = 15_000;
+/**
+ * Most launch-slot transactions the bundle check reads one by one, in a single batched request.
+ * Above this it reads the whole slot. Ten matches the smallest Helius plan's 10 requests a second,
+ * in case each call in a batch is counted on its own.
+ */
+const BUNDLE_TX_BATCH_MAX = 10;
 
 /** Why an engine live bundle check did not return a verdict. Timeout and RPC error are logged apart. */
 interface BundleFailure {
@@ -5809,12 +5815,46 @@ export class Desk {
       });
       if (signal?.aborted) return { reason: "timeout" };
       if (!sigRes.ok) return { reason: "rpc" };
-      const sigJson = (await sigRes.json()) as { error?: unknown; result?: Array<{ slot?: number }> };
+      const sigJson = (await sigRes.json()) as { error?: unknown; result?: Array<{ slot?: number; signature?: string; err?: unknown }> };
       if (sigJson.error) return { reason: "rpc" };
       const rows = sigJson.result ?? [];
       if (!rows.length || rows.length >= 1000) return null;
       const slot = rows[rows.length - 1]?.slot;
       if (slot == null) return null;
+      // Every launch-slot buy of this coin names the mint, so it is already in the list above.
+      // Reading just those transactions is a few kilobytes. The whole slot is megabytes.
+      // Failed transactions moved no tokens and are left out.
+      const launchRows = rows.filter((row) => row.slot === slot);
+      const launchSigs = launchRows.filter((row) => row.err == null && typeof row.signature === "string").map((row) => row.signature!);
+      const listed = launchRows.every((row) => typeof row.signature === "string");
+      if (listed && launchSigs.length > 0 && launchSigs.length <= BUNDLE_TX_BATCH_MAX) {
+        const txBody = JSON.stringify(
+          launchSigs.map((signature, id) => ({
+            jsonrpc: "2.0",
+            id,
+            method: "getTransaction",
+            params: [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
+          }))
+        );
+        const txRes = await this.net.fetch(rpc, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: txBody,
+          signal,
+          ndPriority: priority,
+          ndReadLane: front,
+          ...(front ? { timeoutMs: ENGINE_LIVE_BUNDLE_MS } : {})
+        });
+        if (signal?.aborted) return { reason: "timeout" };
+        const txJson = txRes.ok ? ((await txRes.json().catch(() => null)) as unknown) : null;
+        const txs = Array.isArray(txJson) ? txJson.map((row) => (row as { result?: SlotTransaction | null })?.result ?? null) : [];
+        // All of them or none: a missing transaction could be the bundled buy.
+        if (txs.length === launchSigs.length && txs.every((tx) => tx != null)) {
+          const activity = slotActivity(mint, txs as SlotTransaction[]);
+          return bundleShare({ supply, deltas: activity.deltas, excluded: pumpExcluded(mint), funders: activity.funders });
+        }
+        // Batch refused or incomplete: fall through to the whole-slot read.
+      }
       // Accounts, not full transactions: token balances and account keys are enough to
       // measure the launch share. Rewards and decoded instructions stay off so the slot is small.
       const blockBody = JSON.stringify({
