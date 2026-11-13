@@ -77,7 +77,7 @@ export function replayGrid(): ReplayRules[] {
 export async function replaySaved(
   quotes: RecordedQuote[],
   signals: RecordedSignal[],
-  opts: { targetNetUsd?: number; tradeUsd?: number; grid?: ReplayRules[]; /** Quotes between clock checks. Tests set 1 to force yields. */ yieldEvery?: number; /** When the replay was asked for. Timers do not run past it. Absent: the last saved quote. */ until?: number } = {}
+  opts: { targetNetUsd?: number; tradeUsd?: number; grid?: ReplayRules[]; /** Unused since 13.42: the clock is read on every quote. */ yieldEvery?: number; /** When the replay was asked for. Timers do not run past it. Absent: the last saved quote. */ until?: number } = {}
 ): Promise<ReplayResult> {
   const targetNetUsd = opts.targetNetUsd ?? STRATEGY.targetNetUsd;
   const tradeUsd = opts.tradeUsd ?? STRATEGY.tradeUsd;
@@ -127,8 +127,17 @@ export async function replaySaved(
     }
   };
   let next = 0;
-  const openSignals = (until: number) => {
+  // The desk is trading while this runs: work in short slices and hand the event loop back.
+  const sliceMs = 6;
+  let sliceStart = performance.now();
+  const breathe = async () => {
+    if (performance.now() - sliceStart < sliceMs) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    sliceStart = performance.now();
+  };
+  const openSignals = async (until: number) => {
     while (next < sortedSignals.length && sortedSignals[next]!.t <= until) {
+      await breathe();
       const index = next;
       const s = sortedSignals[next++]!;
       const liquidityUsd = Number(s.detail.liquidityUsd);
@@ -146,17 +155,11 @@ export async function replaySaved(
       }
     }
   };
-  // The desk is trading while this runs: work in short slices and hand the event loop back.
-  const sliceMs = 6;
-  const checkEvery = Math.max(1, Math.min(200, opts.yieldEvery ?? 200));
-  let sliceStart = performance.now();
   for (let i = 0; i < quotes.length; i += 1) {
-    if (i % checkEvery === 0 && performance.now() - sliceStart >= sliceMs) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      sliceStart = performance.now();
-    }
+    // The clock is read on every quote: one quote can mark dozens of positions.
+    await breathe();
     const q = quotes[i]!;
-    openSignals(q.t);
+    await openSignals(q.t);
     const held = holders.get(q.mint);
     // A saved held-position tick: the desk marks its books on it and reads nothing else from it.
     if (q.source === TICK_SOURCE) {
@@ -196,7 +199,7 @@ export async function replaySaved(
   const cutoff = opts.until ?? (quotes.length ? quotes[quotes.length - 1]!.t : 0);
   for (const held of holders.values()) for (const { key, entry } of held) advance(key, entry, cutoff + 1);
   // Signals after the last saved quote open and stay open: they are reported, not scored.
-  openSignals(Number.POSITIVE_INFINITY);
+  await openSignals(Number.POSITIVE_INFINITY);
 
   const rows: ReplayRow[] = books.map(({ signal, rules, book }) => {
     const score = scoreVariant(book.variant, book.trades);

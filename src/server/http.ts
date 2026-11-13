@@ -579,6 +579,29 @@ function unauthorized(res: http.ServerResponse): void {
   res.end("Unauthorized");
 }
 
+/** True when Accept-Encoding allows gzip: a `gzip` (or `*`) token whose q is above 0. `gzip;q=0` is a refusal. */
+export function acceptsGzip(header: string | string[] | undefined): boolean {
+  const raw = Array.isArray(header) ? header.join(",") : (header ?? "");
+  let star: number | null = null;
+  let gz: number | null = null;
+  for (const part of raw.split(",")) {
+    const [name, ...params] = part.trim().toLowerCase().split(";");
+    const coding = (name ?? "").trim();
+    if (coding !== "gzip" && coding !== "*") continue;
+    let q = 1;
+    for (const param of params) {
+      const [key, value] = param.split("=");
+      if ((key ?? "").trim() === "q") {
+        const n = Number((value ?? "").trim());
+        q = Number.isFinite(n) ? n : 0;
+      }
+    }
+    if (coding === "gzip") gz = q;
+    else star = q;
+  }
+  return gz != null ? gz > 0 : star != null && star > 0;
+}
+
 /** Bodies under this size are sent as they are: gzip would not pay for itself. */
 const GZIP_MIN_BYTES = 1_024;
 
@@ -590,7 +613,7 @@ const GZIP_MIN_BYTES = 1_024;
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   const headers: Record<string, string> = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", vary: "accept-encoding" };
-  const accepts = /\bgzip\b/i.test(String(res.req?.headers["accept-encoding"] ?? ""));
+  const accepts = acceptsGzip(res.req?.headers["accept-encoding"]);
   if (!accepts || text.length < GZIP_MIN_BYTES) {
     res.writeHead(status, headers);
     res.end(text);

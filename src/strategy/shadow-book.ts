@@ -91,7 +91,8 @@ export class ShadowBook {
     const { tradeUsd, maxOpen } = this.sizing();
     if (this.positions.has(token.mint)) return { ok: false, reason: "Already open." };
     if (this.positions.size >= maxOpen) return { ok: false, reason: `Already ${this.positions.size} open.` };
-    if (this.netToday(now) <= -this.cfg.dailyMaxLossUsd + 1e-9) return { ok: false, reason: "Paused: the day is past its loss limit." };
+    // A book with no daily limit (the replay) skips the scan of its closed trades.
+    if (this.cfg.dailyMaxLossUsd < Number.MAX_SAFE_INTEGER && this.netToday(now) <= -this.cfg.dailyMaxLossUsd + 1e-9) return { ok: false, reason: "Paused: the day is past its loss limit." };
     const sizeUsd = floorUsd(Math.min(tradeUsd, this.cashUsd));
     if (!(sizeUsd >= this.cfg.minTradeUsd)) return { ok: false, reason: "Not enough cash left in this book." };
     const quote = quotePaperBuy(token.priceUsd, sizeUsd, token.liquidityUsd);

@@ -53,6 +53,20 @@ function flattenEquityBuckets(buckets: Map<number, EquityBucket>): EquityPoint[]
   return [...byTime.values()].sort((a, b) => a.t - b.t);
 }
 
+/** Live equity rows older than this are deleted once a day. The chart's longest window is far shorter. */
+export const LIVE_EQUITY_KEEP_MS = 90 * 86_400_000;
+
+/** At most `max` points from a time-ordered series: each time bucket keeps its first, last, lowest and highest. */
+export function thinEquity(rows: EquityPoint[], max: number): EquityPoint[] {
+  if (rows.length <= max) return rows;
+  const origin = rows[0]!.t;
+  const span = Math.max(1, Math.floor(max / 4));
+  const bucketMs = Math.max(1, Math.ceil((rows[rows.length - 1]!.t - origin + 1) / span));
+  const buckets = new Map<number, EquityBucket>();
+  for (const row of rows) touchEquityBucket(buckets, bucketIndex(row.t, origin, bucketMs, span - 1), row);
+  return flattenEquityBuckets(buckets);
+}
+
 /** Place one new ledger row. Widen the grid from the points already kept, never from a 240-cap. */
 function absorbEquityPoint(cache: EquityCurveCache, point: EquityPoint): void {
   if (cache.buckets.size === 0) cache.origin = point.t;
@@ -90,7 +104,9 @@ export class DeskStore {
    * once per insert, not by resampling the previous cap.
    */
   private curveCache: EquityCurveCache | null = null;
-  private liveCurve: { since: number; max: number; points: EquityPoint[] } | null = null;
+  /** `kept` is the thinned history (never more than twice `max`); `points` is the reply built from it, dropped on each insert. */
+  private liveCurve: { since: number; max: number; kept: EquityPoint[]; points: EquityPoint[] | null } | null = null;
+  private livePrunedAt = 0;
   private liveInsert: import("node:sqlite").StatementSync | null = null;
   private equityInsert: import("node:sqlite").StatementSync | null = null;
 
@@ -292,27 +308,47 @@ export class DeskStore {
   insertLiveEquity(point: EquityPoint): void {
     this.liveInsert ??= this.db.prepare(`INSERT INTO live_equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`);
     this.liveInsert.run(point.t, point.equity, point.cash);
-    this.liveCurve = null;
+    // v13.42 the cached curve takes the new point in memory. The table is not read again.
+    const cache = this.liveCurve;
+    if (cache && point.t >= cache.since) {
+      const last = cache.kept[cache.kept.length - 1];
+      if (last && point.t < last.t) {
+        this.liveCurve = null;
+      } else {
+        cache.kept.push(point);
+        if (cache.kept.length > cache.max * 2) cache.kept = thinEquity(cache.kept, cache.max);
+        cache.points = null;
+      }
+    }
+    if (point.t - this.livePrunedAt >= 86_400_000) {
+      this.livePrunedAt = point.t;
+      const cutoff = point.t - LIVE_EQUITY_KEEP_MS;
+      this.db.prepare(`DELETE FROM live_equity WHERE ts < ?`).run(cutoff);
+      // The cached curve drops the same rows, so the chart matches what a restart would load.
+      const live = this.liveCurve;
+      if (live && live.kept.length > 0 && live.kept[0]!.t < cutoff) {
+        live.kept = live.kept.filter((row) => row.t >= cutoff);
+        live.points = null;
+      }
+    }
   }
 
-  /** The live curve since `sinceTs`, at most `max` points, each time bucket keeping its first, last, low and high. Cached until the next insert. */
+  /**
+   * The live curve since `sinceTs`, at most `max` points, each time bucket keeping its first, last,
+   * low and high. The table is read once (bounded by the retention window); after that each new
+   * sample is folded into the cached points, so a snapshot never rescans the history.
+   */
   liveEquityCurve(sinceTs: number, max = EQUITY_CURVE_POINTS): EquityPoint[] {
-    const hit = this.liveCurve;
-    if (hit && hit.since === sinceTs && hit.max === max) return hit.points;
-    const rows = this.db
-      .prepare(`SELECT ts as t, equity_usd as equity, cash_usd as cash FROM live_equity WHERE ts >= ? ORDER BY ts ASC`)
-      .all(sinceTs) as unknown as EquityPoint[];
-    let points = rows;
-    if (rows.length > max) {
-      const origin = rows[0]!.t;
-      const span = Math.max(1, Math.floor(max / 4));
-      const bucketMs = Math.max(1, Math.ceil((rows[rows.length - 1]!.t - origin + 1) / span));
-      const buckets = new Map<number, EquityBucket>();
-      for (const row of rows) touchEquityBucket(buckets, bucketIndex(row.t, origin, bucketMs, span - 1), row);
-      points = flattenEquityBuckets(buckets);
+    let cache = this.liveCurve;
+    if (!cache || cache.since !== sinceTs || cache.max !== max) {
+      const rows = this.db
+        .prepare(`SELECT ts as t, equity_usd as equity, cash_usd as cash FROM live_equity WHERE ts >= ? ORDER BY ts ASC`)
+        .all(sinceTs) as unknown as EquityPoint[];
+      cache = { since: sinceTs, max, kept: rows.length > max ? thinEquity(rows, max) : rows, points: null };
+      this.liveCurve = cache;
     }
-    this.liveCurve = { since: sinceTs, max, points };
-    return points;
+    cache.points ??= cache.kept.length > max ? thinEquity(cache.kept, max) : [...cache.kept];
+    return cache.points;
   }
 
   /** Full rows. Recap and the paper-reset archive still want the ledger. The poll path uses [equityCurve]. */
