@@ -363,6 +363,15 @@ export class Desk {
   private strategyExitRetryAt = new Map<string, number>();
   /** Live engine buys in flight. They count against the engine's open limit before they fill. */
   private engineLivePending = new Set<string>();
+  /** v13.44 what the live engine has done since the desk started, so the phone can say why it is not buying. */
+  private liveEngine = {
+    signals: 0,
+    otherSignals: 0,
+    buys: 0,
+    lastSignalAt: null as number | null,
+    lastBuyAt: null as number | null,
+    lastSkip: null as { at: number; symbol: string; code: string; message: string } | null
+  };
   /** Live engine buys run one after another, so each sees the spend and the result of the one before it. */
   private engineLiveQueue: Promise<void> = Promise.resolve();
   readonly latency = new LatencyStats();
@@ -451,6 +460,8 @@ export class Desk {
   /** Latest quote-side USD from a Dex tick, used when a later NO_ROUTES has no quote on the request. */
   private lastQuoteUsd = new Map<string, number>();
   private startedAt = Date.now();
+  /** When the live engine counters started: process start, or the last change of live variant. */
+  private liveEngineSince = Date.now();
   /** Earliest instant the current paper book owns. Recaps never look past it. */
   private resetAt = 0;
   /** Bumped by a paper reset so a fill already in flight cannot reopen the book. */
@@ -1239,7 +1250,21 @@ export class Desk {
     return {
       ...card,
       mainOpen,
-      live: { open: liveOpen, tradeUsd: this.liveTradeUsd, targetNetUsd: this.liveEngineTarget(), blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen." },
+      live: {
+        open: liveOpen,
+        tradeUsd: this.liveTradeUsd,
+        targetNetUsd: this.liveEngineTarget(),
+        blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen.",
+        since: this.liveEngineSince,
+        signals: this.liveEngine.signals,
+        otherSignals: this.liveEngine.otherSignals,
+        buys: this.liveEngine.buys,
+        lastSignalAt: this.liveEngine.lastSignalAt,
+        lastBuyAt: this.liveEngine.lastBuyAt,
+        lastSkip: this.liveEngine.lastSkip,
+        spentTodayUsd: roundUsd(this.liveSpentTodayUsd()),
+        dailyCapUsd: this.liveDailyCapUsd
+      },
       recording: this.recorder.stats()
     };
   }
@@ -1293,6 +1318,9 @@ export class Desk {
     this.strategy.settings = result.settings;
     this.store.writeJson("strategy", result.settings);
     if (wasLive !== (result.settings.liveVariant ?? null)) {
+      // The counters describe the variant that is live now, so they start over with it.
+      this.liveEngine = { signals: 0, otherSignals: 0, buys: 0, lastSignalAt: null, lastBuyAt: null, lastSkip: null };
+      this.liveEngineSince = Date.now();
       const block = this.liveEngineBlock();
       this.log({
         stage: "system",
@@ -1410,8 +1438,13 @@ export class Desk {
     const meta = fired.liveMeta;
     if (!meta) return;
     const { token, score } = fired;
+    // Results are written to the counters this attempt started under. A change of live variant swaps in new ones.
+    const tally = this.liveEngine;
+    tally.signals += 1;
+    tally.lastSignalAt = Date.now();
     const skip = (message: string) => {
       this.pipeline.executorSkips += 1;
+      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message };
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message: `Engine live buy skipped ${token.symbol}. ${message}` });
     };
     const block = this.liveEngineBlock();
@@ -1437,12 +1470,22 @@ export class Desk {
       }
       const again = this.liveEngineBlock();
       if (again) return skip(again);
-      await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
+      const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
         tag: fired.signal.signal,
         book: "live",
         engineLive: true,
         strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
       });
+      if (result.ok) {
+        tally.buys += 1;
+        tally.lastBuyAt = Date.now();
+      } else {
+        // The buy path refused (wallet, daily cap, slippage, route...). Keep its own words for the phone.
+        tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
+      }
+    } catch (err) {
+      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ERROR", message: err instanceof Error ? err.message : String(err) };
+      throw err;
     } finally {
       this.engineLivePending.delete(token.mint);
       done();
@@ -1523,6 +1566,8 @@ export class Desk {
 
   /** The paper buy and, when a live variant is set for this signal, the live buy. Neither waits on the other's outcome. */
   private async strategyBuys(fired: FiredSignal): Promise<void> {
+    // A signal of the kind the live variant does not trade: counted, so "no live buys" can be told from "no signals".
+    if (!fired.liveMeta && this.strategy.settings.liveVariant) this.liveEngine.otherSignals += 1;
     const live = fired.liveMeta ? this.strategyLiveBuy(fired).catch((err) => console.error("[strategy] live buy", err)) : null;
     await this.strategyBuy(fired);
     if (live) await live;
@@ -3265,7 +3310,8 @@ export class Desk {
       const gate = autoBuyBlock({
         autoBuy: this.autoBuy,
         maxTradesPerHour: this.maxTradesPerHour,
-        buysLastHour: this.buysInLastHour(),
+        // v13.44 an engine live buy is limited by live buys only. Paper engine buys used to fill the hourly limit first.
+        buysLastHour: this.buysInLastHour(engineLive),
         // Paper losses sit in this sum. They pause paper auto-buys only. An engine live entry keeps the $5 closed-live pause.
         dailyMaxLossUsd: engineLive ? 0 : this.dailyMaxLossUsd,
         lossSoFarUsd: this.lossSoFarUsd()
@@ -5032,9 +5078,12 @@ export class Desk {
     if (typeof saved.senderTipSol === "number") this.senderTipSol = clampSenderTipSol(saved.senderTipSol);
   }
 
-  private buysInLastHour(): number {
+  /** Buy fills in the last hour. `liveOnly` counts real-money buys only: paper engine buys must not use up the live budget. */
+  private buysInLastHour(liveOnly = false): number {
     const since = Date.now() - 3_600_000;
-    return this.store.recentEvents(500).filter((event) => event.kind === "fill" && event.ts >= since && / buy /.test(event.message)).length;
+    return this.store
+      .recentEvents(500)
+      .filter((event) => event.kind === "fill" && event.ts >= since && / buy /.test(event.message) && (!liveOnly || /\(live,/.test(event.message))).length;
   }
 
   private lossSoFarUsd(): number {

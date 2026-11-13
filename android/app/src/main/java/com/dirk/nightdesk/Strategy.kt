@@ -49,6 +49,17 @@ data class StrategyView(
     val liveTargetUsd: Double = 0.0,
     /** Why live is not trading right now. Blank when it is. */
     val liveBlocked: String = "",
+    /** v13.44 since the desk started: signals the live variant could trade, other-kind signals, live buys, the last refusal. -1 signals on an older desk. */
+    val liveSince: Long = 0,
+    val liveSignals: Int = -1,
+    val liveOtherSignals: Int = 0,
+    val liveBuys: Int = 0,
+    val liveLastBuyAt: Long = 0,
+    val liveSkipAt: Long = 0,
+    val liveSkipSymbol: String = "",
+    val liveSkipMessage: String = "",
+    val liveSpentTodayUsd: Double = 0.0,
+    val liveDailyCapUsd: Double = 0.0,
     /** v13.41 market data saved for analysis. -1 quotes on a desk that does not record. */
     val recordedQuotes: Long = -1,
     val recordedSignals: Long = 0,
@@ -176,6 +187,16 @@ object Strategy {
             liveTradeUsd = json.optJSONObject("live")?.optFinite("tradeUsd") ?: 0.0,
             liveTargetUsd = json.optJSONObject("live")?.optFinite("targetNetUsd") ?: 0.0,
             liveBlocked = json.optJSONObject("live")?.let { if (it.isNull("blocked")) "" else it.optText("blocked") } ?: "",
+            liveSince = json.optJSONObject("live")?.optFinite("since")?.toLong() ?: 0,
+            liveSignals = json.optJSONObject("live")?.takeIf { it.has("signals") }?.optFinite("signals")?.toInt() ?: -1,
+            liveOtherSignals = json.optJSONObject("live")?.optFinite("otherSignals")?.toInt() ?: 0,
+            liveBuys = json.optJSONObject("live")?.optFinite("buys")?.toInt() ?: 0,
+            liveLastBuyAt = json.optJSONObject("live")?.optFinite("lastBuyAt")?.toLong() ?: 0,
+            liveSkipAt = json.optJSONObject("live")?.optJSONObject("lastSkip")?.optFinite("at")?.toLong() ?: 0,
+            liveSkipSymbol = json.optJSONObject("live")?.optJSONObject("lastSkip")?.optText("symbol").orEmpty(),
+            liveSkipMessage = json.optJSONObject("live")?.optJSONObject("lastSkip")?.optText("message").orEmpty(),
+            liveSpentTodayUsd = json.optJSONObject("live")?.optFinite("spentTodayUsd") ?: 0.0,
+            liveDailyCapUsd = json.optJSONObject("live")?.optFinite("dailyCapUsd") ?: 0.0,
             recordedQuotes = json.optJSONObject("recording")?.takeIf { it.optBoolean("enabled", false) }?.optFinite("quotes")?.toLong() ?: -1,
             recordedSignals = json.optJSONObject("recording")?.optFinite("signals")?.toLong() ?: 0,
             recordDays = json.optJSONObject("recording")?.optFinite("days")?.toInt() ?: 0,
@@ -205,6 +226,40 @@ object Strategy {
         val stop = "${"%.0f".format(Locale.US, v.stopPct * 100)}% stop"
         if (v.trailPct <= 0.0) return stop
         return "$stop · ${"%.0f".format(Locale.US, v.trailPct * 100)}% trail" + (if (v.fade) " · fade" else "")
+    }
+
+    private fun ago(nowMs: Long, at: Long): String {
+        val min = ((nowMs - at).coerceAtLeast(0) / 60_000).toInt()
+        return when {
+            min < 1 -> "just now"
+            min < 60 -> "$min min ago"
+            min < 48 * 60 -> "${min / 60} h ago"
+            else -> "${min / (24 * 60)} days ago"
+        }
+    }
+
+    /**
+     * v13.44 why the live engine has or has not bought, in the order that explains it best.
+     * Blank on a desk that does not report it, or when no live variant is set.
+     */
+    fun liveStatus(view: StrategyView, nowMs: Long): String {
+        if (view.liveSignals < 0 || view.liveVariant.isBlank()) return ""
+        if (view.liveBlocked.isNotBlank()) return ""
+        val kind = view.variants.firstOrNull { it.live }?.signal.orEmpty().ifBlank { "matching" }
+        val cap = view.liveDailyCapUsd
+        if (cap > 0 && view.liveSpentTodayUsd + view.liveTradeUsd > cap + 1e-9) {
+            return "Daily live cap reached: $" + "%.2f".format(Locale.US, view.liveSpentTodayUsd) + " of $" + "%.2f".format(Locale.US, cap) + " spent today. Live buys resume when the desk's day rolls over, or raise the cap in Settings."
+        }
+        if (view.liveSkipAt > 0 && view.liveSkipAt >= view.liveLastBuyAt) {
+            return "Last live attempt (${ago(nowMs, view.liveSkipAt)}): ${view.liveSkipSymbol} was refused. ${view.liveSkipMessage}"
+        }
+        if (view.liveBuys > 0) return "${view.liveBuys} live ${if (view.liveBuys == 1) "buy" else "buys"} so far, the last ${ago(nowMs, view.liveLastBuyAt)}."
+        val since = if (view.liveSince > 0) " since ${ago(nowMs, view.liveSince)}" else ""
+        if (view.liveSignals == 0 && view.liveOtherSignals > 0) {
+            return "No $kind signal has fired$since. ${view.liveOtherSignals} of the other kind fired, which this variant does not trade."
+        }
+        if (view.liveSignals == 0) return "No signal has fired$since. Live buys only happen on a signal."
+        return "${view.liveSignals} $kind ${if (view.liveSignals == 1) "signal" else "signals"}$since, no live buy yet."
     }
 
     /** "Saving market data: 12,340 quotes and 18 signals, kept 14 days." Blank when the desk does not record. */

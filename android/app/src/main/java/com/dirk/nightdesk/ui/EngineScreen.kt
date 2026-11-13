@@ -139,6 +139,8 @@ fun EngineScreen(
                             color = P.muted, fontSize = 12.sp, lineHeight = 16.sp
                         )
                         if (view.liveBlocked.isNotBlank()) Text("Not buying: ${view.liveBlocked}", color = P.down, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
+                        val why = Strategy.liveStatus(view, System.currentTimeMillis())
+                        if (why.isNotBlank()) Text(why, color = if (view.liveBuys > 0 && view.liveSkipAt < view.liveLastBuyAt) P.muted else P.down, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp).testTag("engine-live-why"))
                         TextButton(onClick = { onStrategy(mapOf("liveVariant" to null)) }, modifier = Modifier.testTag("engine-live-off")) {
                             Text("Turn live off", color = P.down, fontWeight = FontWeight.Bold)
                         }
