@@ -3333,6 +3333,16 @@ export class Desk {
     try {
       if (isLive) {
         try {
+          // The operator may have turned the engine or its live variant off while this buy waited on wallet reads.
+          if (engineLive) {
+            const still = this.strategy.settings.liveVariant === extra.strategy?.variant ? this.liveEngineBlock() : "The live variant was turned off.";
+            if (still) {
+              const message = `Engine live buy cancelled before it was sent. ${still}`;
+              this.pipeline.executorSkips += 1;
+              this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message });
+              return { ok: false, error: message, code: "ENGINE_LIVE_PAUSED" };
+            }
+          }
           const live = await this.runLiveSwap({
             side: "buy",
             mint: token.mint,

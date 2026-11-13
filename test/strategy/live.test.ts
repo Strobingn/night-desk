@@ -217,6 +217,37 @@ describe("engine live variant", () => {
     }
   });
 
+  it("turning live off while a buy waits on the wallet cancels it before anything is sent", async () => {
+    const secret = base58Encode(Keypair.generate().secretKey);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let slow = false;
+    const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), {
+      walletBalances: async () => {
+        if (slow) await gate;
+        return { sol: 0.5, usdc: 100, at: Date.now(), error: null };
+      }
+    });
+    desk.setOperatorReady(true);
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
+      await desk.submitCandidate(young());
+      const t = Date.now();
+      desk.strategyQuote(MINT, quote(t + 10_000, 1.01), t + 10_000);
+      slow = true;
+      desk.strategyQuote(MINT, quote(t + 22_000, 1.025), t + 22_000);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      desk.updateStrategy({ liveVariant: null });
+      release();
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(buys()).toHaveLength(0);
+      expect(desk.liveBook!.positions.size).toBe(0);
+    } finally {
+      release();
+      desk.stop();
+    }
+  });
+
   it("still refuses any other AI live buy", async () => {
     const desk = liveDesk();
     try {
