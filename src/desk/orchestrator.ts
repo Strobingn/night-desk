@@ -1259,7 +1259,10 @@ export class Desk {
     return net;
   }
 
-  /** Why the engine would not send a live buy right now, or null when it would. The wallet and daily cap are checked at the buy. */
+  /**
+   * Why the engine would not send a live buy right now, or null when it would.
+   * The wallet and daily cap are checked at the buy. The $10 paper-book pause is not an input.
+   */
   private liveEngineBlock(): string | null {
     if (!this.strategy.settings.enabled) return "The trading engine is off.";
     if (!this.liveBook) return "The live wallet is not armed on this desk.";
@@ -1510,6 +1513,7 @@ export class Desk {
     }
     const net = this.netTodayUsd();
     if (net <= -STRATEGY.dailyMaxLossUsd + 1e-9) {
+      // Paper engine entries only. The live buy for this signal is strategyLiveBuy, which does not read this result.
       skip("DAILY_LOSS", `The paper book is ${money(net)} on the day, past the engine's $${STRATEGY.dailyMaxLossUsd.toFixed(0)} pause. It resumes on the next UTC day.`);
       return;
     }
@@ -3262,7 +3266,8 @@ export class Desk {
         autoBuy: this.autoBuy,
         maxTradesPerHour: this.maxTradesPerHour,
         buysLastHour: this.buysInLastHour(),
-        dailyMaxLossUsd: this.dailyMaxLossUsd,
+        // Paper losses sit in this sum. They pause paper auto-buys only. An engine live entry keeps the $5 closed-live pause.
+        dailyMaxLossUsd: engineLive ? 0 : this.dailyMaxLossUsd,
         lossSoFarUsd: this.lossSoFarUsd()
       });
       if (!gate.ok) {

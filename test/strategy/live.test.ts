@@ -264,6 +264,83 @@ describe("engine live variant", () => {
     }
   });
 
+  function closed(
+    desk: Desk,
+    id: string,
+    mode: "paper" | "live",
+    pnlUsd: number
+  ): void {
+    const now = Date.now();
+    desk.store.openTrade({ id, mint: `${id}Mint`, symbol: id.toUpperCase(), openedAt: now - 60_000, costUsd: 50, score: 0.7, mode });
+    desk.store.closeTrade({
+      id,
+      mint: `${id}Mint`,
+      symbol: id.toUpperCase(),
+      openedAt: now - 60_000,
+      closedAt: now - 30_000,
+      costUsd: 50,
+      proceedsUsd: 50 + pnlUsd,
+      pnlUsd,
+      pnlPct: pnlUsd / 50,
+      exitCode: "STOP_LOSS",
+      score: 0.7,
+      mode
+    });
+  }
+
+  it("paper pause tripped, live pause not tripped means live launch entry allowed and paper entry blocked", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateSettings({ dailyMaxLossUsd: 10 });
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-1" });
+      closed(desk, "paper-loss", "paper", -11);
+      await signal(desk);
+      expect(desk.book.positions.has(MINT)).toBe(false);
+      expect(codes(desk)).toContain("DAILY_LOSS");
+      expect(desk.snapshot().events.some((e) => /Auto-buys wait/.test(e.message))).toBe(false);
+      expect(buys()).toHaveLength(1);
+      expect(buys()[0]?.[0]).toMatchObject({ side: "buy", sizeUsd: 5 });
+      expect(desk.liveBook!.positions.get(MINT)?.strategy?.variant).toBe("launch-1");
+      expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
+      expect(desk.strategyView().live?.blocked).toBeNull();
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("live pause tripped means live blocked", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-1" });
+      closed(desk, "live-loss", "live", -6);
+      await signal(desk);
+      expect(buys()).toHaveLength(0);
+      expect(desk.liveBook!.positions.has(MINT)).toBe(false);
+      expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
+      expect(desk.strategyView().live?.blocked).toMatch(/\$5 live pause/);
+      expect(desk.book.positions.get(MINT)?.strategy?.variant).toBe("launch-1");
+      expect(codes(desk)).not.toContain("DAILY_LOSS");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("both clear means both allowed", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-1" });
+      await signal(desk);
+      expect(desk.book.positions.get(MINT)?.strategy?.variant).toBe("launch-1");
+      expect(buys()).toHaveLength(1);
+      expect(desk.liveBook!.positions.get(MINT)?.strategy?.variant).toBe("launch-1");
+      expect(codes(desk)).not.toContain("DAILY_LOSS");
+      expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
+      expect(desk.strategyView().live?.blocked).toBeNull();
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("sells a live engine position at its engine stop, as a live sell", async () => {
     const desk = liveDesk();
     try {

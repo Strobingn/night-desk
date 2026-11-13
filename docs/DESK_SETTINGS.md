@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-13 (13.42). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-13 (13.43). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -110,7 +110,7 @@ Allowed `POST /api/settings` keys: `liveTradeUsd`, `liveDailyCapUsd`, `liveTrail
 
 On for a live feed. `strategyEngine` defaults on when `FEED_MODE=live` and the demo tape is off. Production has `FEED_MODE=live` and `DEMO_FEED=0`, and it does not set `STRATEGY_ENGINE`, so a 13.31 boot turns the engine on. `STRATEGY_ENGINE=0` would turn that default off. A saved Settings → Trading engine switch (SQLite key `strategy`) wins after boot. Dirk approved leaving that default-on logic as it is, including the $10 UTC-day paper-loss pause.
 
-The $10 pause is a code constant (`STRATEGY.dailyMaxLossUsd` in `src/strategy/config.ts`). It is not a `POST /api/strategy/settings` field. New engine buys stop for the rest of the UTC day once today's paper result is $10 down. Shadow books use the same pause. It does not change the live $5 / $20 caps.
+The $10 pause is a code constant (`STRATEGY.dailyMaxLossUsd` in `src/strategy/config.ts`). It is not a `POST /api/strategy/settings` field. New paper engine buys stop for the rest of the UTC day once today's paper result is $10 down. The paper-loss pause applies to paper only and does not stop a live engine buy. Shadow books use the same pause on their own results. It does not change the live $5 / $20 caps.
 
 | Setting | Value | Where |
 |---|---|---|
@@ -279,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.42** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.42, `versionCode` 1342, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.43** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.43, `versionCode` 1343, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -298,6 +298,10 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.43 notes
+
+The $10 UTC-day paper-loss pause applies to paper engine buys only. It does not stop a live engine buy. Live engine buys still pause on the $5 closed-live loss (`STRATEGY.live.dailyMaxLossUsd`). No pause amount, size, cap, stop, slippage, or cooldown changed.
 
 ## 13.42 notes
 
