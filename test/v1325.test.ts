@@ -115,10 +115,10 @@ describe("v13.25 wallet display and hard-kill copy", () => {
     const buried = net.fetchAt(0)(url, { method: "POST", body: marks });
     const wallet = net.fetchAt(-1)(url, { method: "POST", body: balance });
     expect(later.length).toBeGreaterThan(0);
-    now += 6_000;
-    later.shift()?.();
+    // 13.46: the wallet read does not wait for a token. It goes while the mark is still queued.
     await wallet;
     expect(sent.at(-1)).toContain("getBalance");
+    expect(net.stats().find((row) => row.id === "helius")?.queued).toBe(1);
     now += 6_000;
     later.shift()?.();
     await buried;
