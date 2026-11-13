@@ -55,7 +55,7 @@ class GateError extends Error {
 }
 import { visibleEquity } from "./equity-series.js";
 import { replaySaved, type ReplayResult } from "../strategy/replay.js";
-import { MarketRecorder, type RecordedQuote, type RecordedSignal, type RecorderStats } from "../market/recorder.js";
+import { feedOf, MarketRecorder, type RecordedQuote, type RecordedSignal, type RecorderStats } from "../market/recorder.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
@@ -1369,9 +1369,9 @@ export class Desk {
       });
       // A position is marked only by the feed that priced its entry, so a signal must come from that feed too.
       const anchor = this.strategyFeed.get(mint);
-      const feed = q.source === "dexscreener" ? "dexscreener" : q.source === "jupiter" ? "jupiter" : q.source === "pump.fun curve" ? "chain" : q.source;
+      const feed = feedOf(q.source) ?? undefined;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt }, now);
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt, ...(feed ? { feed } : {}) }, now);
     }
     this.strategy.tick(now);
     this.recorder.flush();
@@ -1471,6 +1471,8 @@ export class Desk {
         sells5m: quote.sells5m ?? null,
         ageSeconds: fired.token.ageSeconds,
         score: fired.score,
+        // The feed that priced the signal. The position is marked only by this feed, and so is its replay.
+        feed: quote.feed ?? null,
         paperVariant: fired.meta.variant,
         liveVariant: fired.liveMeta?.variant ?? null
       }

@@ -35,14 +35,16 @@ describe("13.41 market recorder", () => {
     expect(rec.quote(q(8_000, 1.02))).toBe(true);
     expect(rec.quote(q(40_000, 1.02))).toBe(true); // unchanged, but 30 s on
     expect(rec.quote(q(50_000, 0))).toBe(false);
+    // Same price, but the pool lost depth: saved, because an exit rule reads depth.
+    expect(rec.quote(q(46_000, 1.02, { liquidityUsd: 140_000 }))).toBe(true);
     expect(rec.quote(q(9_000, 2, { mint: "Other" }))).toBe(true);
-    expect(rec.stats()).toMatchObject({ enabled: true, days: 14, quotes: 4 });
+    expect(rec.stats()).toMatchObject({ enabled: true, days: 14, quotes: 5 });
     const out = rec.quotesBetween({});
-    expect(out.rows.map((r) => r.t)).toEqual([1_000, 8_000, 9_000, 40_000]);
+    expect(out.rows.map((r) => r.t)).toEqual([1_000, 8_000, 9_000, 40_000, 46_000]);
     expect(out.rows[0]).toMatchObject({ mint: "MintR", symbol: "REC", priceUsd: 1, buys5m: 30, sells5m: 20, source: "dexscreener" });
     expect(rec.quotesBetween({ mint: "Other" }).rows).toHaveLength(1);
     expect(rec.quotesBetween({ limit: 2 })).toMatchObject({ more: true });
-    return rec.latestQuotes(0, 3).then((rows) => expect(rows.map((r) => r.t)).toEqual([8_000, 9_000, 40_000]));
+    return rec.latestQuotes(0, 3).then((rows) => expect(rows.map((r) => r.t)).toEqual([9_000, 40_000, 46_000]));
   });
 
   it("is off at 0 days and reads the env value safely", () => {
@@ -165,6 +167,27 @@ describe("13.41 replay on saved data", () => {
     // Fresh reading: the fade sells at 1.11. Stale reading: no fade, so the trade rides on to the later prices.
     expect(fresh.netUsd).toBeGreaterThan(4);
     expect(stale.netUsd).toBeLessThan(0);
+  });
+
+  it("sells on a timer that falls between two saved quotes, at the earlier price", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000 };
+    const out = await replaySaved([q(t0 + 590_000, 1), q(t0 + 610_000, 1.2)], [{ t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail }]);
+    const fixed = out.rows.find((r) => r.signal === "launch" && r.label === "3% stop, sell at target")!;
+    expect(fixed.trades).toBe(1);
+    expect(fixed.netUsd).toBeLessThan(0);
+  });
+
+  it("ignores a quote from a feed the position is not marked by", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000, feed: "dexscreener" };
+    const out = await replaySaved(
+      [q(t0 + 10_000, 0.95, { source: "jupiter" }), q(t0 + 20_000, 1.2)],
+      [{ t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail }]
+    );
+    const fixed = out.rows.find((r) => r.signal === "launch" && r.label === "3% stop, sell at target")!;
+    expect(fixed.trades).toBe(1);
+    expect(fixed.netUsd).toBeGreaterThan(3);
   });
 
   it("says so when there is nothing to replay", async () => {

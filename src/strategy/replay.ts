@@ -1,4 +1,4 @@
-import type { RecordedQuote, RecordedSignal } from "../market/recorder.js";
+import { feedOf, type RecordedQuote, type RecordedSignal } from "../market/recorder.js";
 import { SIGNALS, STRATEGY, type SignalKind, type StrategyConfig, type Variant } from "./config.js";
 import { performance } from "node:perf_hooks";
 import type { MarketFlow } from "./exits.js";
@@ -111,6 +111,21 @@ export async function replaySaved(
   const sortedSignals = [...signals].sort((a, b) => a.t - b.t);
   /** Coin → open position keys and the book holding each. A quote only visits books that hold the coin. */
   const holders = new Map<string, Array<{ key: string; entry: Entry }>>();
+  /** The feed that priced a coin's signal. The desk marks the position only by that feed, so the replay does too. */
+  const coinFeed = new Map<string, string>();
+  /**
+   * Time passing between two saved quotes. The desk checks timer exits every pass on the last mark
+   * while it is fresh, so a time limit or a stall that falls between quotes sells at the earlier price.
+   */
+  const passMs = 2_000;
+  const advance = (key: string, entry: Entry, until: number) => {
+    const pos = entry.book.positions.get(key);
+    if (!pos) return;
+    const end = Math.min(until, pos.lastMarkAt + STRATEGY.watch.markFreshMs);
+    for (let t = pos.lastMarkAt + passMs; t < end; t += passMs) {
+      if (entry.book.tickOne(key, t)) return;
+    }
+  };
   let next = 0;
   const openSignals = (until: number) => {
     while (next < sortedSignals.length && sortedSignals[next]!.t <= until) {
@@ -120,6 +135,7 @@ export async function replaySaved(
       if (!(s.priceUsd > 0) || !(liquidityUsd > 0)) continue;
       const vol5mUsd = Number(s.detail.vol5mUsd);
       const key = `${s.mint}#${index}`;
+      if (typeof s.detail.feed === "string" && s.detail.feed) coinFeed.set(s.mint, s.detail.feed);
       for (const entry of books) {
         if (entry.signal !== s.kind) continue;
         const opened = entry.book.open({ mint: key, symbol: s.symbol, priceUsd: s.priceUsd, liquidityUsd, vol5mUsd: Number.isFinite(vol5mUsd) ? vol5mUsd : null }, s.t);
@@ -135,10 +151,24 @@ export async function replaySaved(
   const checkEvery = Math.max(1, Math.min(200, opts.yieldEvery ?? 200));
   let sliceStart = performance.now();
   for (let i = 0; i < quotes.length; i += 1) {
+    if (i % checkEvery === 0 && performance.now() - sliceStart >= sliceMs) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      sliceStart = performance.now();
+    }
     const q = quotes[i]!;
     openSignals(q.t);
-    flows.set(q.mint, { at: q.flowAt ?? q.t, vol5mUsd: q.vol5mUsd, buys5m: q.buys5m, sells5m: q.sells5m, liquidityUsd: q.liquidityUsd });
+    const anchor = coinFeed.get(q.mint);
     const held = holders.get(q.mint);
+    // A quote from another feed is one the desk would not have acted on. Time still passes.
+    if (anchor && feedOf(q.source) !== anchor) {
+      if (held) for (let h = held.length - 1; h >= 0; h -= 1) {
+        advance(held[h]!.key, held[h]!.entry, q.t);
+        if (!held[h]!.entry.book.positions.has(held[h]!.key)) held.splice(h, 1);
+      }
+      continue;
+    }
+    if (held) for (const { key, entry } of held) advance(key, entry, q.t);
+    flows.set(q.mint, { at: q.flowAt ?? q.t, vol5mUsd: q.vol5mUsd, buys5m: q.buys5m, sells5m: q.sells5m, liquidityUsd: q.liquidityUsd });
     if (held) {
       for (let h = held.length - 1; h >= 0; h -= 1) {
         const { key, entry } = held[h]!;
@@ -147,11 +177,9 @@ export async function replaySaved(
       }
       if (held.length === 0) holders.delete(q.mint);
     }
-    if (i % checkEvery === 0 && performance.now() - sliceStart >= sliceMs) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      sliceStart = performance.now();
-    }
   }
+  // Positions with no later quote still run out their timers on the last mark.
+  for (const held of holders.values()) for (const { key, entry } of held) advance(key, entry, Number.POSITIVE_INFINITY);
   // Signals after the last saved quote open and stay open: they are reported, not scored.
   openSignals(Number.POSITIVE_INFINITY);
 

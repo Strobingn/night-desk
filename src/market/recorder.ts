@@ -41,7 +41,7 @@ export const RECORDER = {
   maxDays: 90,
   /** A coin is saved at most this often. */
   minGapMs: 5_000,
-  /** An unchanged price is still saved this often, so volume and depth changes are kept. */
+  /** A quote with nothing changed (price, depth, volume, trade counts, source) is still saved this often. */
   unchangedGapMs: 30_000,
   /** Buffered rows are written in one transaction at this size, or on flush(). */
   flushRows: 200,
@@ -68,7 +68,7 @@ export class MarketRecorder {
   private readonly insertQuote: StatementSync | null = null;
   private readonly insertSignal: StatementSync | null = null;
   private buffer: RecordedQuote[] = [];
-  private readonly last = new Map<string, { t: number; priceUsd: number }>();
+  private readonly last = new Map<string, { t: number; sig: string }>();
   private quotes = 0;
   private signals = 0;
   private oldestAt: number | null = null;
@@ -125,13 +125,15 @@ export class MarketRecorder {
   /** Buffer one quote. Returns false when it was skipped (off, bad price, or too soon after the last one for this coin). */
   quote(row: RecordedQuote): boolean {
     if (!this.enabled || !(row.priceUsd > 0) || !Number.isFinite(row.priceUsd) || !Number.isFinite(row.t)) return false;
+    // Everything an exit rule reads: a change in depth, volume or trade counts is saved even at an unchanged price.
+    const sig = `${row.priceUsd}|${row.liquidityUsd ?? ""}|${row.vol5mUsd ?? ""}|${row.buys5m ?? ""}|${row.sells5m ?? ""}|${row.source ?? ""}`;
     const prev = this.last.get(row.mint);
     if (prev) {
       const gap = row.t - prev.t;
       if (gap < RECORDER.minGapMs) return false;
-      if (row.priceUsd === prev.priceUsd && gap < RECORDER.unchangedGapMs) return false;
+      if (sig === prev.sig && gap < RECORDER.unchangedGapMs) return false;
     }
-    this.last.set(row.mint, { t: row.t, priceUsd: row.priceUsd });
+    this.last.set(row.mint, { t: row.t, sig });
     this.buffer.push(row);
     if (this.buffer.length >= RECORDER.flushRows) this.flush();
     return true;
@@ -251,6 +253,12 @@ export class MarketRecorder {
 }
 
 const CSV_COLUMNS: Array<keyof RecordedQuote> = ["t", "mint", "symbol", "priceUsd", "liquidityUsd", "vol5mUsd", "vol1hUsd", "change1hPct", "buys5m", "sells5m", "source"];
+
+/** The engine's name for a quote source: the feed a position is marked by. */
+export function feedOf(source: string | null | undefined): string | null {
+  if (!source) return null;
+  return source === "pump.fun curve" ? "chain" : source;
+}
 
 /** CSV for a spreadsheet or a notebook. Symbols are quoted; a symbol cannot start a formula. */
 export function quotesCsv(rows: RecordedQuote[]): string {

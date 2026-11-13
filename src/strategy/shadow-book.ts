@@ -133,6 +133,12 @@ export class ShadowBook {
   }
 
   /** Time limits. Uses each position's last mark, and only while that mark is fresh. */
+  /** Time passing for one position with no new mark: the timer exits (time limit, stall) on its last mark while that is fresh. */
+  tickOne(mint: string, now: number): ShadowTrade | null {
+    const pos = this.positions.get(mint);
+    return pos ? this.assess(pos, now) : null;
+  }
+
   tick(now: number): ShadowTrade[] {
     const closed: ShadowTrade[] = [];
     for (const pos of [...this.positions.values()]) {

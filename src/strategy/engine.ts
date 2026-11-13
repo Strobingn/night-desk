@@ -72,6 +72,8 @@ export interface EngineQuote extends TrackedMark {
   sells5m?: number | null;
   /** When volume and trade counts were actually read. Absent: the quote's own time. */
   flowAt?: number;
+  /** The feed that priced this quote ("dexscreener", "jupiter", "chain"). Saved with a signal for the replay. */
+  feed?: string;
 }
 
 export interface FiredSignal {
