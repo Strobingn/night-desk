@@ -396,14 +396,15 @@ describe("v13.33 Helius priority-0 queue", () => {
     });
     const wallet = net.fetchAt(-1)(url, { method: "POST", body: walletBody });
     expect(net.stats().find((row) => row.id === "helius")?.queued ?? 0).toBeLessThanOrEqual(HELIUS_P0_QUEUE_MAX + 1);
+    // 13.46: the wallet read does not wait for a token. It goes ahead of every queued mark.
+    await wallet;
+    expect(sent.at(-1)).toContain("getBalance");
+    expect(sent.at(-1)).toContain("Wallet1111111111111111111111111111111111111");
     timers.sort((a, b) => a.at - b.at);
     const next = timers.shift();
     expect(next).toBeTruthy();
     now = next!.at;
     next!.fn();
-    await wallet;
-    expect(sent.at(-1)).toContain("getBalance");
-    expect(sent.at(-1)).toContain("Wallet1111111111111111111111111111111111111");
     expect(net.stats().find((row) => row.id === "helius")?.queued ?? 0).toBeLessThanOrEqual(HELIUS_P0_QUEUE_MAX);
     void tracked;
   });

@@ -66,4 +66,42 @@ describe("v13.46 Helius read lane keeps room for a buy's checks", () => {
     const ceiling = BUCKETS.find((b) => b.id === "helius")!.budgetPerMin;
     expect(net.stats().find((row) => row.id === "helius")?.reqLastMin).toBe(ceiling - HELIUS_FRONT_RESERVE);
   });
+
+  it("front reads on an empty bucket leave no token debt for the marks behind them", () => {
+    let now = 0;
+    const timers: Array<{ at: number; fn: () => void }> = [];
+    const sent: number[] = [];
+    const net = new NetLimiter({
+      clock: {
+        now: () => now,
+        random: () => 0,
+        setTimeout: ((fn: () => void, ms: number) => {
+          timers.push({ at: now + ms, fn });
+          return 0;
+        }) as typeof setTimeout
+      },
+      fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+        sent.push(Number(JSON.parse(String(init?.body)).id));
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch
+    });
+    const post = (id: number, method: string, ndPriority: -1 | 0 | 2, ndReadLane = false) =>
+      void net.fetch(HELIUS, { method: "POST", body: body(id, method), ndPriority, ndReadLane }).catch(() => null);
+    for (let i = 1; i <= 3; i += 1) post(i, "getAccountInfo", 2); // drains the burst of 3
+    for (let i = 11; i <= 13; i += 1) post(i, "getBlock", -1, true); // three front reads on an empty bucket
+    post(21, "getMultipleAccounts", 0); // a mark poll behind them
+    const step = () => {
+      timers.sort((a, b) => a.at - b.at);
+      const next = timers.shift();
+      if (!next) return false;
+      now = Math.max(now, next.at);
+      next.fn();
+      return true;
+    };
+    expect(net.stats().find((row) => row.id === "helius")?.reqLastMin).toBe(6); // 3 background, 3 front, mark queued
+    while (timers.length && timers.reduce((min, t) => Math.min(min, t.at), Infinity) <= 7_000 && step());
+    // One token is 6 s at 10/min. With a debt of three the mark would wait about 24 s.
+    expect(net.stats().find((row) => row.id === "helius")?.reqLastMin).toBe(7);
+    expect(net.stats().find((row) => row.id === "helius")?.queued).toBe(0);
+  });
 });

@@ -540,7 +540,9 @@ export class NetLimiter {
     while (b.queue.length && now >= b.pauseUntil && this.enrichRpsWait(b, now) === 0) {
       const needs = this.headNeeds(b);
       if (b.tokens < needs.tokens || this.heliusWait(b, now, needs.reserve) !== 0) break;
-      b.tokens -= 1;
+      // A front read that found the bucket empty leaves no debt: marks behind it wait for one
+      // token, not for the bucket to climb back from below zero. The minute ceiling is the cap.
+      b.tokens = Math.max(0, b.tokens - 1);
       b.sent += 1;
       b.sentTimes.push(now);
       b.queue.shift()!.resolve();
