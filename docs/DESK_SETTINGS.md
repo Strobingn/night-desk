@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-12 (13.39). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-12 (13.40). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -10,12 +10,13 @@ Machine-readable copy: [`docs/desk-settings.json`](desk-settings.json).
 
 ## Hard rules
 
-- AI stays paper-only. `liveAutoBuy` cannot be turned on. `POST /api/settings` with `liveAutoBuy: true` is refused. Live scope is manual: an operator buy, limit, or stop may send a real swap; AI auto-buys never spend live. The 13.30 trading engine is the same rule: its buys call the paper book only, and its exits do not set `book: "live"`.
+- AI stays paper-only. `liveAutoBuy` cannot be turned on. `POST /api/settings` with `liveAutoBuy: true` is refused. Live scope is manual: an operator buy, limit, or stop may send a real swap; AI auto-buys never spend live. The trading engine is paper only by default. Since 13.40 the owner can set one engine variant live (`liveVariant` on `POST /api/strategy/settings`, the Engine tab's Live money section). That is the only AI path that can spend live, it is off until set, and any other AI live buy is still refused with `LIVE_AI_BLOCKED`.
 - The desk's hard stop is checked before an engine exit. A mark at or past the hard stop closes as `STOP_LOSS` or `GAP_RUG`, not as the engine's own stop. The engine's stop (1% on the main paper book) can only be tighter.
 - Never drop the v13.11 baseline controls (paper and live limit / take-profit / stop orders, and the rest of that book and ticket UI).
 - Bogus-price rejection stays on (`src/market/mark-guard.ts`). Non-finite or non-positive prints are rejected. Implausible upward jumps and unit / decimal or SOL-vs-USD mix-ups (including a rise of 25× or more) do not update equity or stops unless confirmed. A genuine crash is never rejected by this guard, so the hard stop can still fire.
 - The hard stop cannot be loosened past 6%. `LIVE_TRADING`, the wallet secret, and mode cannot be changed from the API.
-- 13.30: the trading engine trades the paper book only. Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard `ready` flag arms nothing.
+- 13.40: twelve trailing shadow books and the opt-in engine live variant. See "13.40 notes". The hard stop, the Helius 10/8 caps and the live $5 / $20 limits are unchanged.
+- 13.30: the trading engine trades the paper book only (until a live variant is set, 13.40). Its buys go through the analyst path, which refuses the live book. The engine stop can only sit tighter than the hard stop and never moves it. The scorecard `ready` flag arms nothing.
 - 13.31 keeps that engine. It does not add a live order path, move the hard stop, change the Helius 10/8 caps, or change the live $5 / $20 limits.
 - 13.32: an explicit manual buy (`POST /api/positions/buy`, source `manual`, book `paper` or `live`) bypasses the engine watch, the analyst score, soft filter kills, and the hard-stop ban. A resting limit fill uses the same buy checks but does not skip the ban. The desk logs `MANUAL_OVERRIDE` and can return a `warning`; the fill already happened. Hard kills (`MINT_AUTHORITY_ACTIVE`, `DEV_RUG_HISTORY`, token safety `blocked`) still return `HARD_KILL` until `confirmHardKill`. That confirm may be live. Analyst and engine buys still cannot name the live book (`LIVE_AI_BLOCKED`). This does not change the $5 default, the $20 daily cap, the wallet check, entry slippage, pool depth, idempotency, operator auth, or bogus-price rejection.
 - 13.33: the poll path no longer loads the whole equity table or waits on Helius for `/api/wallet`. The equity cache keeps time buckets (first, last, min, max) and widens them as the session grows, so a later insert does not resample the 240-point cap. Snapshots carry a monotonic `seq`; the phone and the web UI ignore an older one, and a position mark drops the 1s cache. A live buy still refuses a balance older than 60s. A live sell may use an older successful SOL figure so a stop is not stuck behind Helius. Caps stay 10 and 8. Live size stays $5, the daily cap $20, exit slippage 6%, cooldown 0, and the engine $10 UTC-day paper-loss pause. The engine stays paper-only. The 13.32 manual override is unchanged. No numeric trading or filter setting moved.
@@ -79,7 +80,7 @@ A first visit may carry `?token=`. The page copies it into `sessionStorage` key 
 |---|---|---|
 | GET | `/api/health` | `ok`, `mode`, `now`, `publicUrl` (null on the Caddy host), `eventLoopLag`, `prefilter` (`kills`, `rpcSaved`, `heliusQueue`, `enrich.p50Ms`, `enrich.p90Ms`), `unverifiedKills` (fail-closed "could not be verified" counts by reason code) |
 | GET | `/api/state` | `seq`, `appVersion`, `mode`, `liveScope`, `liveBook`, `wallet`, `readiness`, `cashUsd`, `equityUsd`, `startingBalanceUsd`, `sessionPnlUsd`, `prefs`, `rules`, `positions`, `closed`, `orders`, `feed`, `pipeline`, `killReasons`, `recheck`, `enrich`, `prefilter`, `events`, `advice`, `watchlist`, `exposureUsd`, `positionCapUsd`, `cooldowns`, `rawTape`, `tapeQuotes`, `markLoop`, `safetyChips`, `lastClientCrash`, `strategy`, `perf`, `now` |
-| GET | `/api/strategy/scorecard` | `ok`, `strategy` (same scorecard as `state.strategy`): engine settings, watch count, six shadow-book rows (`trades`, `wins`, `winRate`, `avgWinUsd`, `avgLossUsd`, `netUsd`, `avgNetUsd`, `maxDrawdownUsd`, `open`, `active`, `ready`), `stats`, `note`. Paper only. |
+| GET | `/api/strategy/scorecard` | `ok`, `strategy` (same scorecard as `state.strategy`): engine settings, watch count, eighteen shadow-book rows (six fixed-target, twelve trailing: `trailPct`, `fade`, `live`, `trades`, `wins`, `winRate`, `avgWinUsd`, `avgLossUsd`, `netUsd`, `avgNetUsd`, `maxDrawdownUsd`, `open`, `active`, `ready`), `liveVariant`, `live` (`open`, `tradeUsd`, `targetNetUsd`, `blocked`), `stats`, `note`. |
 | POST | `/api/strategy/settings` | `ok`, `strategy`, `error`. Body may set `enabled`, `tradeUsd` ($5–$500), `targetNetUsd` ($0.25–$50), `maxOpen` (1–6), and `active` (`{launch, momentum}` variant ids: `launch-1`, `launch-3`, `launch-6`, `momentum-1`, `momentum-3`, `momentum-6`). Saved in SQLite KV key `strategy`. Cannot arm live. |
 | POST | `/api/strategy/reset` | Requires `confirm: true`. Wipes the shadow books and `shadow_trades`. The main paper book is not touched. |
 | GET | `/api/events` | `events` (query: `limit`, `stage`, `before`) |
@@ -278,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.39** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.39, `versionCode` 1339, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.40** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.40, `versionCode` 1340, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -297,6 +298,26 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.40 notes
+
+Trailing and fade exits, and the engine's live variant.
+
+Shadow books: 18 (was 6). The six fixed-target books keep their ids and rules. Twelve trailing books are added, six per signal: `<signal>-3-t4`, `-t8`, `-t12` and the same with `f`. All use a 3% stop (from the entry mark) until the target.
+
+- At the target a trailing book does not sell. It records the mark as its high and from then on sells when the mark is its trail percent under the high (`ENGINE_TRAIL`), or when a sell would net half the target or less (`PROFIT_LOCK`). Before the target it has the same breakeven and time limit as the fixed books. Once trailing it is closed at 4x the signal's time limit.
+- An `f` book also sells on a fading run (`FADE_EXIT`): 5-minute volume under 50% of the volume at the buy, sells at least 1.5x buys over 5 minutes with 10 or more trades, or no new high for 90 s (launch) / 180 s (momentum). It sells at any time when pool depth is down 25% from the buy (`LIQUIDITY_DROP`). Volume, trade counts and depth come from the Tape quoter's existing DexScreener pass (`txns.m5` is now read). Data older than 60 s fires nothing. No new network calls.
+- `active` may name a trailing variant, so the main paper book can trade one.
+- Constants are in `STRATEGY.trail` and `STRATEGY.fade` (`src/strategy/config.ts`). They are starting values.
+
+Live variant: `POST /api/strategy/settings` takes `liveVariant` (a variant id, or `null`). Default `null`. Saved with the other engine settings.
+
+- When a signal fires for the live variant's own signal kind, the desk sends a live buy as well as the paper buy. It needs the engine on, the wallet armed, `operatorReady`, the token-safety and launch-bundle checks, fewer than `maxOpen` live engine positions, and the live day not past the $5 loss pause (`STRATEGY.live.dailyMaxLossUsd`, closed live trades, UTC day). Then the normal live path: `liveTradeUsd`, `liveDailyCapUsd`, wallet balance, entry slippage. A refusal logs `ENGINE_LIVE_PAUSED` or the live path's own code.
+- The live take-profit is the paper target scaled to the live size: `targetNetUsd * liveTradeUsd / tradeUsd` ($0.30 at $3 / $50 / $5).
+- A live engine position carries the variant's rules and is sold by the same engine exits, as a live sell. The hard stop still goes first.
+- Turning the live variant off stops new live buys. Open live positions keep their exits.
+- Any other AI live buy is still refused (`LIVE_AI_BLOCKED`). `liveAutoBuy` still cannot be turned on.
+- Net results on the live book are measured with the paper fill model against the live cost, so a live exit decision is an estimate of what the sell will net.
 
 ## 13.39 notes
 

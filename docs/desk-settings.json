@@ -14,9 +14,9 @@
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.39",
-    "androidVersionName": "13.39",
-    "androidVersionCode": 1339,
+    "appVersion": "13.40",
+    "androidVersionName": "13.40",
+    "androidVersionCode": 1340,
     "applicationId": "com.dirk.nightdesk",
     "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. 13.39 live sells return a clear no-route reason and the card shows liquidity gone, on top of main aa1e16c (PR 40, the 13.39 Home charts and math audit) which includes 13.38 (PR 41). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
@@ -67,7 +67,7 @@
     }
   },
   "hardRules": [
-    "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live. The 13.30 engine buys the paper book only and its exits do not set book live.",
+    "AI auto-buys stay paper-only. liveAutoBuy cannot be turned on; POST /api/settings with liveAutoBuy=true is refused. liveScope is manual: operator buys, limits and stops may send real swaps; AI never spends live. The engine is paper only by default. Since 13.40 the owner can set one engine variant live (liveVariant on POST /api/strategy/settings); it is off until set, uses every live limit, and any other AI live buy is still refused (LIVE_AI_BLOCKED).",
     "The desk hard stop is checked before an engine exit. A mark at or past that stop closes as STOP_LOSS or GAP_RUG. The engine stop (1% on the main paper book) can only be tighter. Since 13.39 it is measured from the entry mark, like the hard stop, not from the fill. The $10 UTC-day paper-loss pause stays (STRATEGY.dailyMaxLossUsd).",
     "Never drop the v13.11 baseline controls: paper and live limit / take-profit / stop orders (GET/POST /api/orders, POST /api/orders/cancel), and the rest of the v13.11 book and ticket UI.",
     "Bogus-price rejection stays on (src/market/mark-guard.ts). Unusable marks (non-finite or \u22640) are rejected. Implausible upward jumps and unit/decimal or SOL-vs-USD mix-ups (including a rise of 25\u00d7 or more) do not update equity or stops unless confirmed. A genuine crash or rug is never rejected by this guard, so the stop can still fire.",
@@ -84,6 +84,7 @@
     "13.38: manual paper and live buys use launchBundleSoon (1.5s) instead of an uncapped launchBundle. Unenriched quote and curve fallbacks, and ensureDepth's curve read, are also capped. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 929365c (PR 39).",
     "13.37: DAMM v2 is not a traditional LP lock. Rank traditional pools by real depth. A figure-less pool does not fail a coin that has another pool with data. Holder count is RugCheck totalHolders, not a top-20 sample; unknown stays fail-closed. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 7c00007 (PR 38).",
     "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign).",
+    "13.40: 18 shadow books (12 trailing: 3% stop, then a 4/8/12% trail under the high, f = fade exits on volume, sellers, stall and pool depth). New exit codes ENGINE_TRAIL, PROFIT_LOCK, FADE_EXIT, LIQUIDITY_DROP. New engine setting liveVariant (default null): that one variant also buys live at liveTradeUsd with the take-profit scaled to the live size, behind operatorReady, the daily cap, wallet checks and a $5 live-loss pause per UTC day. Hard stop, 10+8 caps and live $5/$20 defaults unchanged.",
     "13.39: Home charts on the phone, and the math audit: the engine stop is measured from the entry mark (not the fill), fractional hard-stop labels are exact, engine positions show the engine stop. No setting, endpoint or limit changed. Reset the scorecard after deploying."
   ],
   "manualOverride": {
@@ -1207,8 +1208,8 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.39",
-      "androidVersionCode": 1339,
+      "version": "13.40",
+      "androidVersionCode": 1340,
       "applicationId": "com.dirk.nightdesk",
       "note": "Code in this branch (13.39 live sells). Not the host at the 1:46 PM ET pull. Based on main aa1e16c (PR 40, Home charts and math audit, including 13.38). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {

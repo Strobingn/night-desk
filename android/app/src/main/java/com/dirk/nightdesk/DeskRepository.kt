@@ -915,7 +915,15 @@ class DeskRepository private constructor(private val context: Context) {
                 onSuccess = { raw ->
                     applyStrategy(raw)
                     val on = runCatching { JSONObject(raw).optJSONObject("strategy")?.optBoolean("enabled", false) }.getOrNull()
-                    DeskNotice(true, if (patch.containsKey("enabled")) (if (on == true) "Trading engine on. Paper only." else "Trading engine off.") else "Engine settings saved.")
+                    val liveNow = runCatching { JSONObject(raw).optJSONObject("strategy")?.let { if (it.isNull("liveVariant")) "" else it.optString("liveVariant") } }.getOrNull().orEmpty()
+                    DeskNotice(
+                        true,
+                        when {
+                            patch.containsKey("liveVariant") -> if (liveNow.isNotBlank()) "Engine LIVE on: $liveNow trades real money." else "Engine live off. Paper only."
+                            patch.containsKey("enabled") -> if (on == true) "Trading engine on." else "Trading engine off."
+                            else -> "Engine settings saved."
+                        }
+                    )
                 },
                 onFailure = { err -> DeskNotice(false, err.message ?: "Engine settings refused.") }
             )

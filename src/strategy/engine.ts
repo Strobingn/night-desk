@@ -1,6 +1,6 @@
 import type { CandidateToken } from "../types.js";
 import { DEFAULT_ACTIVE, STRATEGY, VARIANTS, timeLimitFor, variantById, type SignalKind, type StrategyConfig } from "./config.js";
-import type { StrategyMeta } from "./exits.js";
+import type { MarketFlow, StrategyMeta } from "./exits.js";
 import { MarkTracker, type TrackedMark } from "./mark-tracker.js";
 import { scoreVariant, type VariantScore } from "./scorecard.js";
 import { ShadowBook, type ShadowTrade } from "./shadow-book.js";
@@ -14,6 +14,11 @@ export interface EngineSettings {
   maxOpen: number;
   /** The main paper book's variant per signal. */
   active: Record<SignalKind, string>;
+  /**
+   * The one variant that also trades the live wallet, or null. Off by default. Set by the
+   * operator on purpose; every live limit (checklist, live size, daily cap) still applies.
+   */
+  liveVariant: string | null;
 }
 
 export const SETTINGS_BAND = {
@@ -23,7 +28,7 @@ export const SETTINGS_BAND = {
 } as const;
 
 export function defaultSettings(cfg: StrategyConfig = STRATEGY): EngineSettings {
-  return { enabled: false, targetNetUsd: cfg.targetNetUsd, tradeUsd: cfg.tradeUsd, maxOpen: cfg.maxOpen, active: { ...DEFAULT_ACTIVE } };
+  return { enabled: false, targetNetUsd: cfg.targetNetUsd, tradeUsd: cfg.tradeUsd, maxOpen: cfg.maxOpen, active: { ...DEFAULT_ACTIVE }, liveVariant: null };
 }
 
 const clamp = (n: number, band: { min: number; max: number }) => Math.min(band.max, Math.max(band.min, n));
@@ -32,7 +37,12 @@ const clamp = (n: number, band: { min: number; max: number }) => Math.min(band.m
 export function patchSettings(current: EngineSettings, patch: unknown): { ok: true; settings: EngineSettings } | { ok: false; error: string } {
   if (patch == null || typeof patch !== "object") return { ok: false, error: "Strategy settings must be an object." };
   const p = patch as Record<string, unknown>;
-  const next: EngineSettings = { ...current, active: { ...current.active } };
+  const next: EngineSettings = { ...current, active: { ...current.active }, liveVariant: current.liveVariant ?? null };
+  if ("liveVariant" in p) {
+    if (p.liveVariant === null || p.liveVariant === "") next.liveVariant = null;
+    else if (typeof p.liveVariant === "string" && variantById(p.liveVariant)) next.liveVariant = p.liveVariant;
+    else return { ok: false, error: "Unknown live variant." };
+  }
   if ("enabled" in p) {
     if (typeof p.enabled !== "boolean") return { ok: false, error: "Trading engine on/off must be true or false." };
     next.enabled = p.enabled;
@@ -58,6 +68,8 @@ export function patchSettings(current: EngineSettings, patch: unknown): { ok: tr
 
 export interface EngineQuote extends TrackedMark {
   liquidityUsd?: number | null;
+  buys5m?: number | null;
+  sells5m?: number | null;
 }
 
 export interface FiredSignal {
@@ -67,6 +79,8 @@ export interface FiredSignal {
   score: number;
   /** Exit rules for the main paper book's active variant. */
   meta: StrategyMeta;
+  /** Exit rules for the live variant, when one is set and it trades this signal. The desk scales the target to the live size. */
+  liveMeta?: StrategyMeta;
 }
 
 export interface EngineStats {
@@ -84,6 +98,10 @@ export interface ScorecardView {
   tradeUsd: number;
   maxOpen: number;
   active: Record<SignalKind, string>;
+  /** The variant that also trades live, or null. */
+  liveVariant: string | null;
+  /** Set by the desk: live engine positions open, the live size and target, and why live is not trading (null when it is). */
+  live?: { open: number; tradeUsd: number; targetNetUsd: number; blocked: string | null };
   readyTrades: number;
   watching: number;
   /**
@@ -91,7 +109,7 @@ export interface ScorecardView {
    * is its shadow book, which can hold a coin the main book refused, or nothing after a reset.
    */
   mainOpen?: number;
-  variants: Array<VariantScore & { open: number; active: boolean }>;
+  variants: Array<VariantScore & { open: number; active: boolean; live: boolean; trailPct?: number; fade?: boolean }>;
   stats: EngineStats;
   /** Plain-words caveat shown with the numbers. */
   note: string;
@@ -113,6 +131,8 @@ export class StrategyEngine {
   private readonly store: ShadowStore | null;
   private readonly coins = new Map<string, { token: CandidateToken; score: number }>();
   private readonly signalled = new Map<string, number>();
+  /** Latest volume, trade counts and depth per coin the engine was quoted. */
+  private readonly flows = new Map<string, MarketFlow>();
   /** Scores are recomputed only when a book's closed-trade count changes. The snapshot asks for them often. */
   private readonly scoreCache = new Map<string, { trades: number; score: VariantScore }>();
   private readonly onError: (where: string, err: unknown) => void;
@@ -141,6 +161,7 @@ export class StrategyEngine {
         new ShadowBook(variant, {
           trades,
           cfg: this.cfg,
+          flow: (mint) => this.flows.get(mint),
           sizing: () => ({ targetNetUsd: this.settings.targetNetUsd, tradeUsd: this.settings.tradeUsd, maxOpen: this.settings.maxOpen })
         })
       );
@@ -199,6 +220,7 @@ export class StrategyEngine {
 
   /** A price for a coin the engine cares about. Returns a signal for the desk when one fires. */
   onQuote(mint: string, quote: EngineQuote, now: number): FiredSignal | null {
+    this.flows.set(mint, { at: quote.at, vol5mUsd: quote.vol5mUsd, buys5m: quote.buys5m ?? null, sells5m: quote.sells5m ?? null, liquidityUsd: quote.liquidityUsd ?? null });
     this.markShadows(mint, quote.priceUsd, now, quote.liquidityUsd ?? undefined);
     if (!this.settings.enabled || !this.tracker.has(mint)) return null;
     if (!this.tracker.note(mint, quote)) return null;
@@ -228,12 +250,20 @@ export class StrategyEngine {
     for (const book of this.books.values()) {
       if (book.variant.signal !== signal.signal) continue;
       try {
-        if (book.open({ mint, symbol: token.symbol, priceUsd: token.priceUsd, liquidityUsd }, now).ok) this.stats.shadowOpens += 1;
+        if (book.open({ mint, symbol: token.symbol, priceUsd: token.priceUsd, liquidityUsd, vol5mUsd: quote.vol5mUsd }, now).ok) this.stats.shadowOpens += 1;
       } catch (err) {
         this.fail(`open ${book.variant.id}`, err);
       }
     }
-    return { signal, token, score: coin.score, meta: this.metaFor(signal.signal) };
+    const entry = { liquidityUsd, vol5mUsd: quote.vol5mUsd };
+    const live = this.settings.liveVariant ? variantById(this.settings.liveVariant) : undefined;
+    return {
+      signal,
+      token,
+      score: coin.score,
+      meta: this.metaFor(signal.signal, entry),
+      ...(live && live.signal === signal.signal ? { liveMeta: this.metaOf(live.id, entry) } : {})
+    };
   }
 
   /** A faster mark for a coin a shadow book holds (the desk's own position ticks). Never fires a signal. */
@@ -277,15 +307,37 @@ export class StrategyEngine {
   }
 
   /** Exit rules for a main-book position opened on this signal. */
-  metaFor(signal: SignalKind): StrategyMeta {
+  metaFor(signal: SignalKind, entry?: { liquidityUsd?: number | null; vol5mUsd?: number | null }): StrategyMeta {
     const variant = variantById(this.settings.active[signal]) ?? variantById(DEFAULT_ACTIVE[signal])!;
+    return this.metaOf(variant.id, entry);
+  }
+
+  /** Exit rules for one variant, with the volume and depth at the buy for its fade exits. */
+  metaOf(id: string, entry?: { liquidityUsd?: number | null; vol5mUsd?: number | null }): StrategyMeta {
+    const variant = variantById(id)!;
+    const ok = (n: number | null | undefined): n is number => n != null && n > 0 && Number.isFinite(n);
     return {
       variant: variant.id,
-      signal,
+      signal: variant.signal,
       stopPct: variant.stopPct,
       targetNetUsd: this.settings.targetNetUsd,
-      timeLimitMs: timeLimitFor(signal, this.cfg)
+      timeLimitMs: timeLimitFor(variant.signal, this.cfg),
+      ...(variant.trailPct ? { trailPct: variant.trailPct } : {}),
+      ...(variant.fade ? { fade: true } : {}),
+      ...(ok(entry?.liquidityUsd) ? { entryLiquidityUsd: entry!.liquidityUsd! } : {}),
+      ...(ok(entry?.vol5mUsd) ? { entryVol5mUsd: entry!.vol5mUsd! } : {})
     };
+  }
+
+  /** The latest volume, trade counts and depth the engine saw for a coin. */
+  flowFor(mint: string): MarketFlow | null {
+    return this.flows.get(mint) ?? null;
+  }
+
+  /** Forget flow data for coins nobody holds or watches. The desk passes the mints it still needs. */
+  keepFlows(mints: Iterable<string>): void {
+    const keep = new Set(mints);
+    for (const mint of [...this.flows.keys()]) if (!keep.has(mint)) this.flows.delete(mint);
   }
 
   scorecard(): ScorecardView {
@@ -300,7 +352,10 @@ export class StrategyEngine {
       return {
         ...cached.score,
         open: book?.positions.size ?? 0,
-        active: this.settings.active[variant.signal] === variant.id
+        active: this.settings.active[variant.signal] === variant.id,
+        live: this.settings.liveVariant === variant.id,
+        ...(variant.trailPct ? { trailPct: variant.trailPct } : {}),
+        ...(variant.fade ? { fade: true } : {})
       };
     });
     return {
@@ -309,6 +364,7 @@ export class StrategyEngine {
       tradeUsd: this.settings.tradeUsd,
       maxOpen: this.settings.maxOpen,
       active: { ...this.settings.active },
+      liveVariant: this.settings.liveVariant ?? null,
       readyTrades: this.cfg.readyTrades,
       watching: this.tracker.mints().length,
       variants,

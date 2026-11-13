@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { exitImpactAllowed, floorUsd, quotePaperBuy, quotePaperSell, realizablePnl, roundUsd } from "../agents/execution-math.js";
 import { entryAnchor, outlierReason } from "../market/mark-guard.js";
 import { STRATEGY, timeLimitFor, type SignalKind, type StrategyConfig, type Variant } from "./config.js";
-import { assessStrategyExit, type StrategyExitCode } from "./exits.js";
+import { assessStrategyExit, type MarketFlow, type StrategyExitCode, type StrategyMeta } from "./exits.js";
 
 export interface ShadowToken {
   mint: string;
   symbol: string;
   priceUsd: number;
   liquidityUsd: number;
+  /** 5-minute volume at the signal, for the fade exits. */
+  vol5mUsd?: number | null;
 }
 
 export interface ShadowPosition {
@@ -24,6 +26,8 @@ export interface ShadowPosition {
   lastMark: number;
   lastMarkAt: number;
   breakevenArmed: boolean;
+  /** Trailing state and the entry volume and depth (see StrategyMeta). */
+  state: Partial<StrategyMeta>;
 }
 
 export interface ShadowTrade {
@@ -64,11 +68,13 @@ export class ShadowBook {
   readonly trades: ShadowTrade[];
   private readonly cfg: StrategyConfig;
   private readonly sizing: () => ShadowSizing;
+  private readonly flow: (mint: string) => MarketFlow | null | undefined;
 
   constructor(
     readonly variant: Variant,
-    opts: { trades?: ShadowTrade[]; cfg?: StrategyConfig; sizing?: () => ShadowSizing } = {}
+    opts: { trades?: ShadowTrade[]; cfg?: StrategyConfig; sizing?: () => ShadowSizing; flow?: (mint: string) => MarketFlow | null | undefined } = {}
   ) {
+    this.flow = opts.flow ?? (() => null);
     this.cfg = opts.cfg ?? STRATEGY;
     this.sizing = opts.sizing ?? (() => ({ targetNetUsd: this.cfg.targetNetUsd, tradeUsd: this.cfg.tradeUsd, maxOpen: this.cfg.maxOpen }));
     this.trades = (opts.trades ?? []).filter((t) => t.variant === variant.id);
@@ -102,7 +108,11 @@ export class ShadowBook {
       liquidityUsd: token.liquidityUsd,
       lastMark: token.priceUsd,
       lastMarkAt: now,
-      breakevenArmed: false
+      breakevenArmed: false,
+      state: {
+        entryLiquidityUsd: token.liquidityUsd,
+        ...(token.vol5mUsd != null && token.vol5mUsd > 0 && Number.isFinite(token.vol5mUsd) ? { entryVol5mUsd: token.vol5mUsd } : {})
+      }
     };
     this.positions.set(token.mint, position);
     this.cashUsd = roundUsd(this.cashUsd - sizeUsd);
@@ -163,12 +173,17 @@ export class ShadowBook {
           stopPct: this.variant.stopPct,
           targetNetUsd: this.sizing().targetNetUsd,
           timeLimitMs: timeLimitFor(this.variant.signal, this.cfg),
-          breakevenArmed: pos.breakevenArmed
-        }
+          breakevenArmed: pos.breakevenArmed,
+          ...(this.variant.trailPct ? { trailPct: this.variant.trailPct } : {}),
+          ...(this.variant.fade ? { fade: true } : {}),
+          ...pos.state
+        },
+        flow: this.flow(pos.mint)
       },
       this.cfg
     );
     if (verdict.armBreakeven) pos.breakevenArmed = true;
+    if (verdict.patch) pos.state = { ...pos.state, ...verdict.patch };
     if (verdict.action !== "exit" || !verdict.code) return null;
     // The stop is only acted on with a price in hand for this tick; tick() never re-fires a stale stop.
     if (verdict.code === "STRATEGY_STOP" && !markFresh) return null;

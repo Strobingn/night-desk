@@ -55,8 +55,9 @@ describe("strategy engine", () => {
     expect(fired?.signal.signal).toBe("launch");
     expect(fired?.token.priceUsd).toBe(1.025);
     expect(fired?.meta).toMatchObject({ variant: "launch-1", stopPct: 0.01, targetNetUsd: 3, timeLimitMs: STRATEGY.launch.timeLimitMs });
-    const open = [...engine.books.values()].filter((b) => b.positions.has("MintA")).map((b) => b.variant.id);
+    const open = [...engine.books.values()].filter((b) => b.positions.has("MintA") && !b.variant.trailPct).map((b) => b.variant.id);
     expect(open.sort()).toEqual(["launch-1", "launch-3", "launch-6"]);
+    expect([...engine.books.values()].filter((b) => b.positions.has("MintA") && b.variant.trailPct)).toHaveLength(6);
     // Still pinned for the shadow positions, but no longer watched and not re-signalled.
     expect(engine.pinned()).toEqual(["MintA"]);
     expect(engine.onQuote("MintA", quote(t0 + 30_000, 1.03), t0 + 30_000)).toBeNull();
@@ -71,7 +72,7 @@ describe("strategy engine", () => {
     engine.onQuote("MintB", quote(t0 + 60_000, 1.01), t0 + 60_000);
     const fired = engine.onQuote("MintB", quote(t0 + 120_000, 1.04), t0 + 120_000);
     expect(fired?.signal.signal).toBe("momentum");
-    const open = [...engine.books.values()].filter((b) => b.positions.has("MintB")).map((b) => b.variant.id);
+    const open = [...engine.books.values()].filter((b) => b.positions.has("MintB") && !b.variant.trailPct).map((b) => b.variant.id);
     expect(open.sort()).toEqual(["momentum-1", "momentum-3", "momentum-6"]);
   });
 
@@ -86,7 +87,12 @@ describe("strategy engine", () => {
     // A run to +9% takes profit on the other two.
     engine.onTick("MintA", 1.025 * 1.09, t0 + 40_000);
     expect(store.all().map((t) => `${t.variant}:${t.exitCode}`).sort()).toEqual(["launch-1:STRATEGY_STOP", "launch-3:TAKE_PROFIT", "launch-6:TAKE_PROFIT"]);
-    expect(engine.pinned()).toEqual([]);
+    // The trailing books did not sell at the target: they are trailing the run.
+    expect(engine.pinned()).toEqual(["MintA"]);
+    expect([...engine.books.values()].filter((b) => b.positions.has("MintA")).every((b) => b.variant.trailPct && b.positions.get("MintA")!.state.trailArmed)).toBe(true);
+    // −5% from the high: through the 4% trail only.
+    engine.onTick("MintA", 1.025 * 1.09 * 0.95, t0 + 45_000);
+    expect(store.all().filter((t) => t.exitCode === "ENGINE_TRAIL").map((t) => t.variant).sort()).toEqual(["launch-3-t4", "launch-3-t4f"]);
     const card = engine.scorecard();
     expect(card.variants.find((v) => v.variant === "launch-1")).toMatchObject({ trades: 1, wins: 0, active: true });
     expect(card.variants.find((v) => v.variant === "launch-3")).toMatchObject({ trades: 1, wins: 1, active: false });

@@ -10,7 +10,7 @@ import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHour
 import { autoBuyBlock } from "./auto-gates.js";
 import { STRATEGY } from "../strategy/config.js";
 import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
-import { assessStrategyExit, strategyStopPrice, type StrategyMeta } from "../strategy/exits.js";
+import { assessStrategyExit, strategyLinePrice, type StrategyMeta } from "../strategy/exits.js";
 import { BoundedMap, LatencyStats } from "../strategy/latency.js";
 import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
@@ -1220,7 +1220,47 @@ export class Desk {
   private strategyCard(): ScorecardView {
     let mainOpen = 0;
     for (const pos of this.book.positions.values()) if (pos.strategy) mainOpen += 1;
-    return { ...this.strategy.scorecard(), mainOpen };
+    let liveOpen = 0;
+    for (const pos of this.liveBook?.positions.values() ?? []) if (pos.strategy) liveOpen += 1;
+    const card = this.strategy.scorecard();
+    return {
+      ...card,
+      mainOpen,
+      live: { open: liveOpen, tradeUsd: this.liveTradeUsd, targetNetUsd: this.liveEngineTarget(), blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen." }
+    };
+  }
+
+  /** The live take-profit: the paper target scaled to the live trade size, so both aim for the same percent. */
+  private liveEngineTarget(): number {
+    const s = this.strategy.settings;
+    return Math.max(0.05, roundUsd((s.targetNetUsd * this.liveTradeUsd) / s.tradeUsd));
+  }
+
+  /** Today's closed live result (UTC day). */
+  private liveNetTodayUsd(): number {
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    let net = 0;
+    for (const trade of this.store.closedSince(start.getTime())) if (trade.mode === "live") net += trade.pnlUsd;
+    return net;
+  }
+
+  /** Why the engine would not send a live buy right now, or null when it would. The wallet and daily cap are checked at the buy. */
+  private liveEngineBlock(): string | null {
+    if (!this.strategy.settings.enabled) return "The trading engine is off.";
+    if (!this.liveBook) return "The live wallet is not armed on this desk.";
+    if (!this.operatorReady) return "The live checklist (operatorReady) is not marked.";
+    const net = this.liveNetTodayUsd();
+    if (net <= -STRATEGY.live.dailyMaxLossUsd + 1e-9) return `Live is ${money(net)} on the day, past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
+    return null;
+  }
+
+  /** Coins the engine has a position in on either book. They stay quoted so trailing and fade exits have data. */
+  private engineHeldMints(): string[] {
+    const out: string[] = [];
+    for (const pos of this.book.positions.values()) if (pos.strategy) out.push(pos.mint);
+    for (const pos of this.liveBook?.positions.values() ?? []) if (pos.strategy) out.push(pos.mint);
+    return out;
   }
 
   strategyView(): ScorecardView {
@@ -1232,8 +1272,20 @@ export class Desk {
     const result = patchStrategySettings(this.strategy.settings, patch);
     if (!result.ok) return result;
     const was = this.strategy.settings.enabled;
+    const wasLive = this.strategy.settings.liveVariant ?? null;
     this.strategy.settings = result.settings;
     this.store.writeJson("strategy", result.settings);
+    if (wasLive !== (result.settings.liveVariant ?? null)) {
+      const block = this.liveEngineBlock();
+      this.log({
+        stage: "system",
+        kind: "info",
+        code: "STRATEGY",
+        message: result.settings.liveVariant
+          ? `Engine LIVE on for ${result.settings.liveVariant}: real money, $${this.liveTradeUsd.toFixed(2)} a trade, take-profit at $${this.liveEngineTarget().toFixed(2)} net, ${result.settings.maxOpen} open at most.${block ? ` Not trading yet: ${block}` : ""}`
+          : "Engine LIVE off. The engine trades paper only again. Open live positions keep their exits."
+      });
+    }
     if (was !== result.settings.enabled) {
       this.log({
         stage: "system",
@@ -1280,7 +1332,8 @@ export class Desk {
    * quotes come from the Tape quoter's existing batched pass.
    */
   strategyPass(now = Date.now()): void {
-    const pinned = this.strategy.pinned();
+    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints()])];
+    this.strategy.keepFlows(pinned);
     for (const mint of pinned) {
       const q = this.tape?.get(mint);
       if (!q || q.priceUsd == null || !(q.priceUsd > 0) || !Number.isFinite(q.priceUsd)) continue;
@@ -1290,7 +1343,7 @@ export class Desk {
       const anchor = this.strategyFeed.get(mint);
       const feed = q.source === "dexscreener" ? "dexscreener" : q.source === "jupiter" ? "jupiter" : q.source === "pump.fun curve" ? "chain" : q.source;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null }, now);
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null }, now);
     }
     this.strategy.tick(now);
     for (const mint of [...this.strategyQuoteAt.keys()]) if (!pinned.includes(mint)) this.strategyQuoteAt.delete(mint);
@@ -1301,8 +1354,48 @@ export class Desk {
       if (at == null || mark == null || now - at > STRATEGY.watch.markFreshMs) continue;
       this.review(pos.mint, mark, "paper");
     }
+    for (const pos of [...(this.liveBook?.positions.values() ?? [])]) {
+      if (!pos.strategy || pos.closing) continue;
+      const at = this.liveBook!.markedAt(pos.mint);
+      const mark = this.liveBook!.lastPrice.get(pos.mint);
+      if (at == null || mark == null || now - at > STRATEGY.watch.markFreshMs) continue;
+      this.review(pos.mint, mark, "live");
+    }
     // Keep the Tape quoter's pins in step with what the engine is watching or holding now.
     if (pinned.length || this.strategy.pinned().length) this.pinOrderMints();
+  }
+
+  /**
+   * The engine's live buy: only for the one variant the operator set live, only on a signal that
+   * variant trades. It goes through every live check a manual live buy does (checklist, live size,
+   * daily cap, wallet, slippage), and stops for the day once live is past its loss pause.
+   */
+  private async strategyLiveBuy(fired: FiredSignal): Promise<void> {
+    const meta = fired.liveMeta;
+    if (!meta) return;
+    const { token, score } = fired;
+    const skip = (message: string) => {
+      this.pipeline.executorSkips += 1;
+      this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message: `Engine live buy skipped ${token.symbol}. ${message}` });
+    };
+    const block = this.liveEngineBlock();
+    if (block) return skip(block);
+    const live = this.liveBook!;
+    if (live.positions.has(token.mint)) return skip("Already held on the live book.");
+    const open = [...live.positions.values()].filter((pos) => pos.strategy && !pos.closing).length;
+    if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
+    const safety = await this.tokenSafety(token.mint);
+    if (safety.status !== "safe") return skip(`${safety.chip}.`);
+    if (isPumpCoin(token)) {
+      const bundle = await this.launchBundle(token.mint, safety.supply);
+      if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
+    }
+    await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
+      tag: fired.signal.signal,
+      book: "live",
+      engineLive: true,
+      strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
+    });
   }
 
   /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
@@ -1320,7 +1413,7 @@ export class Desk {
       message: `Engine signal on ${fired.token.symbol}. ${fired.signal.reason}`,
       detail: fired.signal.signal
     });
-    this.track(this.strategyBuy(fired));
+    this.track(this.strategyBuys(fired));
   }
 
   /** Tests and tools: one engine quote, then wait for any buy it caused. */
@@ -1329,7 +1422,7 @@ export class Desk {
     await this.drain();
   }
 
-  /** Paper only. The engine never names the live book. A manual live buy does not come through here. */
+  /** The engine's paper buy. Its live buy, when a live variant is set, is strategyLiveBuy. */
   private async strategyBuy(fired: FiredSignal): Promise<void> {
     const { token, score, meta } = fired;
     const startedAt = Date.now();
@@ -1351,6 +1444,13 @@ export class Desk {
     if (this.book.positions.get(token.mint)?.strategy) this.latency.record("signalToFill", Date.now() - startedAt);
   }
 
+  /** The paper buy and, when a live variant is set for this signal, the live buy. Neither waits on the other's outcome. */
+  private async strategyBuys(fired: FiredSignal): Promise<void> {
+    const live = fired.liveMeta ? this.strategyLiveBuy(fired).catch((err) => console.error("[strategy] live buy", err)) : null;
+    await this.strategyBuy(fired);
+    if (live) await live;
+  }
+
   /** Today's paper result (UTC day): closed trades plus what the open positions are showing. */
   private netTodayUsd(): number {
     const start = new Date();
@@ -1361,14 +1461,16 @@ export class Desk {
     return net;
   }
 
-  /** Take-profit, the engine stop, breakeven and the time limit for a position the engine opened. */
-  private strategyExit(pos: Position, mark: number): void {
+  /** The engine's exits for a position it opened, on the paper or the live book. */
+  private strategyExit(pos: Position, mark: number, kind: BookKind = "paper"): void {
     const meta = pos.strategy;
     if (!meta || pos.closing) return;
     const now = Date.now();
-    const retryAt = this.strategyExitRetryAt.get(pos.mint);
+    const key = bookKey(kind, pos.mint);
+    const retryAt = this.strategyExitRetryAt.get(key);
     if (retryAt != null && now < retryAt) return;
-    const markAt = this.book.markedAt(pos.mint) ?? 0;
+    const book = this.bk(kind);
+    const markAt = book.markedAt(pos.mint) ?? 0;
     const liquidityUsd = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
     const net = realizablePnl({ markPrice: mark, qty: pos.qty, costUsd: pos.costUsd, liquidityUsd, markAt, now });
     const verdict = assessStrategyExit({
@@ -1379,15 +1481,16 @@ export class Desk {
       markFresh: now - markAt <= STRATEGY.watch.markFreshMs,
       netPnlUsd: net?.netPnlUsd ?? null,
       now,
-      meta
+      meta,
+      flow: this.strategy.flowFor(pos.mint)
     });
-    if (verdict.armBreakeven) {
-      pos.strategy = { ...meta, breakevenArmed: true };
+    if (verdict.armBreakeven || verdict.patch) {
+      pos.strategy = { ...meta, ...(verdict.armBreakeven ? { breakevenArmed: true } : {}), ...(verdict.patch ?? {}) };
       this.persist();
     }
     if (verdict.action !== "exit" || !verdict.code) return;
     // A refused exit (thin pool, unverified mark) is retried, but not on every tick.
-    this.strategyExitRetryAt.set(pos.mint, now + (verdict.code === "STRATEGY_STOP" ? 15_000 : 60_000));
+    this.strategyExitRetryAt.set(key, now + (verdict.code === "STRATEGY_STOP" || verdict.code === "ENGINE_TRAIL" || verdict.code === "LIQUIDITY_DROP" ? 15_000 : 60_000));
     pos.closing = true;
     this.bus.emit("risk.exit", {
       mint: pos.mint,
@@ -1397,7 +1500,8 @@ export class Desk {
       liquidityUsd: pos.liquidityUsd,
       pnlPct: pos.entryPrice > 0 ? mark / pos.entryPrice - 1 : 0,
       score: pos.score,
-      reason: { code: verdict.code, message: verdict.message }
+      reason: { code: verdict.code, message: verdict.message },
+      ...(kind === "live" ? { book: "live" as const } : {})
     });
   }
 
@@ -1413,7 +1517,7 @@ export class Desk {
    * A pin is a quote slot. It does not disable Buy or hide Live, and a manual buy does not read it.
    */
   private pinOrderMints(): void {
-    this.tape?.pin([...this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint), ...this.strategy.pinned()]);
+    this.tape?.pin([...this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint), ...this.strategy.pinned(), ...this.engineHeldMints()]);
   }
 
   /**
@@ -2657,6 +2761,7 @@ export class Desk {
           : "SOLANA_RPC_URL is missing on the desk host.",
       balanceLine,
       `Live trade size $${this.liveTradeUsd}. Live daily cap ${this.liveDailyCapUsd == null ? "off (liveDailyCapUsd)" : `$${this.liveDailyCapUsd} (liveDailyCapUsd)`}.`,
+      this.strategy.settings.liveVariant ? `Engine LIVE variant: ${this.strategy.settings.liveVariant} (real money, set by the operator).` : "Engine live variant: none (the engine trades paper only).",
       "AI auto-buys stay on the paper book. liveAutoBuy cannot be turned on. Enabling live does not place a trade.",
       "A pump.fun curve or PumpSwap coin spends SOL through @pump-fun/pump-sdk. A Jupiter buy spends USDC through JUPITER_QUOTE_URL and JUPITER_SWAP_URL and keeps SOL for fees. Neither path runs while the balance read is unknown. No order has been signed by this check.",
       "Open live orders are rechecked when the process arms and do not fire on a price from before that.",
@@ -3019,16 +3124,20 @@ export class Desk {
     requestedUsd: number | undefined,
     source: "analyst" | "manual",
     ignoreCooldown = false,
-    extra: { confirmSize?: boolean; tag?: string; book?: BookKind; strategy?: StrategyMeta; warning?: string } = {}
+    extra: { confirmSize?: boolean; tag?: string; book?: BookKind; strategy?: StrategyMeta; warning?: string; engineLive?: boolean } = {}
   ): Promise<ManualBuyResult | ManualBuyRefusal> {
     const epoch = this.bookEpoch;
     // AI auto-buys are paper. A request that names the live book is refused and sends nothing.
-    if (source === "analyst" && extra.book === "live") {
+    // The one exception is the engine's live variant: the operator set it live on purpose, and the
+    // buy carries that variant's exit rules.
+    const engineLive =
+      source === "analyst" && extra.book === "live" && extra.engineLive === true && extra.strategy != null && extra.strategy.variant === this.strategy.settings.liveVariant;
+    if (source === "analyst" && extra.book === "live" && !engineLive) {
       const error = "AI auto-buys stay on the paper book. A live buy was refused and nothing was sent.";
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "LIVE_AI_BLOCKED", message: error });
       return { ok: false, error, code: "LIVE_AI_BLOCKED" };
     }
-    const kind: BookKind = source === "analyst" ? "paper" : (extra.book ?? "paper");
+    const kind: BookKind = engineLive ? "live" : source === "analyst" ? "paper" : (extra.book ?? "paper");
     if (kind === "live" && !this.liveBook) {
       const error = this.liveNotArmedMessage();
       return { ok: false, error, code: "LIVE_NOT_ARMED" };
@@ -3239,7 +3348,7 @@ export class Desk {
               ? sized.clampedFrom != null
                 ? `Manual live buy $${sized.sizeUsd.toFixed(2)} (requested $${sized.clampedFrom.toFixed(2)} cut to the $${plan.capUsd.toFixed(2)} cap).`
                 : `Manual live buy $${sized.sizeUsd.toFixed(2)} of the $${plan.capUsd.toFixed(2)} cap.`
-              : `Live AI buy at the live size $${sized.sizeUsd.toFixed(2)}.`;
+              : `Engine live buy (${extra.strategy?.variant ?? "engine"}) at the live size $${sized.sizeUsd.toFixed(2)}.`;
           this.applyBuy(
             {
               id: randomUUID(),
@@ -3263,7 +3372,8 @@ export class Desk {
             source,
             capPct,
             extra.tag,
-            "live"
+            "live",
+            extra.strategy
           );
           return this.bought(token, sized, "live", extra.warning);
         } catch (err) {
@@ -3379,7 +3489,7 @@ export class Desk {
       // Stop distance is from this mark, not the slipped fill. Live trail uses the same anchor.
       ...(fill.markUsd > 0 ? { entryMark: fill.markUsd, markPeak: fill.markUsd } : {}),
       ...(fill.mode === "live" ? { live: true } : {}),
-      ...(strategy && kind === "paper" ? { strategy: { ...strategy } } : {})
+      ...(strategy ? { strategy: { ...strategy } } : {})
     };
     book.positions.set(token.mint, position);
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
@@ -3637,7 +3747,7 @@ export class Desk {
     if (view.action === "hold" || !view.code) {
       if (peakRose || armChanged) this.persist();
       // The hard stop above always goes first. The engine's exits only apply to positions it opened.
-      if (kind === "paper" && pos.strategy) this.strategyExit(pos, mark);
+      if (pos.strategy) this.strategyExit(pos, mark, kind);
       return;
     }
     pos.closing = true;
@@ -3695,7 +3805,7 @@ export class Desk {
       peakPrice: assessment.peakPrice,
       trailArmed: assessment.trailArmed,
       // An engine position sells at its own tighter stop first; show the line that actually fires.
-      stopPrice: pos.strategy ? Math.max(assessment.stopPrice, strategyStopPrice(pos.entryPrice, pos.entryMark, pos.strategy.stopPct)) : assessment.stopPrice,
+      stopPrice: pos.strategy ? Math.max(assessment.stopPrice, strategyLinePrice(pos.entryPrice, pos.entryMark, pos.strategy)) : assessment.stopPrice,
       trailHintPrice: assessment.trailHintPrice,
       score: pos.score,
       source: pos.source,
