@@ -49,7 +49,9 @@ export const RECORDER = {
   exportMax: 50_000,
   /** The most quotes one replay reads. */
   replayMax: 250_000,
-  replayPage: 4_000
+  replayPage: 4_000,
+  /** Matches STRATEGY.fade.freshMs: older volume and trade counts fire nothing. */
+  flowFreshMs: 60_000
 } as const;
 
 export function recordDays(raw: string | undefined): number {
@@ -126,7 +128,9 @@ export class MarketRecorder {
   quote(row: RecordedQuote): boolean {
     if (!this.enabled || !(row.priceUsd > 0) || !Number.isFinite(row.priceUsd) || !Number.isFinite(row.t)) return false;
     // Everything an exit rule reads: a change in depth, volume or trade counts is saved even at an unchanged price.
-    const sig = `${row.priceUsd}|${row.liquidityUsd ?? ""}|${row.vol5mUsd ?? ""}|${row.buys5m ?? ""}|${row.sells5m ?? ""}|${row.source ?? ""}`;
+    // A volume reading turning fresh again after an outage counts as a change: the engine acts on it at once.
+    const flowFresh = row.t - (row.flowAt ?? row.t) <= RECORDER.flowFreshMs;
+    const sig = `${row.priceUsd}|${row.liquidityUsd ?? ""}|${row.vol5mUsd ?? ""}|${row.buys5m ?? ""}|${row.sells5m ?? ""}|${row.source ?? ""}|${flowFresh ? 1 : 0}`;
     const prev = this.last.get(row.mint);
     if (prev) {
       const gap = row.t - prev.t;

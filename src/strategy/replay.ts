@@ -200,7 +200,8 @@ export async function replaySaved(
       open: book.positions.size
     };
   });
-  rows.sort((a, b) => b.netUsd - a.netUsd || b.trades - a.trades);
+  // Rule sets that closed a trade come first, best net first. An untested rule set (net 0) never outranks a tested one.
+  rows.sort((a, b) => Number(b.trades > 0) - Number(a.trades > 0) || b.netUsd - a.netUsd || b.trades - a.trades);
   const most = rows.reduce((n, row) => Math.max(n, row.trades), 0);
   return {
     from: quotes.length ? quotes[0]!.t : null,

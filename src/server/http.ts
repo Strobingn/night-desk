@@ -157,7 +157,7 @@ export function startServer(
       if (url.pathname === "/api/market/replay" && req.method === "GET") {
         const days = Number(url.searchParams.get("days") ?? "3");
         const result = await desk.marketReplay(Number.isFinite(days) && days > 0 ? days : 3);
-        return json(res, 200, { ok: true, stats: desk.recorderStats(), ...result, rows: result.rows.slice(0, 60) });
+        return json(res, 200, { ok: true, stats: desk.recorderStats(), ...result });
       }
       if (url.pathname === "/api/market/signals" && req.method === "GET") {
         const num = (key: string) => {

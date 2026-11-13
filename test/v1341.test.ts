@@ -35,16 +35,20 @@ describe("13.41 market recorder", () => {
     expect(rec.quote(q(8_000, 1.02))).toBe(true);
     expect(rec.quote(q(40_000, 1.02))).toBe(true); // unchanged, but 30 s on
     expect(rec.quote(q(50_000, 0))).toBe(false);
+    // Nothing changed except that the volume reading is fresh again after an outage: saved.
+    expect(rec.quote(q(60_000, 3, { mint: "Out", flowAt: 60_000 - 120_000 }))).toBe(true);
+    expect(rec.quote(q(66_000, 3, { mint: "Out", flowAt: 66_000 }))).toBe(true);
+    expect(rec.quote(q(72_000, 3, { mint: "Out", flowAt: 72_000 }))).toBe(false);
     // Same price, but the pool lost depth: saved, because an exit rule reads depth.
     expect(rec.quote(q(46_000, 1.02, { liquidityUsd: 140_000 }))).toBe(true);
     expect(rec.quote(q(9_000, 2, { mint: "Other" }))).toBe(true);
-    expect(rec.stats()).toMatchObject({ enabled: true, days: 14, quotes: 5 });
+    expect(rec.stats()).toMatchObject({ enabled: true, days: 14, quotes: 7 });
     const out = rec.quotesBetween({});
-    expect(out.rows.map((r) => r.t)).toEqual([1_000, 8_000, 9_000, 40_000, 46_000]);
+    expect(out.rows.map((r) => r.t)).toEqual([1_000, 8_000, 9_000, 40_000, 46_000, 60_000, 66_000]);
     expect(out.rows[0]).toMatchObject({ mint: "MintR", symbol: "REC", priceUsd: 1, buys5m: 30, sells5m: 20, source: "dexscreener" });
     expect(rec.quotesBetween({ mint: "Other" }).rows).toHaveLength(1);
     expect(rec.quotesBetween({ limit: 2 })).toMatchObject({ more: true });
-    return rec.latestQuotes(0, 3).then((rows) => expect(rows.map((r) => r.t)).toEqual([9_000, 40_000, 46_000]));
+    return rec.latestQuotes(0, 3).then((rows) => expect(rows.map((r) => r.t)).toEqual([9_000, 46_000, 66_000])); // the three saved last, in time order
   });
 
   it("is off at 0 days and reads the env value safely", () => {
@@ -187,6 +191,15 @@ describe("13.41 replay on saved data", () => {
     expect(fixedOf(await replaySaved(quotes, signals))).toMatchObject({ trades: 0, open: 1 });
     // Asked 20 s later: the 600 s limit has passed on a still-fresh mark, so it is closed.
     expect(fixedOf(await replaySaved(quotes, signals, { until: t0 + 610_000 }))).toMatchObject({ trades: 1, open: 0 });
+  });
+
+  it("ranks rule sets that lost money above rule sets that never traded", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000 };
+    const out = await replaySaved([q(t0 + 10_000, 0.98)], [{ t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail }]);
+    const scored = out.rows.filter((r) => r.trades > 0).length;
+    expect(scored).toBeGreaterThan(0);
+    expect(out.rows.slice(0, scored).every((r) => r.trades > 0 && r.netUsd < 0)).toBe(true);
   });
 
   it("ignores a quote from a feed the position is not marked by", async () => {
