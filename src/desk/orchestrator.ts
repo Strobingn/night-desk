@@ -263,7 +263,7 @@ const WATCHLIST_MAX = 60;
  *   every stage result → Logger
  */
 
-/** A live buy waits this long for Helius, then uses a recent cache or refuses. */
+/** A live buy waits this long for Helius, then uses a recent cache or refuses. The engine launch-bundle check uses the same backstop and then skips. */
 const LIVE_BALANCE_WAIT_MS = 4_000;
 /** A cached balance older than this cannot authorize a live buy or sell. */
 const LIVE_BALANCE_CACHE_MS = 60_000;
@@ -1410,12 +1410,12 @@ export class Desk {
     const meta = fired.liveMeta;
     if (!meta) return;
     const { token, score } = fired;
-    const skip = (message: string) => {
+    const skip = (message: string, code: "ENGINE_LIVE_PAUSED" | "ENGINE_LIVE_SKIP" | "LAUNCH_BUNDLE_UNVERIFIED" = "ENGINE_LIVE_SKIP") => {
       this.pipeline.executorSkips += 1;
-      this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message: `Engine live buy skipped ${token.symbol}. ${message}` });
+      this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Engine live buy skipped ${token.symbol}. ${message}` });
     };
     const block = this.liveEngineBlock();
-    if (block) return skip(block);
+    if (block) return skip(block, "ENGINE_LIVE_PAUSED");
     const live = this.liveBook!;
     if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
     // A buy still in flight holds a slot, so two signals in one pass cannot both take the last one.
@@ -1429,14 +1429,16 @@ export class Desk {
     try {
       // The daily cap and the loss pause only count finished buys, so wait for the one ahead.
       await turn;
-      const safety = await this.tokenSafety(token.mint);
+      // Priority -1 is the manual-buy priority, so this read is not buried behind mark polls.
+      const safety = await this.tokenSafety(token.mint, -1);
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
       if (isPumpCoin(token)) {
-        const bundle = await this.launchBundle(token.mint, safety.supply);
+        const bundle = await this.engineLiveBundle(token.mint, safety.supply);
+        if (!bundle) return skip("Launch bundle could not be verified.", "LAUNCH_BUNDLE_UNVERIFIED");
         if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
       }
       const again = this.liveEngineBlock();
-      if (again) return skip(again);
+      if (again) return skip(again, "ENGINE_LIVE_PAUSED");
       await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
         tag: fired.signal.signal,
         book: "live",
@@ -5461,7 +5463,8 @@ export class Desk {
     report: { token: import("../types.js").CandidateToken; score: number; breakdown: import("../types.js").ScoreFactor[]; decision: "trade" | "reject"; reason?: import("../types.js").Rejection },
     order?: { sizeUsd: number; tag: string; meta: StrategyMeta }
   ): Promise<void> {
-    const safety = await this.tokenSafety(report.token.mint);
+    // Priority -1 is the manual-buy priority, so a paper engine buy is not buried behind mark polls.
+    const safety = await this.tokenSafety(report.token.mint, -1);
     if (safety.status !== "safe") {
       this.pipeline.executorSkips += 1;
       this.log({
@@ -5476,7 +5479,7 @@ export class Desk {
     }
     if (isPumpCoin(report.token)) {
       const bundle = await this.launchBundle(report.token.mint, safety.supply);
-      if (bundle.flagged) {
+      if (bundle?.flagged) {
         this.pipeline.executorSkips += 1;
         this.log({
           stage: "executor",
@@ -5534,15 +5537,19 @@ export class Desk {
   }
 
   private async readMintSafety(mint: string, priority: -1 | 0 | 1 | 2): Promise<MintSafety> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 2_500);
     let account: MintAccountBytes | null = null;
     try {
-      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint, priority);
+      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint, priority, ac.signal);
       account = await Promise.race([
-        read,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_500))
+        read.catch(() => null),
+        new Promise<null>((resolve) => ac.signal.addEventListener("abort", () => resolve(null), { once: true }))
       ]);
     } catch {
       account = null;
+    } finally {
+      clearTimeout(timer);
     }
     const result = decodeMintSafety(account);
     const ttl = result.status === "unknown" ? 15_000 : 10 * 60_000;
@@ -5550,7 +5557,7 @@ export class Desk {
     return result;
   }
 
-  private async rpcMintAccount(mint: string, priority: -1 | 0 | 1 | 2 = 2): Promise<MintAccountBytes | null> {
+  private async rpcMintAccount(mint: string, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal): Promise<MintAccountBytes | null> {
     const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
     if (!rpc) return null;
     const body = JSON.stringify({
@@ -5559,7 +5566,7 @@ export class Desk {
       method: "getAccountInfo",
       params: [mint, { encoding: "base64", commitment: "confirmed" }]
     });
-    const res = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body });
+    const res = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body, signal });
     if (!res.ok) return null;
     const json = (await res.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
     const value = json.result?.value;
@@ -5576,7 +5583,35 @@ export class Desk {
     ]);
   }
 
-  private async launchBundle(mint: string, supply: bigint | null): Promise<BundleResult> {
+  /**
+   * Engine live buy only. Same front-of-queue priority as a manual pre-check, then fail closed.
+   * A timeout or an RPC error skips the buy. Manual buys keep launchBundleSoon.
+   */
+  private async engineLiveBundle(mint: string, supply: bigint | null): Promise<BundleResult | null> {
+    const ac = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.launchBundle(mint, supply, { priority: -1, signal: ac.signal, failClosed: true }),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => {
+            ac.abort();
+            resolve(null);
+          }, LIVE_BALANCE_WAIT_MS);
+        })
+      ]);
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async launchBundle(
+    mint: string,
+    supply: bigint | null,
+    opts?: { priority?: -1 | 0 | 1 | 2; signal?: AbortSignal; failClosed?: boolean }
+  ): Promise<BundleResult | null> {
     const cached = this.bundleCache.get(mint);
     if (cached && (cached.forever || Date.now() - cached.at < 10 * 60_000)) return cached.result;
     if (this.launchBundleFn) {
@@ -5590,8 +5625,9 @@ export class Desk {
       this.bundleCache.set(mint, { at: Date.now(), forever: true, result });
       return result;
     }
-    const result = await this.rpcBundle(mint, supply);
+    const result = await this.rpcBundle(mint, supply, opts?.priority ?? 2, opts?.signal);
     if (!result) {
+      if (opts?.failClosed || opts?.signal?.aborted) return null;
       const empty: BundleResult = { flagged: false, pct: 0, label: null, acquired: 0n };
       this.bundleCache.set(mint, { at: Date.now(), forever: false, result: empty });
       return empty;
@@ -5600,7 +5636,7 @@ export class Desk {
     return result;
   }
 
-  private async rpcBundle(mint: string, supply: bigint | null): Promise<BundleResult | null> {
+  private async rpcBundle(mint: string, supply: bigint | null, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal): Promise<BundleResult | null> {
     if (supply == null || supply <= 0n) return null;
     const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
     if (!rpc) return null;
@@ -5611,7 +5647,7 @@ export class Desk {
         method: "getSignaturesForAddress",
         params: [mint, { limit: 1000, commitment: "confirmed" }]
       });
-      const sigRes = await this.net.fetchAt(2)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: sigBody });
+      const sigRes = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: sigBody, signal });
       if (!sigRes.ok) return null;
       const sigJson = (await sigRes.json()) as { result?: Array<{ slot?: number }> };
       const rows = sigJson.result ?? [];
@@ -5624,7 +5660,7 @@ export class Desk {
         method: "getBlock",
         params: [slot, { encoding: "jsonParsed", transactionDetails: "full", rewards: false, maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
       });
-      const blockRes = await this.net.fetchAt(2)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: blockBody });
+      const blockRes = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: blockBody, signal });
       if (!blockRes.ok) return null;
       const blockJson = (await blockRes.json()) as { result?: { transactions?: SlotTransaction[] } | null };
       const txs = blockJson.result?.transactions ?? [];

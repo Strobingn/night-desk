@@ -265,6 +265,8 @@ interface Waiter {
   seq: number;
   resolve: () => void;
   reject: (err: Error) => void;
+  /** Set once this waiter is granted a token or dropped, so a late abort cannot settle it twice. */
+  settled: boolean;
   /** Set for priority-0 Helius polls so a newer read of the same accounts replaces this one. */
   key?: string;
 }
@@ -337,6 +339,13 @@ export class RateLimitError extends Error {
   }
 }
 
+/** A caller gave up while its request was still waiting for a token. The waiter is not sent. */
+function abortedError(): Error {
+  const err = new Error("aborted");
+  err.name = "AbortError";
+  return err;
+}
+
 export class NetLimiter {
   private readonly buckets = new Map<string, Bucket>();
   private readonly inflight = new Map<string, Promise<CachedResponse>>();
@@ -386,13 +395,38 @@ export class NetLimiter {
     return b;
   }
 
-  /** Wait for a token in this bucket. Lower priority number goes first. */
-  acquire(spec: BucketSpec, priority: Priority = 1, coalesceKey?: string): Promise<void> {
+  /** Wait for a token in this bucket. Lower priority number goes first. An aborted signal drops a waiter that is still queued. */
+  acquire(spec: BucketSpec, priority: Priority = 1, coalesceKey?: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(abortedError());
     const b = this.bucket(spec);
     return new Promise<void>((resolve, reject) => {
       if (spec.id === "helius" && priority === 0) {
         this.shedHeliusPriority0(b, coalesceKey);
       }
+      const waiter: Waiter = {
+        priority,
+        seq: this.seq++,
+        key: coalesceKey,
+        settled: false,
+        resolve: () => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        reject: (err: Error) => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          signal?.removeEventListener("abort", onAbort);
+          reject(err);
+        }
+      };
+      const onAbort = () => {
+        if (waiter.settled) return;
+        const idx = b.queue.indexOf(waiter);
+        if (idx >= 0) b.queue.splice(idx, 1);
+        waiter.reject(abortedError());
+      };
       if (b.queue.length >= MAX_QUEUE) {
         // Shed the newest lowest-priority waiter so marks and lookups never wait behind a pile.
         const worst = b.queue.reduce((acc, w) => (w.priority > acc.priority || (w.priority === acc.priority && w.seq > acc.seq) ? w : acc));
@@ -403,7 +437,8 @@ export class NetLimiter {
         b.queue.splice(b.queue.indexOf(worst), 1);
         worst.reject(new RateLimitError(`${spec.id} budget queue full`));
       }
-      b.queue.push({ priority, seq: this.seq++, resolve, reject, key: coalesceKey });
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      b.queue.push(waiter);
       b.queue.sort((a, c) => a.priority - c.priority || a.seq - c.seq);
       this.pump(b);
     });
@@ -642,7 +677,7 @@ export class NetLimiter {
         return toResponse(await shared);
       }
     }
-    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
+    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000, rest.signal ?? undefined);
     if (isGet || rpcRead) {
       this.inflight.set(key, run);
       try {
@@ -667,7 +702,7 @@ export class NetLimiter {
     return ((input: string | URL | Request, init?: RequestInit) => this.fetch(input, { ...(init ?? {}), ndPriority: priority })) as typeof fetch;
   }
 
-  private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number): Promise<CachedResponse> {
+  private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number, callerSignal?: AbortSignal): Promise<CachedResponse> {
     for (let attempt = 0; ; attempt += 1) {
       // A paused enrich host returns at once so the sighting stays pending.
       // This lane is not Helius, so a wallet or mark read is not held here.
@@ -686,9 +721,10 @@ export class NetLimiter {
         return { status: 429, statusText: "Desk backing off", headers: [["x-nd-local", "1"]], body: "" };
       }
       const coalesceKey = spec.id === "helius" && priority === 0 ? heliusPollKey(init.body) ?? undefined : undefined;
-      await this.acquire(spec, priority, coalesceKey);
+      await this.acquire(spec, priority, coalesceKey, callerSignal);
       const { signal: _ignored, ...rest } = init;
-      const res = await this.baseFetch(url, { ...rest, signal: AbortSignal.timeout(timeoutMs) });
+      const signal = callerSignal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), callerSignal]) : AbortSignal.timeout(timeoutMs);
+      const res = await this.baseFetch(url, { ...rest, signal });
       const cached: CachedResponse = {
         status: res.status,
         statusText: res.statusText,
