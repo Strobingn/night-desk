@@ -1,7 +1,7 @@
 import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
 import { LiveSubmitError, POOL_DRAINED_MESSAGE, isNoSellRouteMessage, offersSellAnyway } from "../market/live-submit.js";
-import { deadFromMarks, readSellRoute } from "../market/dead-holding.js";
+import { DEAD_MARKS, deadFromMarks, markCollapsed, noteCollapsedSample, readSellRoute, type CollapseStreak } from "../market/dead-holding.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
@@ -105,6 +105,12 @@ import { ORDER_MARK_MAX_AGE_MS, ORDER_MAX_TRIES, ORDER_RETRY_MS, OrderList, PERM
 
 /** v13.7 per-book state maps (cooldowns, opening, marks) key live positions with this prefix. */
 const LIVE_KEY = "live:";
+/** Pump and chain-priced holdings sell on their own venue. A Jupiter miss is not a drained pool. */
+function sellsOnPump(pos: { dex?: string | null; priceFeed?: string | null }): boolean {
+  const dex = (pos.dex ?? "").toLowerCase();
+  return pos.priceFeed === "chain" || dex === "pump.fun" || dex.startsWith("pump.fun ");
+}
+
 function bookKey(kind: BookKind, mint: string): string {
   return kind === "live" ? `${LIVE_KEY}${mint}` : mint;
 }
@@ -465,6 +471,8 @@ export class Desk {
   private walletTimer: NodeJS.Timeout | null = null;
   /** Display-only. A read-only quote found no pool. Never a sell and never a ledger write. */
   private noRoute = new Set<string>();
+  /** Display-only count of collapsed marks. The chart series drops identical prints inside 2s. */
+  private collapseStreak = new Map<string, CollapseStreak>();
   private routeProbeTimer: NodeJS.Timeout | null = null;
   private readonly walletReader: () => Promise<WalletBalances>;
   private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
@@ -3848,6 +3856,7 @@ export class Desk {
     if (!book.positions.has(pos.mint)) return;
     this.clearLiquidityGone(order.book === "live" ? "live" : "paper", pos.mint);
     this.noRoute.delete(bookKey(order.book === "live" ? "live" : "paper", pos.mint));
+    this.collapseStreak.delete(bookKey(order.book === "live" ? "live" : "paper", pos.mint));
     const rawProceeds = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     const proceedsUsd = typeof rawProceeds === "number" && Number.isFinite(rawProceeds) && rawProceeds > 0 ? roundUsd(rawProceeds) : 0;
     if (fill.mode === "paper" && this.paperProceedsUnverified(pos, proceedsUsd, fill.priceUsd, pos.costUsd)) {
@@ -3997,8 +4006,13 @@ export class Desk {
    * Does not write the book, the stop, settings, or the ledger, and does not exit.
    */
   private deadHolding(pos: Position, kind: BookKind): boolean {
-    if (this.noRoute.has(bookKey(kind, pos.mint))) return true;
+    const key = bookKey(kind, pos.mint);
+    if (this.noRoute.has(key)) return true;
     const shown = this.displayMark(pos, kind);
+    const collapsed = noteCollapsedSample(this.collapseStreak.get(key), markCollapsed(pos.entryPrice, shown.price), shown.at);
+    if (collapsed) this.collapseStreak.set(key, collapsed);
+    else this.collapseStreak.delete(key);
+    if ((collapsed?.n ?? 0) >= DEAD_MARKS) return true;
     return (
       deadFromMarks({
         entryPrice: pos.entryPrice,
@@ -4016,26 +4030,33 @@ export class Desk {
   async probeSellRoutes(fetchImpl?: typeof fetch): Promise<void> {
     const quoteUrl = this.config.jupiterQuoteUrl;
     if (!quoteUrl) return;
+    // Priority 0 shares the Jupiter price/quote bucket. A passed fetch is for tests.
+    const fetchUsed = fetchImpl ?? this.net.fetchAt(0);
     const held: Array<{ kind: BookKind; pos: Position }> = [];
     for (const pos of this.book.positions.values()) held.push({ kind: "paper", pos });
     for (const pos of this.liveBook?.positions.values() ?? []) held.push({ kind: "live", pos });
     const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    for (const { kind, pos } of held) {
+    const seenMint = new Set<string>();
+    for (const { pos } of held) {
+      if (seenMint.has(pos.mint) || sellsOnPump(pos)) continue;
       const decimals = pos.decimals ?? 6;
       const atoms = Math.floor(pos.qty * 10 ** decimals);
       if (!(atoms > 0) || !Number.isFinite(atoms)) continue;
+      seenMint.add(pos.mint);
       const verdict = await readSellRoute({
         quoteUrl,
         inputMint: pos.mint,
         outputMint: usdc,
         amount: String(atoms),
-        fetchImpl
+        fetchImpl: fetchUsed
       });
-      const key = bookKey(kind, pos.mint);
-      if (verdict === "no_route") {
-        this.noRoute.add(key);
-        this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
-      } else if (verdict === "route") this.noRoute.delete(key);
+      const same = held.filter((row) => row.pos.mint === pos.mint && !sellsOnPump(row.pos));
+      for (const row of same) {
+        const key = bookKey(row.kind, row.pos.mint);
+        if (verdict === "no_route") this.noRoute.add(key);
+        else if (verdict === "route") this.noRoute.delete(key);
+      }
+      if (verdict === "no_route" || verdict === "route") this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
     }
   }
 

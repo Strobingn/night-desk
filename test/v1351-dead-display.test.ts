@@ -2,7 +2,8 @@ import { Keypair } from "@solana/web3.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
-import { DEAD_MARKS, deadFromMarks, readSellRoute } from "../src/market/dead-holding.js";
+import { DEAD_MARKS, deadFromMarks, noteCollapsedSample, readSellRoute } from "../src/market/dead-holding.js";
+import type { Priority } from "../src/market/net.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { testConfig, testDesk } from "./helpers.js";
 
@@ -39,6 +40,15 @@ describe("v13.51 dead card without a sell", () => {
     const low = 0.005;
     expect(deadFromMarks({ entryPrice: 1, qty: 100, markPrice: low, marks: [low] })).toBeNull();
     expect(deadFromMarks({ entryPrice: 1, qty: 100, markPrice: low, marks: Array(DEAD_MARKS).fill(low) })).toBe("drop");
+    let streak = noteCollapsedSample(undefined, true, 1_000);
+    expect(streak?.n).toBe(1);
+    streak = noteCollapsedSample(streak, true, 1_000 + 1_499);
+    expect(streak?.n).toBe(1);
+    streak = noteCollapsedSample(streak, true, 1_000 + 1_500);
+    expect(streak?.n).toBe(2);
+    streak = noteCollapsedSample(streak, true, 1_000 + 3_000);
+    expect(streak?.n).toBe(3);
+    expect(noteCollapsedSample(streak, false, 9_000)).toBeUndefined();
   });
 
   it("moves a live dust mark into the dead note without a sell, a stop change, or a ledger write", async () => {
@@ -88,6 +98,69 @@ describe("v13.51 dead card without a sell", () => {
       expect(desk.book.positions.has(mint)).toBe(true);
       expect(desk.book.cashUsd).toBe(cash);
       expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS" || event.code === "MANUAL_CLOSE")).toBe(false);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("counts a collapsed price that the chart folds into one point", async () => {
+    const desk = testDesk();
+    try {
+      await desk.submitCandidate(makeToken({ mint, symbol: "INSANE", priceUsd: 1, liquidityUsd: 180_000 }));
+      const pos = desk.book.positions.get(mint)!;
+      const low = pos.entryPrice * 0.005;
+      expect(pos.qty * low).toBeGreaterThan(0.01);
+      const t0 = Date.now();
+      for (let i = 0; i < 40; i++) {
+        const at = t0 + i * 1_500;
+        desk.book.mark(mint, low, at);
+        desk.book.noteMark(mint, low, at);
+        const note = desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote ?? null;
+        if (i < 2) expect(note).toBeNull();
+      }
+      expect(desk.book.points(mint).filter((point) => point.priceUsd === low)).toHaveLength(1);
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote).toBe("Liquidity gone, no sell route");
+      expect(desk.book.positions.has(mint)).toBe(true);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("does not call Jupiter for a pump-route coin, and uses the shared quote fetch", async () => {
+    const desk = testDesk();
+    try {
+      await desk.submitCandidate(makeToken({ mint, symbol: "PUMP", priceUsd: 1, liquidityUsd: 180_000 }));
+      const pos = desk.book.positions.get(mint)!;
+      pos.dex = "pump.fun";
+      pos.priceFeed = "chain";
+      const calls: string[] = [];
+      const fetchImpl = (async (url: URL | RequestInfo) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({ errorCode: "NO_ROUTES_FOUND" }), { status: 400 });
+      }) as typeof fetch;
+      await desk.probeSellRoutes(fetchImpl);
+      expect(calls).toHaveLength(0);
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote ?? null).toBeNull();
+
+      const priorities: number[] = [];
+      const orig = desk.net.fetchAt.bind(desk.net);
+      desk.net.fetchAt = ((priority: Priority) => {
+        priorities.push(priority);
+        return orig(priority);
+      }) as typeof desk.net.fetchAt;
+      pos.dex = "raydium";
+      pos.priceFeed = "dexscreener";
+      const quoted = (async () => new Response(JSON.stringify({ outAmount: "1000" }), { status: 200 })) as typeof fetch;
+      await desk.probeSellRoutes(quoted);
+      expect(priorities).toHaveLength(0);
+      priorities.length = 0;
+      desk.net.fetchAt = ((priority: Priority) => {
+        priorities.push(priority);
+        return (async () => new Response(JSON.stringify({ outAmount: "1000" }), { status: 200 })) as typeof fetch;
+      }) as typeof desk.net.fetchAt;
+      await desk.probeSellRoutes();
+      expect(priorities).toEqual([0]);
+      expect(desk.book.positions.has(mint)).toBe(true);
     } finally {
       desk.stop();
     }

@@ -4,8 +4,26 @@ import { isNoRoutesBody, isNoSellRouteMessage } from "./live-submit.js";
 export const DEAD_VALUE_USD = 0.01;
 /** A drop of this much from entry, held across several prints, is dead even if a few cents remain. */
 export const DEAD_DROP = 0.99;
-/** How many stored prints a 99% drop has to last before the card moves. */
+/** How many collapsed observations a 99% drop has to last before the card moves. */
 export const DEAD_MARKS = 3;
+/** Observations closer than this are the same print. The chart series dedupes those. */
+export const DEAD_MARK_GAP_MS = 1_500;
+
+export interface CollapseStreak {
+  n: number;
+  at: number;
+}
+
+/**
+ * Count a collapsed mark even when the chart keeps only one point.
+ * Identical prints inside the gap do not add another count. A recovered mark clears it.
+ */
+export function noteCollapsedSample(prev: CollapseStreak | undefined, collapsed: boolean, at: number, gapMs = DEAD_MARK_GAP_MS): CollapseStreak | undefined {
+  if (!collapsed || !(at > 0) || !Number.isFinite(at)) return undefined;
+  if (!prev) return { n: 1, at };
+  if (at - prev.at < gapMs) return prev;
+  return { n: prev.n + 1, at };
+}
 
 export function markCollapsed(entryPrice: number, markPrice: number): boolean {
   return entryPrice > 0 && markPrice > 0 && Number.isFinite(entryPrice) && Number.isFinite(markPrice) && markPrice <= entryPrice * (1 - DEAD_DROP);

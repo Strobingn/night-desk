@@ -4,7 +4,7 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
-Android `13.51` (versionCode 1351): a holding whose mark has collapsed (worth under a cent at 99% below entry, or a 99% drop that has held for several prints) or whose read-only sell quote finds no pool moves into Dead / no sell route without a sell attempt. Nothing is sent, and stops, settings, and the ledger stay as they are.
+Android `13.51` (versionCode 1351): a holding whose mark has collapsed (worth under a cent at 99% below entry, or a 99% drop seen three times at least 1.5s apart) or whose read-only Jupiter quote finds no pool moves into Dead / no sell route without a sell attempt. Pump-route coins are not judged by that quote. Nothing is sent, and stops, settings, and the ledger stay as they are.
 
 Android `13.50` (versionCode 1350): a live sell in the first 30 seconds after a fill uses the confirmed buy amount when the wallet or token-account read is stale, empty, or still in flight, instead of refusing with "Wallet balance not current." Coins marked liquidity gone sit in a collapsed Dead / no sell route section. A manual Sell anyway can pass the 6% exit cap for that tap; engine exits cannot, and the setting stays 6%. No route says the pool is drained. Caps stay 10 and 8.
 
