@@ -1114,7 +1114,11 @@ class DeskRepository private constructor(private val context: Context) {
                         }
                         parseDeskPayload(text)?.let {
                             apply(it)
-                            if (gen == generation.get()) socketSnapshotAt = System.currentTimeMillis()
+                            if (gen == generation.get()) {
+                                socketSnapshotAt = System.currentTimeMillis()
+                                // This snapshot stands in for the next poll, so it also clears what a failed poll left on the banner.
+                                _error.value = deskLinkError(true, null, walletPollError)
+                            }
                             persistSnapshot(text)
                         }
                     }
