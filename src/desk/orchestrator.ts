@@ -466,6 +466,8 @@ export class Desk {
   /** Display-only. A read-only quote found no pool. Never a sell and never a ledger write. */
   private noRoute = new Set<string>();
   private routeProbeTimer: NodeJS.Timeout | null = null;
+  /** A pass is still awaiting quotes. The next minute must not start another one. */
+  private routeProbeInflight = false;
   private readonly walletReader: () => Promise<WalletBalances>;
   private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
   /** A live swap that was submitted (or may have been) and is not a booked fill. Blocks another send. */
@@ -1022,6 +1024,7 @@ export class Desk {
     this.bookEpoch += 1;
     this.config.startingBalanceUsd = starting;
     this.book.positions.clear();
+    for (const key of this.noRoute) if (!key.startsWith(LIVE_KEY)) this.noRoute.delete(key);
     this.book.lastPrice.clear();
     this.book.cashUsd = starting;
     this.cooldowns.clear();
@@ -3695,6 +3698,7 @@ export class Desk {
       ...(fill.mode === "live" ? { live: true } : {}),
       ...(strategy ? { strategy: { ...strategy } } : {})
     };
+    this.noRoute.delete(bookKey(kind, token.mint));
     book.positions.set(token.mint, position);
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
@@ -4012,30 +4016,41 @@ export class Desk {
   /**
    * Ask whether a held coin still has a sell quote. GET only. Nothing is signed or sent.
    * No route sets the same card note a failed sell would. A quote clears only that flag.
+   * Quotes share the Jupiter limiter. One pass at a time, and a verdict applies only while that position is still open.
    */
   async probeSellRoutes(fetchImpl?: typeof fetch): Promise<void> {
+    if (this.routeProbeInflight) return;
     const quoteUrl = this.config.jupiterQuoteUrl;
     if (!quoteUrl) return;
-    const held: Array<{ kind: BookKind; pos: Position }> = [];
-    for (const pos of this.book.positions.values()) held.push({ kind: "paper", pos });
-    for (const pos of this.liveBook?.positions.values() ?? []) held.push({ kind: "live", pos });
-    const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    for (const { kind, pos } of held) {
-      const decimals = pos.decimals ?? 6;
-      const atoms = Math.floor(pos.qty * 10 ** decimals);
-      if (!(atoms > 0) || !Number.isFinite(atoms)) continue;
-      const verdict = await readSellRoute({
-        quoteUrl,
-        inputMint: pos.mint,
-        outputMint: usdc,
-        amount: String(atoms),
-        fetchImpl
-      });
-      const key = bookKey(kind, pos.mint);
-      if (verdict === "no_route") {
-        this.noRoute.add(key);
-        this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
-      } else if (verdict === "route") this.noRoute.delete(key);
+    this.routeProbeInflight = true;
+    try {
+      const held: Array<{ kind: BookKind; pos: Position }> = [];
+      for (const pos of this.book.positions.values()) held.push({ kind: "paper", pos });
+      for (const pos of this.liveBook?.positions.values() ?? []) held.push({ kind: "live", pos });
+      const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+      const quoteFetch =
+        fetchImpl ??
+        ((input: string | URL | Request, init?: RequestInit) => this.net.fetch(input, { ...(init ?? {}), ndPriority: 2, timeoutMs: 4_000 }));
+      for (const { kind, pos } of held) {
+        const decimals = pos.decimals ?? 6;
+        const atoms = Math.floor(pos.qty * 10 ** decimals);
+        if (!(atoms > 0) || !Number.isFinite(atoms)) continue;
+        const verdict = await readSellRoute({
+          quoteUrl,
+          inputMint: pos.mint,
+          outputMint: usdc,
+          amount: String(atoms),
+          fetchImpl: quoteFetch
+        });
+        if (this.bk(kind).positions.get(pos.mint) !== pos) continue;
+        const key = bookKey(kind, pos.mint);
+        if (verdict === "no_route") {
+          this.noRoute.add(key);
+          this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
+        } else if (verdict === "route") this.noRoute.delete(key);
+      }
+    } finally {
+      this.routeProbeInflight = false;
     }
   }
 

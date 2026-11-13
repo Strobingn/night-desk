@@ -117,6 +117,85 @@ describe("v13.51 dead card without a sell", () => {
       desk.stop();
     }
   });
+
+  it("sends the probe through the Jupiter limiter and will not run a second pass over the first", async () => {
+    const desk = testDesk();
+    try {
+      await desk.submitCandidate(makeToken({ mint, symbol: "INSANE", priceUsd: 1, liquidityUsd: 180_000 }));
+      const seen: string[] = [];
+      desk.net.fetch = (async (input: string | URL | Request) => {
+        seen.push(String(input));
+        return new Response(JSON.stringify({ outAmount: "1000" }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof desk.net.fetch;
+      await desk.probeSellRoutes();
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain("/quote?");
+
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let opened: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        opened = resolve;
+      });
+      const slow = (async () => {
+        opened?.();
+        await gate;
+        return new Response(JSON.stringify({ errorCode: "NO_ROUTES_FOUND" }), { status: 400, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const pending = desk.probeSellRoutes(slow);
+      await started;
+      let overlapped = 0;
+      const fast = (async () => {
+        overlapped += 1;
+        return new Response(JSON.stringify({ outAmount: "1000" }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      await desk.probeSellRoutes(fast);
+      expect(overlapped).toBe(0);
+      release?.();
+      await pending;
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote).toBe("Liquidity gone, no sell route");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("does not keep a no-route flag after that position is sold, reset, or bought again", async () => {
+    const desk = testDesk();
+    try {
+      await desk.submitCandidate(makeToken({ mint, symbol: "INSANE", priceUsd: 1, liquidityUsd: 180_000 }));
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let opened: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        opened = resolve;
+      });
+      const slow = (async () => {
+        opened?.();
+        await gate;
+        return new Response(JSON.stringify({ errorCode: "NO_ROUTES_FOUND" }), { status: 400, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const pending = desk.probeSellRoutes(slow);
+      await started;
+      expect((await desk.closePosition(mint, 1)).ok).toBe(true);
+      expect((await desk.manualBuy(mint, 5)).ok).toBe(true);
+      release?.();
+      await pending;
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote ?? null).toBeNull();
+
+      const no = (async () => new Response(JSON.stringify({ errorCode: "NO_ROUTES_FOUND" }), { status: 400, headers: { "content-type": "application/json" } })) as typeof fetch;
+      await desk.probeSellRoutes(no);
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote).toBe("Liquidity gone, no sell route");
+      expect(desk.resetPaperBook(true).ok).toBe(true);
+      expect((await desk.manualBuy(mint, 5)).ok).toBe(true);
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote ?? null).toBeNull();
+    } finally {
+      desk.stop();
+    }
+  });
 });
 
 describe("v13.51 readSellRoute", () => {
