@@ -84,7 +84,7 @@ export const BUCKETS: BucketSpec[] = [
     budgetPerMin: 10,
     burst: 3,
     cacheMs: 0,
-    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. 10/min is a hard sliding-minute ceiling (burst 3 only when that minute still has room). Together with the exec lane the two reqLastMin counts never pass 18. The URL is not logged; it may carry an API key. Nothing is cached."
+    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. Priority -1 reads (wallet, an engine buy's safety and bundle checks) skip the token bucket but never the minute ceiling. Priority-2 background reads stop at 7/min so 3 sends a minute stay free for them. 10/min is a hard sliding-minute ceiling (burst 3 only when that minute still has room). Together with the exec lane the two reqLastMin counts never pass 18. The URL is not logged; it may carry an API key. Nothing is cached."
   },
   {
     id: "helius:exec",
@@ -199,6 +199,12 @@ const RPC_METHOD = /"method"\s*:\s*"([A-Za-z]+)"/;
 /** Background polls. Everything else on the public host, including getAccountInfo and getLatestBlockhash, uses the exec lane. */
 const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "getMultipleAccounts"]);
 /** Priority 2 only. Stays on the read lane so a mint check cannot take a swap slot. */
+/**
+ * Helius read lane. Priority-2 background reads stop at budget minus this many sends a minute,
+ * so a buy's safety read and its two bundle reads (priority -1) find a free slot instead of
+ * waiting for one to age out. The lane ceilings do not move.
+ */
+export const HELIUS_FRONT_RESERVE = 3;
 const LOW_PRIORITY_READ = new Set(["getAccountInfo", "getMultipleAccounts", "getSignaturesForAddress", "getTransaction", "getBlock"]);
 
 export function rpcMethod(body: string): string | null {
@@ -314,6 +320,8 @@ class Bucket {
   circuitUntil = 0;
   sent = 0;
   timer = false;
+  timerDue = 0;
+  timerGen = 0;
 
   constructor(readonly spec: BucketSpec, now: number) {
     this.tokens = spec.burst;
@@ -486,9 +494,9 @@ export class NetLimiter {
    * must not push the pair past 18 reqLastMin (a minute of 11+8 was the leak).
    * Other hosts keep the token bucket they already had.
    */
-  private heliusWait(b: Bucket, now: number): number {
+  private heliusWait(b: Bucket, now: number, reserve = 0): number {
     if (b.spec.id !== "helius" && b.spec.id !== "helius:exec") return 0;
-    const own = b.windowCount(now);
+    const own = b.windowCount(now) + reserve;
     const other = this.buckets.get(b.spec.id === "helius" ? "helius:exec" : "helius");
     const otherCount = other?.windowCount(now) ?? 0;
     const combinedCap = b.spec.budgetPerMin + (other?.spec.budgetPerMin ?? 0);
@@ -514,22 +522,43 @@ export class NetLimiter {
     return Math.max(1, oldest + 1000 - now);
   }
 
+  /**
+   * What the waiter at the head of the queue needs before it is sent.
+   * Helius read lane only: a priority -1 read skips the token bucket (the minute ceilings still
+   * hold it), and a priority-2 read leaves HELIUS_FRONT_RESERVE sends of the minute unused.
+   */
+  private headNeeds(b: Bucket): { tokens: number; reserve: number } {
+    const priority = b.queue[0]?.priority ?? 1;
+    if (b.spec.id !== "helius") return { tokens: 1, reserve: 0 };
+    if (priority === -1) return { tokens: Number.NEGATIVE_INFINITY, reserve: 0 };
+    return { tokens: 1, reserve: priority >= 2 ? HELIUS_FRONT_RESERVE : 0 };
+  }
+
   private pump(b: Bucket): void {
-    if (b.timer) return;
     const now = this.clock.now();
     b.refill(now);
-    while (b.queue.length && now >= b.pauseUntil && b.tokens >= 1 && this.heliusWait(b, now) === 0 && this.enrichRpsWait(b, now) === 0) {
-      b.tokens -= 1;
+    while (b.queue.length && now >= b.pauseUntil && this.enrichRpsWait(b, now) === 0) {
+      const needs = this.headNeeds(b);
+      if (b.tokens < needs.tokens || this.heliusWait(b, now, needs.reserve) !== 0) break;
+      // A front read that found the bucket empty leaves no debt: marks behind it wait for one
+      // token, not for the bucket to climb back from below zero. The minute ceiling is the cap.
+      b.tokens = Math.max(0, b.tokens - 1);
       b.sent += 1;
       b.sentTimes.push(now);
       b.queue.shift()!.resolve();
     }
     if (!b.queue.length) return;
+    const needs = this.headNeeds(b);
     const perMs = (b.spec.budgetPerMin * b.rateFactor) / 60_000;
-    const waitToken = b.tokens >= 1 ? 0 : Math.ceil((1 - b.tokens) / perMs);
-    const wait = Math.max(waitToken, this.heliusWait(b, now), this.enrichRpsWait(b, now), b.pauseUntil - now, 1);
+    const waitToken = b.tokens >= needs.tokens ? 0 : Math.ceil((needs.tokens - b.tokens) / perMs);
+    const wait = Math.max(waitToken, this.heliusWait(b, now, needs.reserve), this.enrichRpsWait(b, now), b.pauseUntil - now, 1);
+    // A waiter that jumped the queue can be due sooner than the timer set for the one it passed.
+    if (b.timer && now + wait >= b.timerDue) return;
     b.timer = true;
+    b.timerDue = now + wait;
+    const gen = ++b.timerGen;
     this.clock.setTimeout(() => {
+      if (gen !== b.timerGen) return;
       b.timer = false;
       this.pump(b);
     }, wait);
