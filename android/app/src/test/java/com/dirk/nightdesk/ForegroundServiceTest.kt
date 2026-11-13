@@ -27,8 +27,8 @@ class ForegroundServicePolicyTest {
         assertTrue(manifest.contains("android.intent.action.SEND"))
         assertTrue(manifest.contains("android:mimeType=\"text/plain\""))
         val gradle = readProjectFile("build.gradle.kts")
-        assertTrue(gradle.contains("versionCode = 1341"))
-        assertTrue(gradle.contains("versionName = \"13.41\""))
+        assertTrue(gradle.contains("versionCode = 1342"))
+        assertTrue(gradle.contains("versionName = \"13.42\""))
     }
 
     @Test

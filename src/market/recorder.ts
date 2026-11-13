@@ -76,7 +76,7 @@ export class MarketRecorder {
   private readonly insertSignal: StatementSync | null = null;
   private buffer: RecordedQuote[] = [];
   private readonly last = new Map<string, { t: number; sig: string }>();
-  private readonly lastTick = new Map<string, { t: number; priceUsd: number }>();
+  private readonly lastTick = new Map<string, { t: number; priceUsd: number; liquidityUsd: number | null }>();
   private quotes = 0;
   private signals = 0;
   private oldestAt: number | null = null;
@@ -161,9 +161,10 @@ export class MarketRecorder {
       const gap = t - prev.t;
       const moved = Math.abs(priceUsd / prev.priceUsd - 1) >= RECORDER.tickMovePct;
       if (gap < RECORDER.tickGapMs && !moved) return false;
-      if (priceUsd === prev.priceUsd && gap < RECORDER.unchangedGapMs) return false;
+      // Depth changes what a sell would net, so a depth change at the same price is a new observation.
+      if (priceUsd === prev.priceUsd && liquidityUsd === prev.liquidityUsd && gap < RECORDER.unchangedGapMs) return false;
     }
-    this.lastTick.set(mint, { t, priceUsd });
+    this.lastTick.set(mint, { t, priceUsd, liquidityUsd });
     this.buffer.push({ t, mint, symbol, priceUsd, liquidityUsd, vol5mUsd: null, vol1hUsd: null, change1hPct: null, buys5m: null, sells5m: null, source: TICK_SOURCE, flowAt: null });
     if (this.buffer.length >= RECORDER.flushRows) this.flush();
     return true;

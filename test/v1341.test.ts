@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { gunzipSync } from "node:zlib";
 import { once } from "node:events";
+import { performance } from "node:perf_hooks";
 import type { AddressInfo } from "node:net";
 import { Keypair } from "@solana/web3.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { MarketRecorder, quotesCsv, recordDays, RECORDER, type RecordedQuote } from "../src/market/recorder.js";
-import { startServer } from "../src/server/http.js";
+import { acceptsGzip, startServer } from "../src/server/http.js";
 import { replayGrid, replaySaved, rulesLabel } from "../src/strategy/replay.js";
 import { testConfig } from "./helpers.js";
 
@@ -345,5 +346,80 @@ describe("13.41 gzip", () => {
       server.close();
       desk.stop();
     }
+  });
+});
+
+describe("13.42 follow-ups", () => {
+  it("folds new live samples into the cached curve without reading the table again", () => {
+    const desk = new Desk(testConfig());
+    try {
+      for (let i = 0; i < 300; i += 1) desk.store.insertLiveEquity({ t: 1_000 + i * 10_000, equity: 20 + (i % 5) * 0.01, cash: 5 });
+      expect(desk.store.liveEquityCurve(0).length).toBeLessThanOrEqual(240);
+      // Empty the table: anything the curve shows from here on came from memory.
+      desk.store.db.exec("DELETE FROM live_equity");
+      for (let i = 300; i < 2_000; i += 1) desk.store.insertLiveEquity({ t: 1_000 + i * 10_000, equity: i === 1_500 ? 77 : i === 1_700 ? 3 : 20 + (i % 5) * 0.01, cash: 5 });
+      const curve = desk.store.liveEquityCurve(0);
+      expect(curve.length).toBeLessThanOrEqual(240);
+      expect(curve[0]!.t).toBe(1_000);
+      expect(curve[curve.length - 1]!.t).toBe(1_000 + 1_999 * 10_000);
+      expect(Math.max(...curve.map((p) => p.equity))).toBe(77);
+      expect(Math.min(...curve.map((p) => p.equity))).toBe(3);
+      expect(curve.every((p, i) => i === 0 || p.t > curve[i - 1]!.t)).toBe(true);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("deletes live equity rows past the retention window", () => {
+    const desk = new Desk(testConfig());
+    try {
+      const day = 86_400_000;
+      desk.store.insertLiveEquity({ t: 1 * day, equity: 10, cash: 10 });
+      desk.store.insertLiveEquity({ t: 200 * day, equity: 11, cash: 11 });
+      expect(desk.store.liveEquityCurve(0).map((p) => p.equity)).toEqual([11]);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("reads gzip q-values", () => {
+    expect(acceptsGzip("gzip")).toBe(true);
+    expect(acceptsGzip("br, gzip;q=0.5")).toBe(true);
+    expect(acceptsGzip("gzip;q=0, identity;q=1")).toBe(false);
+    expect(acceptsGzip("identity")).toBe(false);
+    expect(acceptsGzip("*")).toBe(true);
+    expect(acceptsGzip("*;q=0")).toBe(false);
+    expect(acceptsGzip("gzip;q=0, *")).toBe(false);
+    expect(acceptsGzip(undefined)).toBe(false);
+    expect(acceptsGzip(["deflate", "GZIP"])).toBe(true);
+  });
+
+  it("saves a held tick whose depth changed at the same price", () => {
+    const rec = new MarketRecorder(new DatabaseSync(":memory:"), 14);
+    expect(rec.tick(10_000, "M", "S", 1.08, 1_000)).toBe(true);
+    expect(rec.tick(15_000, "M", "S", 1.08, 200_000)).toBe(true);
+    expect(rec.tick(18_000, "M", "S", 1.08, 200_000)).toBe(false);
+  });
+
+  it("keeps handing the event loop back during a large replay", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000 };
+    const signals = Array.from({ length: 600 }, (_, i) => ({ t: t0 + i * 20_000, mint: `Mint${i % 40}`, symbol: "S", kind: i % 2 ? "launch" : "momentum", priceUsd: 1, detail }));
+    const quotes = Array.from({ length: 2_400 }, (_, i) => q(t0 + i * 5_000 + 1, 1 + ((i * 7) % 13) / 100, { mint: `Mint${i % 40}` }));
+    let worst = 0;
+    let last = performance.now();
+    const probe = setInterval(() => {
+      const now = performance.now();
+      worst = Math.max(worst, now - last);
+      last = now;
+    }, 1);
+    try {
+      const out = await replaySaved(quotes, signals);
+      expect(out.rows.some((r) => r.trades > 0)).toBe(true);
+    } finally {
+      clearInterval(probe);
+    }
+    // 6 ms slices plus timer slack. Before 13.42 this gap ran to hundreds of milliseconds.
+    expect(worst).toBeLessThan(80);
   });
 });
