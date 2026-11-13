@@ -363,6 +363,15 @@ export class Desk {
   private strategyExitRetryAt = new Map<string, number>();
   /** Live engine buys in flight. They count against the engine's open limit before they fill. */
   private engineLivePending = new Set<string>();
+  /** v13.44 what the live engine has done since the desk started, so the phone can say why it is not buying. */
+  private liveEngine = {
+    signals: 0,
+    otherSignals: 0,
+    buys: 0,
+    lastSignalAt: null as number | null,
+    lastBuyAt: null as number | null,
+    lastSkip: null as { at: number; symbol: string; code: string; message: string } | null
+  };
   /** Live engine buys run one after another, so each sees the spend and the result of the one before it. */
   private engineLiveQueue: Promise<void> = Promise.resolve();
   readonly latency = new LatencyStats();
@@ -397,7 +406,7 @@ export class Desk {
   private readonly launchBundleFn?: (mint: string) => Promise<BundleResult | null>;
   private readonly safetyCache = new Map<string, { at: number; ttl: number; result: MintSafety }>();
   private readonly bundleCache = new Map<string, { at: number; forever: boolean; result: BundleResult }>();
-  private readonly safetyInflight = new Map<string, Promise<MintSafety>>();
+  private readonly safetyInflight = new Map<string, { job: Promise<MintSafety>; priority: -1 | 0 | 1 | 2 }>();
   /** v13.5 live daily spend cap. null = off (the default). */
   private liveDailyCapUsd: number | null = null;
   /** v13.5 live trailing stop, fraction. Armed from entry. */
@@ -451,6 +460,8 @@ export class Desk {
   /** Latest quote-side USD from a Dex tick, used when a later NO_ROUTES has no quote on the request. */
   private lastQuoteUsd = new Map<string, number>();
   private startedAt = Date.now();
+  /** When the live engine counters started: process start, or the last change of live variant. */
+  private liveEngineSince = Date.now();
   /** Earliest instant the current paper book owns. Recaps never look past it. */
   private resetAt = 0;
   /** Bumped by a paper reset so a fill already in flight cannot reopen the book. */
@@ -1239,7 +1250,21 @@ export class Desk {
     return {
       ...card,
       mainOpen,
-      live: { open: liveOpen, tradeUsd: this.liveTradeUsd, targetNetUsd: this.liveEngineTarget(), blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen." },
+      live: {
+        open: liveOpen,
+        tradeUsd: this.liveTradeUsd,
+        targetNetUsd: this.liveEngineTarget(),
+        blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen.",
+        since: this.liveEngineSince,
+        signals: this.liveEngine.signals,
+        otherSignals: this.liveEngine.otherSignals,
+        buys: this.liveEngine.buys,
+        lastSignalAt: this.liveEngine.lastSignalAt,
+        lastBuyAt: this.liveEngine.lastBuyAt,
+        lastSkip: this.liveEngine.lastSkip,
+        spentTodayUsd: roundUsd(this.liveSpentTodayUsd()),
+        dailyCapUsd: this.liveDailyCapUsd
+      },
       recording: this.recorder.stats()
     };
   }
@@ -1293,6 +1318,9 @@ export class Desk {
     this.strategy.settings = result.settings;
     this.store.writeJson("strategy", result.settings);
     if (wasLive !== (result.settings.liveVariant ?? null)) {
+      // The counters describe the variant that is live now, so they start over with it.
+      this.liveEngine = { signals: 0, otherSignals: 0, buys: 0, lastSignalAt: null, lastBuyAt: null, lastSkip: null };
+      this.liveEngineSince = Date.now();
       const block = this.liveEngineBlock();
       this.log({
         stage: "system",
@@ -1410,8 +1438,13 @@ export class Desk {
     const meta = fired.liveMeta;
     if (!meta) return;
     const { token, score } = fired;
+    // Results are written to the counters this attempt started under. A change of live variant swaps in new ones.
+    const tally = this.liveEngine;
+    tally.signals += 1;
+    tally.lastSignalAt = Date.now();
     const skip = (message: string, code: "ENGINE_LIVE_PAUSED" | "ENGINE_LIVE_SKIP" | "LAUNCH_BUNDLE_UNVERIFIED" = "ENGINE_LIVE_SKIP") => {
       this.pipeline.executorSkips += 1;
+      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code, message };
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Engine live buy skipped ${token.symbol}. ${message}` });
     };
     const block = this.liveEngineBlock();
@@ -1439,12 +1472,22 @@ export class Desk {
       }
       const again = this.liveEngineBlock();
       if (again) return skip(again, "ENGINE_LIVE_PAUSED");
-      await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
+      const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
         tag: fired.signal.signal,
         book: "live",
         engineLive: true,
         strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
       });
+      if (result.ok) {
+        tally.buys += 1;
+        tally.lastBuyAt = Date.now();
+      } else {
+        // The buy path refused (wallet, daily cap, slippage, route...). Keep its own words for the phone.
+        tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
+      }
+    } catch (err) {
+      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ERROR", message: err instanceof Error ? err.message : String(err) };
+      throw err;
     } finally {
       this.engineLivePending.delete(token.mint);
       done();
@@ -1525,6 +1568,8 @@ export class Desk {
 
   /** The paper buy and, when a live variant is set for this signal, the live buy. Neither waits on the other's outcome. */
   private async strategyBuys(fired: FiredSignal): Promise<void> {
+    // A signal of the kind the live variant does not trade: counted, so "no live buys" can be told from "no signals".
+    if (!fired.liveMeta && this.strategy.settings.liveVariant) this.liveEngine.otherSignals += 1;
     const live = fired.liveMeta ? this.strategyLiveBuy(fired).catch((err) => console.error("[strategy] live buy", err)) : null;
     await this.strategyBuy(fired);
     if (live) await live;
@@ -3267,7 +3312,8 @@ export class Desk {
       const gate = autoBuyBlock({
         autoBuy: this.autoBuy,
         maxTradesPerHour: this.maxTradesPerHour,
-        buysLastHour: this.buysInLastHour(),
+        // v13.44 an engine live buy is limited by live buys only. Paper engine buys used to fill the hourly limit first.
+        buysLastHour: this.buysInLastHour(engineLive),
         // Paper losses sit in this sum. They pause paper auto-buys only. An engine live entry keeps the $5 closed-live pause.
         dailyMaxLossUsd: engineLive ? 0 : this.dailyMaxLossUsd,
         lossSoFarUsd: this.lossSoFarUsd()
@@ -5034,9 +5080,12 @@ export class Desk {
     if (typeof saved.senderTipSol === "number") this.senderTipSol = clampSenderTipSol(saved.senderTipSol);
   }
 
-  private buysInLastHour(): number {
+  /** Buy fills in the last hour. `liveOnly` counts real-money buys only: paper engine buys must not use up the live budget. */
+  private buysInLastHour(liveOnly = false): number {
     const since = Date.now() - 3_600_000;
-    return this.store.recentEvents(500).filter((event) => event.kind === "fill" && event.ts >= since && / buy /.test(event.message)).length;
+    return this.store
+      .recentEvents(500)
+      .filter((event) => event.kind === "fill" && event.ts >= since && / buy /.test(event.message) && (!liveOnly || /\(live,/.test(event.message))).length;
   }
 
   private lossSoFarUsd(): number {
@@ -5527,12 +5576,18 @@ export class Desk {
   }
 
   private async tokenSafety(mint: string, priority: -1 | 0 | 1 | 2 = 2): Promise<MintSafety> {
+    const front = priority === -1;
     const hit = this.safetyCache.get(mint);
-    if (hit && Date.now() - hit.at < hit.ttl) return hit.result;
+    // A front-of-queue caller (a buy) does not settle for a cached "unknown": that is usually a
+    // background read that timed out in the queue, and this caller can jump that queue.
+    if (hit && Date.now() - hit.at < hit.ttl && !(front && hit.result.status === "unknown")) return hit.result;
     const pending = this.safetyInflight.get(mint);
-    if (pending) return pending;
-    const job = this.readMintSafety(mint, priority).finally(() => this.safetyInflight.delete(mint));
-    this.safetyInflight.set(mint, job);
+    // Nor does it wait on a background read already queued for the same coin.
+    if (pending && !(front && pending.priority !== -1)) return pending.job;
+    const job = this.readMintSafety(mint, priority).finally(() => {
+      if (this.safetyInflight.get(mint)?.job === job) this.safetyInflight.delete(mint);
+    });
+    this.safetyInflight.set(mint, { job, priority });
     return job;
   }
 

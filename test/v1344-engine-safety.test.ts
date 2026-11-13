@@ -90,7 +90,7 @@ beforeEach(() => {
   }));
 });
 
-describe("v13.44 engine safety priority", () => {
+describe("v13.45 engine safety priority", () => {
   it("issues the paper engine safety read at priority -1", async () => {
     const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }));
     const seen = watchSafety(desk);
@@ -213,5 +213,45 @@ describe("v13.44 engine safety priority", () => {
     expect(net.stats().find((row) => row.id === "helius:exec")?.queued).toBe(0);
     release();
     await Promise.all([first, second]);
+  });
+  it("lets a buy re-read a coin a background check left Unknown", async () => {
+    const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }));
+    const seen = watchSafety(desk);
+    const safety = (priority: -1 | 2) =>
+      (desk as unknown as { tokenSafety: (mint: string, priority: number) => Promise<{ status: string }> }).tokenSafety(MINT, priority);
+    try {
+      expect((await safety(2)).status).toBe("unknown");
+      await safety(2);
+      expect(seen).toEqual([2]); // background callers share the cached answer
+      await safety(-1);
+      expect(seen).toEqual([2, -1]); // the buy asks again, at the front of the queue
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("does not make a buy wait on a background safety read already queued", async () => {
+    const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }));
+    const seen: Array<number | undefined> = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const reply = () => new Response(JSON.stringify({ result: { value: null } }), { status: 200, headers: { "content-type": "application/json" } });
+    desk.net.fetch = (async (_input: unknown, init?: RequestInit & { ndPriority?: number }) => {
+      seen.push(init?.ndPriority);
+      if (init?.ndPriority !== -1) await gate;
+      return reply();
+    }) as typeof desk.net.fetch;
+    (desk as unknown as { mintAccounts?: unknown }).mintAccounts = undefined;
+    const safety = (priority: -1 | 2) =>
+      (desk as unknown as { tokenSafety: (mint: string, priority: number) => Promise<{ status: string }> }).tokenSafety(MINT, priority);
+    try {
+      const slow = safety(2);
+      await safety(-1); // resolves while the background read is still stuck
+      expect(seen).toEqual([2, -1]);
+      release();
+      await slow;
+    } finally {
+      desk.stop();
+    }
   });
 });
