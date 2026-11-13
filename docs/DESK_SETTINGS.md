@@ -301,7 +301,7 @@ Not settings, but useful context: paper cash $549.86, paper equity $682.87 (mark
 
 ## 13.45 notes
 
-Engine token-safety reads (paper and live) and the live engine launch-bundle check use priority -1; a bundle timeout or error skips that live buy (`LAUNCH_BUNDLE_UNVERIFIED`), other non-pause skips log `ENGINE_LIVE_SKIP`, and a timed-out safety read leaves the Helius queue. Caps stay 10 and 8. No numeric setting changed.
+Engine token-safety reads (paper and live) and the live engine launch-bundle check use priority -1 on the Helius read lane; a bundle timeout or error skips that live buy (`LAUNCH_BUNDLE_UNVERIFIED`), other non-pause skips log `ENGINE_LIVE_SKIP`, and a timed-out safety read leaves the queue. Caps stay 10 and 8. No numeric setting changed.
 
 A priority -1 safety read (any buy) no longer accepts a cached "Unknown" answer (15 s) or waits on a background read already queued for the same coin: it reads again at the front of the queue. A cached safe or unsafe answer is still reused.
 

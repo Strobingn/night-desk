@@ -153,6 +153,10 @@ describe("v13.23 launch bundle", () => {
     expect(rpcLane(helius, 2, JSON.stringify({ method: "getAccountInfo" }))?.id).toBe("helius");
     expect(rpcLane(helius, 2, JSON.stringify({ method: "getBlock" }))?.id).toBe("helius");
     expect(rpcLane(helius, 1, JSON.stringify({ method: "getAccountInfo" }))?.id).toBe("helius:exec");
+    expect(rpcLane(helius, -1, JSON.stringify({ method: "getAccountInfo" }))?.id).toBe("helius:exec");
+    expect(rpcLane(helius, -1, JSON.stringify({ method: "getAccountInfo" }), true)?.id).toBe("helius");
+    expect(rpcLane(helius, -1, JSON.stringify({ method: "getBlock" }), true)?.id).toBe("helius");
+    expect(rpcLane(helius, -1, JSON.stringify({ method: "getSignaturesForAddress" }), true)?.id).toBe("helius");
     expect(bucketFor("https://sender.helius-rpc.com/fast?swqos_only=true")).toBeNull();
     expect(bucketFor("http://ewr-sender.helius-rpc.com/fast?swqos_only=true")).toBeNull();
   });

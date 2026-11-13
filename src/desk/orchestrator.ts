@@ -406,7 +406,7 @@ export class Desk {
   private readonly launchBundleFn?: (mint: string) => Promise<BundleResult | null>;
   private readonly safetyCache = new Map<string, { at: number; ttl: number; result: MintSafety }>();
   private readonly bundleCache = new Map<string, { at: number; forever: boolean; result: BundleResult }>();
-  private readonly safetyInflight = new Map<string, { job: Promise<MintSafety>; priority: -1 | 0 | 1 | 2 }>();
+  private readonly safetyInflight = new Map<string, { priority: -1 | 0 | 1 | 2; job: Promise<MintSafety>; abort: () => void }>();
   /** v13.5 live daily spend cap. null = off (the default). */
   private liveDailyCapUsd: number | null = null;
   /** v13.5 live trailing stop, fraction. Armed from entry. */
@@ -1463,7 +1463,7 @@ export class Desk {
       // The daily cap and the loss pause only count finished buys, so wait for the one ahead.
       await turn;
       // Priority -1 is the manual-buy priority, so this read is not buried behind mark polls.
-      const safety = await this.tokenSafety(token.mint, -1);
+      const safety = await this.tokenSafety(token.mint, -1, true);
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
       if (isPumpCoin(token)) {
         const bundle = await this.engineLiveBundle(token.mint, safety.supply);
@@ -5513,7 +5513,7 @@ export class Desk {
     order?: { sizeUsd: number; tag: string; meta: StrategyMeta }
   ): Promise<void> {
     // Priority -1 is the manual-buy priority, so a paper engine buy is not buried behind mark polls.
-    const safety = await this.tokenSafety(report.token.mint, -1);
+    const safety = await this.tokenSafety(report.token.mint, -1, true);
     if (safety.status !== "safe") {
       this.pipeline.executorSkips += 1;
       this.log({
@@ -5575,7 +5575,7 @@ export class Desk {
     return this.safetyCache.get(mint)?.result ?? SAFETY_UNKNOWN;
   }
 
-  private async tokenSafety(mint: string, priority: -1 | 0 | 1 | 2 = 2): Promise<MintSafety> {
+  private async tokenSafety(mint: string, priority: -1 | 0 | 1 | 2 = 2, readLane = false): Promise<MintSafety> {
     const front = priority === -1;
     const hit = this.safetyCache.get(mint);
     // A front-of-queue caller (a buy) does not settle for a cached "unknown": that is usually a
@@ -5583,20 +5583,32 @@ export class Desk {
     if (hit && Date.now() - hit.at < hit.ttl && !(front && hit.result.status === "unknown")) return hit.result;
     const pending = this.safetyInflight.get(mint);
     // Nor does it wait on a background read already queued for the same coin.
-    if (pending && !(front && pending.priority !== -1)) return pending.job;
-    const job = this.readMintSafety(mint, priority).finally(() => {
-      if (this.safetyInflight.get(mint)?.job === job) this.safetyInflight.delete(mint);
+    if (pending && pending.priority <= priority) return pending.job;
+    pending?.abort();
+    const flight: { priority: -1 | 0 | 1 | 2; job: Promise<MintSafety>; abort: () => void } = {
+      priority,
+      job: Promise.resolve(SAFETY_UNKNOWN),
+      abort: () => {}
+    };
+    flight.job = this.readMintSafety(mint, priority, readLane, flight).finally(() => {
+      if (this.safetyInflight.get(mint) === flight) this.safetyInflight.delete(mint);
     });
-    this.safetyInflight.set(mint, { job, priority });
-    return job;
+    this.safetyInflight.set(mint, flight);
+    return flight.job;
   }
 
-  private async readMintSafety(mint: string, priority: -1 | 0 | 1 | 2): Promise<MintSafety> {
+  private async readMintSafety(
+    mint: string,
+    priority: -1 | 0 | 1 | 2,
+    readLane: boolean,
+    flight: { job: Promise<MintSafety>; abort: () => void }
+  ): Promise<MintSafety> {
     const ac = new AbortController();
+    flight.abort = () => ac.abort();
     const timer = setTimeout(() => ac.abort(), 2_500);
     let account: MintAccountBytes | null = null;
     try {
-      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint, priority, ac.signal);
+      const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint, priority, ac.signal, readLane);
       account = await Promise.race([
         read.catch(() => null),
         new Promise<null>((resolve) => ac.signal.addEventListener("abort", () => resolve(null), { once: true }))
@@ -5607,12 +5619,14 @@ export class Desk {
       clearTimeout(timer);
     }
     const result = decodeMintSafety(account);
+    // A superseded chip read must not cache Unknown over the engine read that replaced it.
+    if (this.safetyInflight.get(mint)?.job !== flight.job) return result;
     const ttl = result.status === "unknown" ? 15_000 : 10 * 60_000;
     this.safetyCache.set(mint, { at: Date.now(), ttl, result });
     return result;
   }
 
-  private async rpcMintAccount(mint: string, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal): Promise<MintAccountBytes | null> {
+  private async rpcMintAccount(mint: string, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal, readLane = false): Promise<MintAccountBytes | null> {
     const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
     if (!rpc) return null;
     const body = JSON.stringify({
@@ -5621,7 +5635,7 @@ export class Desk {
       method: "getAccountInfo",
       params: [mint, { encoding: "base64", commitment: "confirmed" }]
     });
-    const res = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body, signal });
+    const res = await this.net.fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body, signal, ndPriority: priority, ndReadLane: readLane });
     if (!res.ok) return null;
     const json = (await res.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
     const value = json.result?.value;
@@ -5668,7 +5682,8 @@ export class Desk {
     opts?: { priority?: -1 | 0 | 1 | 2; signal?: AbortSignal; failClosed?: boolean }
   ): Promise<BundleResult | null> {
     const cached = this.bundleCache.get(mint);
-    if (cached && (cached.forever || Date.now() - cached.at < 10 * 60_000)) return cached.result;
+    // A failed paper read is cached as not-bundled for ten minutes. A live buy must not treat that as verified.
+    if (cached && (cached.forever || (!opts?.failClosed && Date.now() - cached.at < 10 * 60_000))) return cached.result;
     if (this.launchBundleFn) {
       const injected = await this.launchBundleFn(mint);
       const result = injected ?? { flagged: false, pct: 0, label: null, acquired: 0n };
@@ -5683,6 +5698,8 @@ export class Desk {
     const result = await this.rpcBundle(mint, supply, opts?.priority ?? 2, opts?.signal);
     if (!result) {
       if (opts?.failClosed || opts?.signal?.aborted) return null;
+      const kept = this.bundleCache.get(mint);
+      if (kept?.forever) return kept.result;
       const empty: BundleResult = { flagged: false, pct: 0, label: null, acquired: 0n };
       this.bundleCache.set(mint, { at: Date.now(), forever: false, result: empty });
       return empty;
@@ -5702,7 +5719,14 @@ export class Desk {
         method: "getSignaturesForAddress",
         params: [mint, { limit: 1000, commitment: "confirmed" }]
       });
-      const sigRes = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: sigBody, signal });
+      const sigRes = await this.net.fetch(rpc, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: sigBody,
+        signal,
+        ndPriority: priority,
+        ndReadLane: priority === -1
+      });
       if (!sigRes.ok) return null;
       const sigJson = (await sigRes.json()) as { result?: Array<{ slot?: number }> };
       const rows = sigJson.result ?? [];
@@ -5715,7 +5739,14 @@ export class Desk {
         method: "getBlock",
         params: [slot, { encoding: "jsonParsed", transactionDetails: "full", rewards: false, maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
       });
-      const blockRes = await this.net.fetchAt(priority)(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: blockBody, signal });
+      const blockRes = await this.net.fetch(rpc, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: blockBody,
+        signal,
+        ndPriority: priority,
+        ndReadLane: priority === -1
+      });
       if (!blockRes.ok) return null;
       const blockJson = (await blockRes.json()) as { result?: { transactions?: SlotTransaction[] } | null };
       const txs = blockJson.result?.transactions ?? [];

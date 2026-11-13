@@ -63,11 +63,11 @@ async function signal(desk: Desk, token = young()): Promise<void> {
 
 const codes = (desk: Desk) => desk.snapshot().events.map((e) => e.code).filter(Boolean);
 
-function watchSafety(desk: Desk): Array<number | undefined> {
-  const seen: Array<number | undefined> = [];
-  desk.net.fetch = (async (_input: unknown, init?: RequestInit & { ndPriority?: number }) => {
+function watchSafety(desk: Desk): Array<{ priority?: number; readLane?: boolean }> {
+  const seen: Array<{ priority?: number; readLane?: boolean }> = [];
+  desk.net.fetch = (async (_input: unknown, init?: RequestInit & { ndPriority?: number; ndReadLane?: boolean }) => {
     const body = typeof init?.body === "string" ? init.body : "";
-    if (body.includes('"getAccountInfo"')) seen.push(init?.ndPriority);
+    if (body.includes('"getAccountInfo"')) seen.push({ priority: init?.ndPriority, readLane: init?.ndReadLane });
     return new Response(JSON.stringify({ result: { value: null } }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof desk.net.fetch;
   (desk as unknown as { mintAccounts?: unknown }).mintAccounts = undefined;
@@ -98,7 +98,7 @@ describe("v13.45 engine safety priority", () => {
       desk.updateStrategy({ enabled: true });
       await signal(desk);
       expect(seen.length).toBeGreaterThan(0);
-      expect(seen.every((priority) => priority === -1)).toBe(true);
+      expect(seen.every((call) => call.priority === -1 && call.readLane === true)).toBe(true);
       expect(codes(desk)).toContain("TOKEN_SAFETY");
       expect(codes(desk)).not.toContain("ENGINE_LIVE_SKIP");
       expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
@@ -131,7 +131,7 @@ describe("v13.45 engine safety priority", () => {
       });
       await signal(desk);
       expect(seen.length).toBeGreaterThan(0);
-      expect(seen.every((priority) => priority === -1)).toBe(true);
+      expect(seen.every((call) => call.priority === -1 && call.readLane === true)).toBe(true);
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
       expect(codes(desk)).toContain("ENGINE_LIVE_SKIP");
       expect(codes(desk)).toContain("DAILY_LOSS");
@@ -222,9 +222,9 @@ describe("v13.45 engine safety priority", () => {
     try {
       expect((await safety(2)).status).toBe("unknown");
       await safety(2);
-      expect(seen).toEqual([2]); // background callers share the cached answer
+      expect(seen).toEqual([{ priority: 2, readLane: false }]);
       await safety(-1);
-      expect(seen).toEqual([2, -1]); // the buy asks again, at the front of the queue
+      expect(seen).toEqual([{ priority: 2, readLane: false }, { priority: -1, readLane: false }]);
     } finally {
       desk.stop();
     }
@@ -246,10 +246,68 @@ describe("v13.45 engine safety priority", () => {
       (desk as unknown as { tokenSafety: (mint: string, priority: number) => Promise<{ status: string }> }).tokenSafety(MINT, priority);
     try {
       const slow = safety(2);
-      await safety(-1); // resolves while the background read is still stuck
+      await safety(-1);
       expect(seen).toEqual([2, -1]);
       release();
       await slow;
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("sends the engine safety and bundle reads on the read lane, not the exec burst", async () => {
+    const sent: string[] = [];
+    const net = new NetLimiter({
+      fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+        sent.push(String(init?.body ?? ""));
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch
+    });
+    const call = (method: string) =>
+      net.fetch(HELIUS, { method: "POST", body: JSON.stringify({ method }), ndPriority: -1, ndReadLane: true });
+    await Promise.all([call("getAccountInfo"), call("getSignaturesForAddress"), call("getBlock")]);
+    expect(sent).toHaveLength(3);
+    expect(net.stats().find((row) => row.id === "helius")?.sent).toBe(3);
+    expect(net.stats().find((row) => row.id === "helius:exec")?.sent ?? 0).toBe(0);
+  });
+
+  it("does not cancel a shared request when only one caller aborts", async () => {
+    let release!: (res: Response) => void;
+    const gate = new Promise<Response>((resolve) => (release = resolve));
+    const net = new NetLimiter({ fetchImpl: (() => gate) as typeof fetch });
+    const url = "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112";
+    const ac = new AbortController();
+    const first = net.fetch(url, { signal: ac.signal });
+    const second = net.fetch(url, { signal: AbortSignal.timeout(30_000) });
+    await new Promise((resolve) => setImmediate(resolve));
+    ac.abort();
+    release(new Response("ok", { status: 200 }));
+    await expect(second).resolves.toMatchObject({ status: 200 });
+    await expect(first).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("does not treat a failed bundle cache as a verified live buy", async () => {
+    let calls = 0;
+    const desk = liveDesk({
+      launchBundle: async () => {
+        calls += 1;
+        return { flagged: true, pct: 0.4, label: "Bundled: 40%", acquired: 1n };
+      }
+    });
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
+      const token = young({ source: "pumpfun" });
+      (desk as unknown as { bundleCache: Map<string, { at: number; forever: boolean; result: { flagged: boolean; pct: number; label: string | null; acquired: bigint } }> }).bundleCache.set(token.mint, {
+        at: Date.now(),
+        forever: false,
+        result: { flagged: false, pct: 0, label: null, acquired: 0n }
+      });
+      const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token, score: 0.8, meta: meta(), liveMeta: meta() };
+      await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
+      expect(calls).toBe(1);
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+      expect(codes(desk)).toContain("ENGINE_LIVE_SKIP");
+      expect(codes(desk)).not.toContain("LAUNCH_BUNDLE_UNVERIFIED");
     } finally {
       desk.stop();
     }

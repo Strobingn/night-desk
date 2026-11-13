@@ -180,13 +180,14 @@ function execLaneId(id: string): string | null {
   return null;
 }
 
-export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown): BucketSpec | null {
+export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown, readLane = false): BucketSpec | null {
   if (!spec) return null;
   const pri = priority ?? 1;
   const execId = execLaneId(spec.id);
   if (!execId) return spec;
-  // Safety and bundle reads share the existing read budget at the lowest priority.
-  if (pri === 2 && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
+  // Priority 2, and an engine read that asked to stay here at priority -1, share the read budget.
+  // A plain priority -1 getAccountInfo (manual buy) still uses the exec lane below.
+  if ((pri === 2 || (readLane && pri === -1)) && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
   // Wallet balance (-1) and mark polls (0) stay on the read lane. Higher priorities are the exec lane.
   if (pri > 0) return BY_ID.get(execId)!;
   if (typeof body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(body) ?? "")) return BY_ID.get(execId)!;
@@ -654,12 +655,12 @@ export class NetLimiter {
    * Never throws on 429 itself: the 429 Response is returned after the bucket is paused,
    * so callers keep their own error handling. GETs retry once after the pause when asked.
    */
-  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number }): Promise<Response> => {
+  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number; ndReadLane?: boolean }): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const spec = this.specFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
-    const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
-    const lane = rpcLane(spec, priority, rest.body);
+    const { ndPriority: priority, retry429, timeoutMs, ndReadLane, ...rest } = init ?? {};
+    const lane = rpcLane(spec, priority, rest.body, ndReadLane === true);
     if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
     const rpcRead = method === "POST" && typeof rest.body === "string" && (lane.id === "solana:public" || lane.id === "helius") && rpcReadMethod(rest.body) != null;
@@ -677,7 +678,10 @@ export class NetLimiter {
         return toResponse(await shared);
       }
     }
-    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000, rest.signal ?? undefined);
+    // A shared GET keeps its own transport. One caller's abort must not fail everyone joined to it.
+    // A request that is not shared (Helius cache is 0) still drops its own queued waiter on abort.
+    const shareable = (isGet || rpcRead) && lane.cacheMs > 0;
+    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000, shareable ? undefined : rest.signal ?? undefined);
     if (isGet || rpcRead) {
       this.inflight.set(key, run);
       try {
@@ -723,8 +727,9 @@ export class NetLimiter {
       const coalesceKey = spec.id === "helius" && priority === 0 ? heliusPollKey(init.body) ?? undefined : undefined;
       await this.acquire(spec, priority, coalesceKey, callerSignal);
       const { signal: _ignored, ...rest } = init;
-      const signal = callerSignal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), callerSignal]) : AbortSignal.timeout(timeoutMs);
-      const res = await this.baseFetch(url, { ...rest, signal });
+      // The caller signal only removes a waiter that has not been sent. It does not abort the socket,
+      // so a shared in-flight GET is not cancelled when one subscriber gives up.
+      const res = await this.baseFetch(url, { ...rest, signal: AbortSignal.timeout(timeoutMs) });
       const cached: CachedResponse = {
         status: res.status,
         statusText: res.statusText,
