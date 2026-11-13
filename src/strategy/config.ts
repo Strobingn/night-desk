@@ -96,7 +96,7 @@ export const STRATEGY = {
 
 export type StrategyConfig = typeof STRATEGY;
 
-const SIGNALS: SignalKind[] = ["launch", "momentum"];
+export const SIGNALS: SignalKind[] = ["launch", "momentum"];
 
 const pctId = (fraction: number) => Math.round(fraction * 100);
 

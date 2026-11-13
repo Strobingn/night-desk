@@ -213,6 +213,8 @@ class DeskRepository private constructor(private val context: Context) {
     @Volatile private var link = DeskLink("", "")
     private val generation = AtomicInteger(0)
     private var pollMisses = 0
+    /** v13.41 when the socket last delivered a full snapshot. A fresh one makes the 3 s poll redundant. */
+    @Volatile private var socketSnapshotAt = 0L
     private var backoffMs = 1_000L
     private var reconnectJob: Job? = null
     private var persistedGood: String? = null
@@ -368,6 +370,12 @@ class DeskRepository private constructor(private val context: Context) {
         openSocket(gen)
         poll = scope.launch {
             while (isActive && gen == generation.get()) {
+                // The socket already pushed this state: skip the duplicate download and parse.
+                if (System.currentTimeMillis() - socketSnapshotAt < SOCKET_FRESH_MS) {
+                    pollMisses = 0
+                    delay(3_000)
+                    continue
+                }
                 val ok = refresh()
                 if (!ok) {
                     pollMisses += 1
@@ -1106,6 +1114,7 @@ class DeskRepository private constructor(private val context: Context) {
                         }
                         parseDeskPayload(text)?.let {
                             apply(it)
+                            if (gen == generation.get()) socketSnapshotAt = System.currentTimeMillis()
                             persistSnapshot(text)
                         }
                     }
@@ -1308,5 +1317,7 @@ class DeskRepository private constructor(private val context: Context) {
         private val KEY_DISCOVERED = stringPreferencesKey("desk_reported_url")
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private const val SNAPSHOT_FILE = "last-snapshot.json"
+        /** A socket snapshot newer than this stands in for the next poll. */
+        private const val SOCKET_FRESH_MS = 4_500L
     }
 }

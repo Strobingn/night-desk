@@ -29,7 +29,8 @@ fun AlertRulesScreen(onBack: () -> Unit) {
     val fullScreen = remember { FullScreenGate.canUse(context) }
     var note by remember { mutableStateOf(if (fcm) "FCM is configured." else "Local rules only. Firebase is not configured, so a swiped-away app will not get a push until google-services.json is added.") }
 
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp)) {
+    // The Pump terminal already scrolls this screen. A second scroll inside it crashes on open.
+    Column(Modifier.padding(4.dp)) {
         Text("Desk alerts", color = P.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text(note, color = P.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp, bottom = 8.dp))
         Text(

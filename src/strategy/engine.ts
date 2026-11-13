@@ -104,6 +104,8 @@ export interface ScorecardView {
   liveVariant: string | null;
   /** Set by the desk: live engine positions open, the live size and target, and why live is not trading (null when it is). */
   live?: { open: number; tradeUsd: number; targetNetUsd: number; blocked: string | null };
+  /** Set by the desk: how much market data is saved for analysis. */
+  recording?: { enabled: boolean; days: number; quotes: number; signals: number; oldestAt: number | null };
   readyTrades: number;
   watching: number;
   /**

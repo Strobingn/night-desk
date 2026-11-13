@@ -48,7 +48,12 @@ data class StrategyView(
     val liveTradeUsd: Double = 0.0,
     val liveTargetUsd: Double = 0.0,
     /** Why live is not trading right now. Blank when it is. */
-    val liveBlocked: String = ""
+    val liveBlocked: String = "",
+    /** v13.41 market data saved for analysis. -1 quotes on a desk that does not record. */
+    val recordedQuotes: Long = -1,
+    val recordedSignals: Long = 0,
+    val recordDays: Int = 0,
+    val recordOldestAt: Long = 0
 )
 
 /** One pipeline step's timing from the desk's `perf` block. */
@@ -82,7 +87,43 @@ object Perf {
     }
 }
 
+/** v13.41 one exit-rule set tried against the desk's saved market data. */
+data class ReplayRow(val signal: String, val label: String, val trades: Int, val winRate: Double, val netUsd: Double, val avgNetUsd: Double, val maxDrawdownUsd: Double)
+
+data class ReplayView(val quotes: Long, val signals: Long, val rows: List<ReplayRow>, val note: String)
+
 object Strategy {
+    /** GET /api/market/replay. Null when the body is not a replay. Rows keep the desk's order (best net first). */
+    fun parseReplay(raw: String): ReplayView? = runCatching {
+        val json = JSONObject(raw)
+        if (!json.optBoolean("ok", false)) return null
+        val arr = json.optJSONArray("rows") ?: return null
+        val rows = buildList {
+            for (i in 0 until arr.length()) {
+                val row = arr.optJSONObject(i) ?: continue
+                add(
+                    ReplayRow(
+                        signal = row.optText("signal"),
+                        label = row.optText("label"),
+                        trades = row.optFinite("trades").toInt(),
+                        winRate = row.optFinite("winRate"),
+                        netUsd = row.optFinite("netUsd"),
+                        avgNetUsd = row.optFinite("avgNetUsd"),
+                        maxDrawdownUsd = row.optFinite("maxDrawdownUsd")
+                    )
+                )
+            }
+        }
+        ReplayView(json.optFinite("quotes").toLong(), json.optFinite("signals").toLong(), rows, json.optText("note"))
+    }.getOrNull()
+
+    /** "Launch · 3% stop, 8% trail, lock breakeven" */
+    fun replayTitle(row: ReplayRow): String = row.signal.replaceFirstChar { it.uppercase() } + " · " + row.label
+
+    /** "+$12.40 over 31 trades · 58% wins · worst dip $4.10" */
+    fun replayStats(row: ReplayRow): String =
+        "${signedUsd(row.netUsd)} over ${row.trades} trades · ${"%.0f".format(Locale.US, row.winRate * 100)}% wins · worst dip $" + "%.2f".format(Locale.US, row.maxDrawdownUsd)
+
     fun parse(json: JSONObject?): StrategyView? {
         if (json == null) return null
         val rows = json.optJSONArray("variants")
@@ -134,7 +175,11 @@ object Strategy {
             liveOpen = json.optJSONObject("live")?.optFinite("open")?.toInt() ?: 0,
             liveTradeUsd = json.optJSONObject("live")?.optFinite("tradeUsd") ?: 0.0,
             liveTargetUsd = json.optJSONObject("live")?.optFinite("targetNetUsd") ?: 0.0,
-            liveBlocked = json.optJSONObject("live")?.let { if (it.isNull("blocked")) "" else it.optText("blocked") } ?: ""
+            liveBlocked = json.optJSONObject("live")?.let { if (it.isNull("blocked")) "" else it.optText("blocked") } ?: "",
+            recordedQuotes = json.optJSONObject("recording")?.takeIf { it.optBoolean("enabled", false) }?.optFinite("quotes")?.toLong() ?: -1,
+            recordedSignals = json.optJSONObject("recording")?.optFinite("signals")?.toLong() ?: 0,
+            recordDays = json.optJSONObject("recording")?.optFinite("days")?.toInt() ?: 0,
+            recordOldestAt = json.optJSONObject("recording")?.optFinite("oldestAt")?.toLong() ?: 0
         )
     }
 
@@ -160,6 +205,14 @@ object Strategy {
         val stop = "${"%.0f".format(Locale.US, v.stopPct * 100)}% stop"
         if (v.trailPct <= 0.0) return stop
         return "$stop · ${"%.0f".format(Locale.US, v.trailPct * 100)}% trail" + (if (v.fade) " · fade" else "")
+    }
+
+    /** "Saving market data: 12,340 quotes and 18 signals, kept 14 days." Blank when the desk does not record. */
+    fun recordingLine(view: StrategyView): String {
+        if (view.recordedQuotes < 0) return ""
+        val quotes = "%,d".format(Locale.US, view.recordedQuotes)
+        val signals = "%,d".format(Locale.US, view.recordedSignals)
+        return "Saving market data for analysis: $quotes quotes and $signals signals, kept ${view.recordDays} days."
     }
 
     /** The variant with the highest net profit so far. Null when none has closed a trade in profit. */
