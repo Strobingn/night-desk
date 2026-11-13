@@ -4,6 +4,8 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
+Android `13.48` (versionCode 1348) keeps the engine's buy-time Helius reads from waiting out a full read lane: the launch-bundle `getBlock` asks for account keys and token balances only, and background reads leave three slots a minute for the priority -1 safety and bundle checks. Caps stay 10 and 8. No size, stop, slippage, or pause changed.
+
 Android `13.47` (versionCode 1347) gives the engine's token-safety read 8s and the live launch-bundle check 15s before failing closed. The one-live-buy lock covers only the buy. Manual-buy timeouts, the Helius caps (10 and 8), and every size, stop, slippage, and pause stay as they are.
 
 Android `13.46` (versionCode 1346) keeps room on the Helius read lane for a buy's checks: priority -1 reads skip the token bucket (never the 10/min ceiling) and background reads stop at 7/min, so the engine's safety and bundle reads start at once instead of waiting about 6 s for a slot and timing out.

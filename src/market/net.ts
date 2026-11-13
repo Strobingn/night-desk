@@ -84,7 +84,7 @@ export const BUCKETS: BucketSpec[] = [
     budgetPerMin: 10,
     burst: 3,
     cacheMs: 0,
-    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. Priority -1 reads (wallet, an engine buy's safety and bundle checks) skip the token bucket but never the minute ceiling. Priority-2 background reads stop at 7/min so 3 sends a minute stay free for them. 10/min is a hard sliding-minute ceiling (burst 3 only when that minute still has room). Together with the exec lane the two reqLastMin counts never pass 18. The URL is not logged; it may carry an API key. Nothing is cached."
+    note: "helius-rpc.com background polls (priority 0): getBalance, getTokenAccountsByOwner, getMultipleAccounts. Wallet SOL/USDC reads use priority -1 on this same lane so a mark queue cannot bury them. Priority -1 reads (wallet, an engine buy's safety and bundle checks) skip the token bucket but never the minute ceiling. Every other priority stops at 7/min so 3 sends a minute stay free for them. 10/min is a hard sliding-minute ceiling (burst 3 only when that minute still has room). Together with the exec lane the two reqLastMin counts never pass 18. The URL is not logged; it may carry an API key. Nothing is cached."
   },
   {
     id: "helius:exec",
@@ -200,9 +200,9 @@ const RPC_METHOD = /"method"\s*:\s*"([A-Za-z]+)"/;
 const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "getMultipleAccounts"]);
 /** Priority 2 only. Stays on the read lane so a mint check cannot take a swap slot. */
 /**
- * Helius read lane. Priority-2 background reads stop at budget minus this many sends a minute,
- * so a buy's safety read and its two bundle reads (priority -1) find a free slot instead of
- * waiting for one to age out. The lane ceilings do not move.
+ * Helius read lane. Every read that is not priority -1 stops at budget minus this many
+ * sends a minute, so a buy's safety read and its two bundle reads find a free slot instead
+ * of waiting behind marks or chips for one to age out. The lane ceilings do not move.
  */
 export const HELIUS_FRONT_RESERVE = 3;
 const LOW_PRIORITY_READ = new Set(["getAccountInfo", "getMultipleAccounts", "getSignaturesForAddress", "getTransaction", "getBlock"]);
@@ -525,13 +525,14 @@ export class NetLimiter {
   /**
    * What the waiter at the head of the queue needs before it is sent.
    * Helius read lane only: a priority -1 read skips the token bucket (the minute ceilings still
-   * hold it), and a priority-2 read leaves HELIUS_FRONT_RESERVE sends of the minute unused.
+   * hold it). Every other priority leaves HELIUS_FRONT_RESERVE sends of the minute unused,
+   * so marks (0) and chips (2) cannot spend the slots an engine buy is waiting on.
    */
   private headNeeds(b: Bucket): { tokens: number; reserve: number } {
     const priority = b.queue[0]?.priority ?? 1;
     if (b.spec.id !== "helius") return { tokens: 1, reserve: 0 };
     if (priority === -1) return { tokens: Number.NEGATIVE_INFINITY, reserve: 0 };
-    return { tokens: 1, reserve: priority >= 2 ? HELIUS_FRONT_RESERVE : 0 };
+    return { tokens: 1, reserve: HELIUS_FRONT_RESERVE };
   }
 
   private pump(b: Bucket): void {

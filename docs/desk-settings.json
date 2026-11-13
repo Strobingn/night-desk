@@ -14,9 +14,9 @@
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.47",
-    "androidVersionName": "13.47",
-    "androidVersionCode": 1347,
+    "appVersion": "13.48",
+    "androidVersionName": "13.48",
+    "androidVersionCode": 1348,
     "applicationId": "com.dirk.nightdesk",
     "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. 13.39 live sells return a clear no-route reason and the card shows liquidity gone, on top of main aa1e16c (PR 40, the 13.39 Home charts and math audit) which includes 13.38 (PR 41). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
@@ -84,6 +84,7 @@
     "13.38: manual paper and live buys use launchBundleSoon (1.5s) instead of an uncapped launchBundle. Unenriched quote and curve fallbacks, and ensureDepth's curve read, are also capped. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 929365c (PR 39).",
     "13.37: DAMM v2 is not a traditional LP lock. Rank traditional pools by real depth. A figure-less pool does not fail a coin that has another pool with data. Holder count is RugCheck totalHolders, not a top-20 sample; unknown stays fail-closed. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 7c00007 (PR 38).",
     "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign).",
+    "13.48: the engine live launch-bundle getBlock asks for transactionDetails accounts (rewards false, maxSupportedTransactionVersion 0). Token balances still flag the 20% share. Parsed SOL transfers are not in that block. A timeout and an RPC error log as separate reasons, both LAUNCH_BUNDLE_UNVERIFIED. Marks and other background reads leave HELIUS_FRONT_RESERVE slots so priority -1 safety and bundle reads are not queued behind them. Caps stay 10 and 8. No numeric setting changed.",
     "13.47: engine token-safety reads wait 8s and the live launch-bundle check waits 15s before failing closed. The one-live-buy lock covers only the buy. A shorter in-flight read that answers Safe or Blocked is kept. Caps stay 10 and 8. Manual-buy timeouts and every numeric setting are unchanged.",
     "13.46: a buy's safety and bundle reads (priority -1) no longer wait for a Helius read-lane token. They skip the token bucket, never the 10/min ceiling, and priority-2 background reads stop at 7/min so 3 sends a minute stay free. Lane ceilings stay 10 and 8, 18 together.",
     "13.45: engine token-safety reads and the live engine launch-bundle check use priority -1 on the Helius read lane. A priority -1 buy does not reuse a cached Unknown or wait on a background read of the same coin. A bundle timeout or error skips that live buy (LAUNCH_BUNDLE_UNVERIFIED). Other non-pause skips log ENGINE_LIVE_SKIP. A timed-out safety read is dropped from the queue. Caps stay 10 and 8. No numeric setting changed.",
@@ -1215,8 +1216,8 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.47",
-      "androidVersionCode": 1347,
+      "version": "13.48",
+      "androidVersionCode": 1348,
       "applicationId": "com.dirk.nightdesk",
       "note": "Code in this branch (13.39 live sells). Not the host at the 1:46 PM ET pull. Based on main aa1e16c (PR 40, Home charts and math audit, including 13.38). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {

@@ -271,6 +271,21 @@ const MINT_SAFETY_MS = 2_500;
 const ENGINE_SAFETY_MS = 8_000;
 /** Engine live launch-bundle check. Two read-lane calls at 10/min, then fail closed. Manual buys stay on launchBundleSoon. */
 const ENGINE_LIVE_BUNDLE_MS = 15_000;
+
+/** Why an engine live bundle check did not return a verdict. Timeout and RPC error are logged apart. */
+interface BundleFailure {
+  reason: "timeout" | "rpc";
+}
+
+function isBundleFailure(value: BundleResult | BundleFailure | null): value is BundleFailure {
+  return value != null && "reason" in value && !("flagged" in value);
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  return name === "AbortError" || name === "TimeoutError";
+}
 /** A cached balance older than this cannot authorize a live buy or sell. */
 const LIVE_BALANCE_CACHE_MS = 60_000;
 
@@ -1469,7 +1484,11 @@ export class Desk {
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
       if (isPumpCoin(token)) {
         const bundle = await this.engineLiveBundle(token.mint, safety.supply);
-        if (!bundle) return skip("Launch bundle could not be verified.", "LAUNCH_BUNDLE_UNVERIFIED");
+        if (bundle == null) return skip("Launch bundle could not be verified.", "LAUNCH_BUNDLE_UNVERIFIED");
+        if ("reason" in bundle) {
+          const message = bundle.reason === "timeout" ? "Launch bundle timed out." : "Launch bundle RPC error.";
+          return skip(message, "LAUNCH_BUNDLE_UNVERIFIED");
+        }
         if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
       }
       const again = this.liveEngineBlock();
@@ -5545,7 +5564,7 @@ export class Desk {
     }
     if (isPumpCoin(report.token)) {
       const bundle = await this.launchBundle(report.token.mint, safety.supply);
-      if (bundle?.flagged) {
+      if (bundle && "flagged" in bundle && bundle.flagged) {
         this.pipeline.executorSkips += 1;
         this.log({
           stage: "executor",
@@ -5689,32 +5708,42 @@ export class Desk {
   private async launchBundleSoon(mint: string, supply: bigint | null): Promise<BundleResult | null> {
     const cached = this.bundleCache.get(mint);
     if (cached && (cached.forever || Date.now() - cached.at < 10 * 60_000)) return cached.result;
-    return Promise.race([
+    const result = await Promise.race([
       this.launchBundle(mint, supply),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_500))
     ]);
+    if (result == null || isBundleFailure(result)) return null;
+    return result;
   }
 
   /**
-   * Engine live buy only. Same front-of-queue priority as a manual pre-check, then fail closed.
-   * ENGINE_LIVE_BUNDLE_MS covers two read-lane calls. A timeout or an RPC error skips the buy.
+   * Engine live buy only. Priority -1 on the read lane, then fail closed.
+   * ENGINE_LIVE_BUNDLE_MS covers two read-lane calls. A timeout and an RPC error are logged apart.
    * Manual buys keep the 1.5s launchBundleSoon budget.
    */
-  private async engineLiveBundle(mint: string, supply: bigint | null): Promise<BundleResult | null> {
+  private async engineLiveBundle(mint: string, supply: bigint | null): Promise<BundleResult | BundleFailure | null> {
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
-      return await Promise.race([
-        this.launchBundle(mint, supply, { priority: -1, signal: ac.signal, failClosed: true }),
+      const result = await Promise.race([
+        this.launchBundle(mint, supply, { priority: -1, signal: ac.signal, failClosed: true }).catch((): BundleFailure => ({
+          reason: "rpc"
+        })),
         new Promise<null>((resolve) => {
           timer = setTimeout(() => {
+            timedOut = true;
             ac.abort();
             resolve(null);
           }, ENGINE_LIVE_BUNDLE_MS);
         })
       ]);
-    } catch {
+      if (result && "flagged" in result) return result;
+      if (timedOut) return { reason: "timeout" };
+      if (result && "reason" in result) return result;
       return null;
+    } catch {
+      return { reason: timedOut ? "timeout" : "rpc" };
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -5724,7 +5753,7 @@ export class Desk {
     mint: string,
     supply: bigint | null,
     opts?: { priority?: -1 | 0 | 1 | 2; signal?: AbortSignal; failClosed?: boolean }
-  ): Promise<BundleResult | null> {
+  ): Promise<BundleResult | BundleFailure | null> {
     const cached = this.bundleCache.get(mint);
     // A failed paper read is cached as not-bundled for ten minutes. A live buy must not treat that as verified.
     if (cached && (cached.forever || (!opts?.failClosed && Date.now() - cached.at < 10 * 60_000))) return cached.result;
@@ -5739,9 +5768,14 @@ export class Desk {
       this.bundleCache.set(mint, { at: Date.now(), forever: true, result });
       return result;
     }
-    const result = await this.rpcBundle(mint, supply, opts?.priority ?? 2, opts?.signal);
+    const raw = await this.rpcBundle(mint, supply, opts?.priority ?? 2, opts?.signal);
+    const result = isBundleFailure(raw) ? null : raw;
     if (!result) {
-      if (opts?.failClosed || opts?.signal?.aborted) return null;
+      if (opts?.failClosed || opts?.signal?.aborted) {
+        if (isBundleFailure(raw)) return raw;
+        if (opts?.signal?.aborted) return { reason: "timeout" };
+        return null;
+      }
       const kept = this.bundleCache.get(mint);
       if (kept?.forever) return kept.result;
       const empty: BundleResult = { flagged: false, pct: 0, label: null, acquired: 0n };
@@ -5752,10 +5786,11 @@ export class Desk {
     return result;
   }
 
-  private async rpcBundle(mint: string, supply: bigint | null, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal): Promise<BundleResult | null> {
+  private async rpcBundle(mint: string, supply: bigint | null, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal): Promise<BundleResult | BundleFailure | null> {
     if (supply == null || supply <= 0n) return null;
     const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
     if (!rpc) return null;
+    const front = priority === -1;
     try {
       const sigBody = JSON.stringify({
         jsonrpc: "2.0",
@@ -5769,19 +5804,24 @@ export class Desk {
         body: sigBody,
         signal,
         ndPriority: priority,
-        ndReadLane: priority === -1
+        ndReadLane: front,
+        ...(front ? { timeoutMs: ENGINE_LIVE_BUNDLE_MS } : {})
       });
-      if (!sigRes.ok) return null;
-      const sigJson = (await sigRes.json()) as { result?: Array<{ slot?: number }> };
+      if (signal?.aborted) return { reason: "timeout" };
+      if (!sigRes.ok) return { reason: "rpc" };
+      const sigJson = (await sigRes.json()) as { error?: unknown; result?: Array<{ slot?: number }> };
+      if (sigJson.error) return { reason: "rpc" };
       const rows = sigJson.result ?? [];
       if (!rows.length || rows.length >= 1000) return null;
       const slot = rows[rows.length - 1]?.slot;
       if (slot == null) return null;
+      // Accounts, not full transactions: token balances and account keys are enough to
+      // measure the launch share. Rewards and decoded instructions stay off so the slot is small.
       const blockBody = JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
         method: "getBlock",
-        params: [slot, { encoding: "jsonParsed", transactionDetails: "full", rewards: false, maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
+        params: [slot, { encoding: "jsonParsed", transactionDetails: "accounts", rewards: false, maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
       });
       const blockRes = await this.net.fetch(rpc, {
         method: "POST",
@@ -5789,15 +5829,19 @@ export class Desk {
         body: blockBody,
         signal,
         ndPriority: priority,
-        ndReadLane: priority === -1
+        ndReadLane: front,
+        ...(front ? { timeoutMs: ENGINE_LIVE_BUNDLE_MS } : {})
       });
-      if (!blockRes.ok) return null;
-      const blockJson = (await blockRes.json()) as { result?: { transactions?: SlotTransaction[] } | null };
-      const txs = blockJson.result?.transactions ?? [];
+      if (signal?.aborted) return { reason: "timeout" };
+      if (!blockRes.ok) return { reason: "rpc" };
+      const blockJson = (await blockRes.json()) as { error?: unknown; result?: { transactions?: SlotTransaction[] } | null };
+      if (blockJson.error || blockJson.result == null) return { reason: "rpc" };
+      const txs = blockJson.result.transactions ?? [];
       const activity = slotActivity(mint, txs);
       return bundleShare({ supply, deltas: activity.deltas, excluded: pumpExcluded(mint), funders: activity.funders });
-    } catch {
-      return null;
+    } catch (err) {
+      if (signal?.aborted || isAbortError(err)) return { reason: "timeout" };
+      return { reason: "rpc" };
     }
   }
 

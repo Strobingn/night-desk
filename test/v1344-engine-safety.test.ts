@@ -170,6 +170,7 @@ describe("v13.45 engine safety priority", () => {
       expect(elapsed).toBeLessThan(18_000);
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
       expect(codes(desk)).toContain("LAUNCH_BUNDLE_UNVERIFIED");
+      expect(desk.snapshot().events.find((e) => e.code === "LAUNCH_BUNDLE_UNVERIFIED")?.message).toMatch(/timed out/);
       expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
       expect(codes(desk)).not.toContain("ENGINE_LIVE_SKIP");
     } finally {
@@ -185,6 +186,7 @@ describe("v13.45 engine safety priority", () => {
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
       expect(codes(desk)).toContain("LAUNCH_BUNDLE_UNVERIFIED");
+      expect(desk.snapshot().events.find((e) => e.code === "LAUNCH_BUNDLE_UNVERIFIED")?.message).toMatch(/RPC error/);
       expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
     } finally {
       desk.stop();
