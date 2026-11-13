@@ -474,6 +474,7 @@ export class Desk {
   /** Display-only count of collapsed marks. The chart series drops identical prints inside 2s. */
   private collapseStreak = new Map<string, CollapseStreak>();
   private routeProbeTimer: NodeJS.Timeout | null = null;
+  private routeProbeBusy = false;
   private readonly walletReader: () => Promise<WalletBalances>;
   private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
   /** A live swap that was submitted (or may have been) and is not a booked fill. Blocks another send. */
@@ -1031,6 +1032,8 @@ export class Desk {
     this.config.startingBalanceUsd = starting;
     this.book.positions.clear();
     this.book.lastPrice.clear();
+    for (const key of this.noRoute) if (!key.startsWith(LIVE_KEY)) this.noRoute.delete(key);
+    for (const key of this.collapseStreak.keys()) if (!key.startsWith(LIVE_KEY)) this.collapseStreak.delete(key);
     this.book.cashUsd = starting;
     this.cooldowns.clear();
     this.shocks.clear();
@@ -3704,6 +3707,8 @@ export class Desk {
       ...(strategy ? { strategy: { ...strategy } } : {})
     };
     book.positions.set(token.mint, position);
+    this.noRoute.delete(bookKey(kind, token.mint));
+    this.collapseStreak.delete(bookKey(kind, token.mint));
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
@@ -4029,34 +4034,46 @@ export class Desk {
    */
   async probeSellRoutes(fetchImpl?: typeof fetch): Promise<void> {
     const quoteUrl = this.config.jupiterQuoteUrl;
-    if (!quoteUrl) return;
-    // Priority 0 shares the Jupiter price/quote bucket. A passed fetch is for tests.
-    const fetchUsed = fetchImpl ?? this.net.fetchAt(0);
-    const held: Array<{ kind: BookKind; pos: Position }> = [];
-    for (const pos of this.book.positions.values()) held.push({ kind: "paper", pos });
-    for (const pos of this.liveBook?.positions.values() ?? []) held.push({ kind: "live", pos });
-    const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    const seenMint = new Set<string>();
-    for (const { pos } of held) {
-      if (seenMint.has(pos.mint) || sellsOnPump(pos)) continue;
-      const decimals = pos.decimals ?? 6;
-      const atoms = Math.floor(pos.qty * 10 ** decimals);
-      if (!(atoms > 0) || !Number.isFinite(atoms)) continue;
-      seenMint.add(pos.mint);
-      const verdict = await readSellRoute({
-        quoteUrl,
-        inputMint: pos.mint,
-        outputMint: usdc,
-        amount: String(atoms),
-        fetchImpl: fetchUsed
-      });
-      const same = held.filter((row) => row.pos.mint === pos.mint && !sellsOnPump(row.pos));
-      for (const row of same) {
-        const key = bookKey(row.kind, row.pos.mint);
-        if (verdict === "no_route") this.noRoute.add(key);
-        else if (verdict === "route") this.noRoute.delete(key);
+    if (!quoteUrl || this.routeProbeBusy) return;
+    this.routeProbeBusy = true;
+    try {
+      // Priority 0 shares the Jupiter price/quote bucket. A passed fetch is for tests.
+      const fetchUsed = fetchImpl ?? this.net.fetchAt(0);
+      const held: Array<{ kind: BookKind; pos: Position }> = [];
+      for (const pos of this.book.positions.values()) held.push({ kind: "paper", pos });
+      for (const pos of this.liveBook?.positions.values() ?? []) held.push({ kind: "live", pos });
+      const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+      const seenMint = new Set<string>();
+      for (const { pos } of held) {
+        if (seenMint.has(pos.mint) || sellsOnPump(pos)) continue;
+        const decimals = pos.decimals ?? 6;
+        const atoms = Math.floor(pos.qty * 10 ** decimals);
+        if (!(atoms > 0) || !Number.isFinite(atoms)) continue;
+        seenMint.add(pos.mint);
+        const verdict = await readSellRoute({
+          quoteUrl,
+          inputMint: pos.mint,
+          outputMint: usdc,
+          amount: String(atoms),
+          fetchImpl: fetchUsed
+        });
+        const same = held.filter((row) => row.pos.mint === pos.mint && !sellsOnPump(row.pos));
+        let applied = false;
+        for (const row of same) {
+          const book = row.kind === "live" ? this.liveBook : this.book;
+          const key = bookKey(row.kind, row.pos.mint);
+          if (book?.positions.get(row.pos.mint) !== row.pos) {
+            this.noRoute.delete(key);
+            continue;
+          }
+          if (verdict === "no_route") this.noRoute.add(key);
+          else if (verdict === "route") this.noRoute.delete(key);
+          applied = verdict === "no_route" || verdict === "route";
+        }
+        if (applied) this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
       }
-      if (verdict === "no_route" || verdict === "route") this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
+    } finally {
+      this.routeProbeBusy = false;
     }
   }
 

@@ -190,6 +190,41 @@ describe("v13.51 dead card without a sell", () => {
       desk.stop();
     }
   });
+
+  it("does not keep a no-route flag on a position that was replaced while the quote was in flight", async () => {
+    const desk = testDesk();
+    try {
+      await desk.submitCandidate(makeToken({ mint, symbol: "INSANE", priceUsd: 1, liquidityUsd: 180_000 }));
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      const fetchImpl = (async () => {
+        calls += 1;
+        if (calls === 1) await gate;
+        return new Response(JSON.stringify({ errorCode: "NO_ROUTES_FOUND" }), { status: 400 });
+      }) as typeof fetch;
+      const first = desk.probeSellRoutes(fetchImpl);
+      const second = desk.probeSellRoutes(fetchImpl);
+      await Promise.resolve();
+      expect(calls).toBe(1);
+      desk.book.positions.delete(mint);
+      await desk.submitCandidate(makeToken({ mint, symbol: "INSANE", priceUsd: 1, liquidityUsd: 180_000 }));
+      release();
+      await first;
+      await second;
+      expect(calls).toBe(1);
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote ?? null).toBeNull();
+      await desk.probeSellRoutes(fetchImpl);
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote).toBe("Liquidity gone, no sell route");
+      expect(desk.resetPaperBook(true).ok).toBe(true);
+      await desk.submitCandidate(makeToken({ mint, symbol: "INSANE", priceUsd: 1, liquidityUsd: 180_000 }));
+      expect(desk.snapshot().positions.find((row) => row.mint === mint)?.liquidityNote ?? null).toBeNull();
+    } finally {
+      desk.stop();
+    }
+  });
 });
 
 describe("v13.51 readSellRoute", () => {

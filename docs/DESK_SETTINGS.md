@@ -304,7 +304,7 @@ Not settings, but useful context: paper cash $549.86, paper equity $682.87 (mark
 A holding can land in Dead / no sell route before anyone presses Sell. The card note is still "Liquidity gone, no sell route". Two display checks set it, and neither one sends a transaction or writes the book:
 
 - The mark has collapsed. The position is worth under $0.01 and the mark is at least 99% below entry, or a drop of 99% or more has been seen three times at least 1.5s apart. Identical prints that the chart folds into one point still count. One print above a cent does not move the card.
-- A read-only Jupiter quote (GET only, once a minute, through the shared Jupiter limiter) finds no sell route. A pump-route coin is not judged by that quote. A timeout is not treated as a drained pool. A quote that comes back clears only that flag.
+- A read-only Jupiter quote (GET only, once a minute, one pass at a time, through the shared Jupiter limiter) finds no sell route. A pump-route coin is not judged by that quote. A timeout is not treated as a drained pool. A quote that comes back clears only that flag. A new fill, a finished sell, and a paper reset clear it too. A quote that returns after the coin was sold or bought again is not applied to the new position.
 
 Stops, settings, and the ledger are unchanged. The engine does not sell because of this note. Sell on the card still works, including Sell anyway.
 
