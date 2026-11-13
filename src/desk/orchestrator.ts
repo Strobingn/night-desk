@@ -3070,6 +3070,9 @@ export class Desk {
       // A rejected outlier must not become the crash-guard high and block the next buy.
       if (!markUnusable(tick.priceUsd) && !(anchor != null && outlierReason(anchor, tick.priceUsd))) {
         this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
+        if (this.strategy.holding(tick.mint)) {
+          this.recorder.tick(tick.at, tick.mint, this.sightings.get(tick.mint)?.symbol ?? held?.symbol ?? "", tick.priceUsd, tick.liquidityUsd ?? null);
+        }
         this.strategy.onTick(tick.mint, tick.priceUsd, tick.at, tick.liquidityUsd);
       }
       this.noteFeedQuote(tick.mint, tick.feed, tick.priceUsd, tick.at);

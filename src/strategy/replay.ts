@@ -1,4 +1,4 @@
-import { feedOf, type RecordedQuote, type RecordedSignal } from "../market/recorder.js";
+import { feedOf, TICK_SOURCE, type RecordedQuote, type RecordedSignal } from "../market/recorder.js";
 import { SIGNALS, STRATEGY, type SignalKind, type StrategyConfig, type Variant } from "./config.js";
 import { performance } from "node:perf_hooks";
 import type { MarketFlow } from "./exits.js";
@@ -157,8 +157,21 @@ export async function replaySaved(
     }
     const q = quotes[i]!;
     openSignals(q.t);
-    const anchor = coinFeed.get(q.mint);
     const held = holders.get(q.mint);
+    // A saved held-position tick: the desk marks its books on it and reads nothing else from it.
+    if (q.source === TICK_SOURCE) {
+      if (held) {
+        for (let h = held.length - 1; h >= 0; h -= 1) {
+          const { key, entry } = held[h]!;
+          advance(key, entry, q.t);
+          entry.book.onMark(key, q.priceUsd, q.t, q.liquidityUsd ?? undefined);
+          if (!entry.book.positions.has(key)) held.splice(h, 1);
+        }
+        if (held.length === 0) holders.delete(q.mint);
+      }
+      continue;
+    }
+    const anchor = coinFeed.get(q.mint);
     // A quote from another feed is one the desk would not have acted on. Time still passes.
     if (anchor && feedOf(q.source) !== anchor) {
       if (held) for (let h = held.length - 1; h >= 0; h -= 1) {

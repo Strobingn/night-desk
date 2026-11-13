@@ -202,6 +202,22 @@ describe("13.41 replay on saved data", () => {
     expect(out.rows.slice(0, scored).every((r) => r.trades > 0 && r.netUsd < 0)).toBe(true);
   });
 
+  it("stops on a saved tick between two quotes, and a tick does not wipe the volume reading", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000, feed: "dexscreener" };
+    const tick = (t: number, p: number) => q(t, p, { source: "tick", vol5mUsd: null, vol1hUsd: null, buys5m: null, sells5m: null, change1hPct: null });
+    const out = await replaySaved([tick(t0 + 5_000, 0.95), q(t0 + 10_000, 1.2)], [{ t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail }]);
+    const fixed = out.rows.find((r) => r.signal === "launch" && r.label === "3% stop, sell at target")!;
+    expect(fixed.trades).toBe(1);
+    expect(fixed.netUsd).toBeLessThan(-1);
+    const rec = new MarketRecorder(new DatabaseSync(":memory:"), 14);
+    expect(rec.tick(1_000, "M", "S", 1, 50_000)).toBe(true);
+    expect(rec.tick(1_500, "M", "S", 1.001, 50_000)).toBe(false); // under 2 s and under 0.5%
+    expect(rec.tick(1_600, "M", "S", 0.99, 50_000)).toBe(true); // a 1% move is always kept
+    expect(rec.tick(4_000, "M", "S", 0.99, 50_000)).toBe(false); // unchanged
+    expect(rec.quotesBetween({}).rows.map((r) => r.source)).toEqual(["tick", "tick"]);
+  });
+
   it("ignores a quote from a feed the position is not marked by", async () => {
     const t0 = 1_700_000_000_000;
     const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000, feed: "dexscreener" };

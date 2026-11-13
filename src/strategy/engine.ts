@@ -273,6 +273,12 @@ export class StrategyEngine {
   }
 
   /** A faster mark for a coin a shadow book holds (the desk's own position ticks). Never fires a signal. */
+  /** True while any shadow book holds the coin. */
+  holding(mint: string): boolean {
+    for (const book of this.books.values()) if (book.positions.has(mint)) return true;
+    return false;
+  }
+
   onTick(mint: string, priceUsd: number, now: number, liquidityUsd?: number): void {
     this.markShadows(mint, priceUsd, now, liquidityUsd);
   }

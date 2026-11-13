@@ -50,9 +50,14 @@ export const RECORDER = {
   /** The most quotes one replay reads. */
   replayMax: 250_000,
   replayPage: 4_000,
+  tickGapMs: 2_000,
+  tickMovePct: 0.005,
   /** Matches STRATEGY.fade.freshMs: older volume and trade counts fire nothing. */
   flowFreshMs: 60_000
 } as const;
+
+/** The source of a saved held-position tick: a mark only, with no volume or trade counts. */
+export const TICK_SOURCE = "tick";
 
 export function recordDays(raw: string | undefined): number {
   if (raw == null || raw.trim() === "") return RECORDER.defaultDays;
@@ -71,6 +76,7 @@ export class MarketRecorder {
   private readonly insertSignal: StatementSync | null = null;
   private buffer: RecordedQuote[] = [];
   private readonly last = new Map<string, { t: number; sig: string }>();
+  private readonly lastTick = new Map<string, { t: number; priceUsd: number }>();
   private quotes = 0;
   private signals = 0;
   private oldestAt: number | null = null;
@@ -143,6 +149,26 @@ export class MarketRecorder {
     return true;
   }
 
+  /**
+   * A price tick for a coin a shadow book holds. The desk marks its books on these between quotes,
+   * so a stop crossed between two quotes is in the saved data too. Saved as source "tick": price and
+   * depth only. At most every 2 s per coin, unless the price moved 0.5% or more since the last one.
+   */
+  tick(t: number, mint: string, symbol: string, priceUsd: number, liquidityUsd: number | null): boolean {
+    if (!this.enabled || !(priceUsd > 0) || !Number.isFinite(priceUsd) || !Number.isFinite(t)) return false;
+    const prev = this.lastTick.get(mint);
+    if (prev) {
+      const gap = t - prev.t;
+      const moved = Math.abs(priceUsd / prev.priceUsd - 1) >= RECORDER.tickMovePct;
+      if (gap < RECORDER.tickGapMs && !moved) return false;
+      if (priceUsd === prev.priceUsd && gap < RECORDER.unchangedGapMs) return false;
+    }
+    this.lastTick.set(mint, { t, priceUsd });
+    this.buffer.push({ t, mint, symbol, priceUsd, liquidityUsd, vol5mUsd: null, vol1hUsd: null, change1hPct: null, buys5m: null, sells5m: null, source: TICK_SOURCE, flowAt: null });
+    if (this.buffer.length >= RECORDER.flushRows) this.flush();
+    return true;
+  }
+
   signal(row: RecordedSignal): void {
     if (!this.insertSignal) return;
     try {
@@ -182,6 +208,7 @@ export class MarketRecorder {
     if (keep) {
       const set = new Set(keep);
       for (const mint of [...this.last.keys()]) if (!set.has(mint)) this.last.delete(mint);
+      for (const mint of [...this.lastTick.keys()]) if (!set.has(mint)) this.lastTick.delete(mint);
     }
     if (!this.enabled || now - this.prunedAt < RECORDER.pruneEveryMs) return;
     this.prunedAt = now;
