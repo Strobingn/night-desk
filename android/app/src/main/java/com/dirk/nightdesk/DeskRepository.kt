@@ -177,9 +177,37 @@ class DeskRepository private constructor(private val context: Context) {
     val error: StateFlow<String?> = _error
     private val _notice = MutableStateFlow<DeskNotice?>(null)
     val notice: StateFlow<DeskNotice?> = _notice
+    private val _sellAnyway = MutableStateFlow<SellAnywayAsk?>(null)
+    val sellAnywayAsk: StateFlow<SellAnywayAsk?> = _sellAnyway
 
     fun dismissNotice() {
         _notice.value = null
+    }
+
+    fun dismissSellAnyway() {
+        _sellAnyway.value = null
+    }
+
+    /** Sends the sell the operator just confirmed past the exit cap. */
+    suspend fun confirmSellAnyway() {
+        val ask = _sellAnyway.value ?: return
+        _sellAnyway.value = null
+        if (ask.percent >= 100) closePosition(ask.mint, ask.live, sellAnyway = true)
+        else sellPosition(ask.mint, ask.percent, ask.live, sellAnyway = true)
+    }
+
+    private fun noteSellResult(mint: String, symbol: String, live: Boolean, percent: Int, code: Int, raw: String): Boolean {
+        val json = runCatching { JSONObject(raw) }.getOrNull()
+        val ok = code in 200..299 && json?.optBoolean("ok", true) != false
+        if (ok) return true
+        if (OneTap.offersSellAnyway(json)) {
+            val message = json?.optString("error").orEmpty().ifBlank { "Exit slippage is over the cap." }
+            _sellAnyway.value = SellAnywayAsk(mint, json?.optString("symbol")?.ifBlank { symbol } ?: symbol, live, percent, message)
+            return false
+        }
+        val text = OneTap.sellText(symbol, json, false, 0)
+        _notice.value = DeskNotice(false, text.ifBlank { "$symbol: sell failed" })
+        return false
     }
 
     /** Hide the Home crash card. The desk keeps the crash record. */
@@ -563,21 +591,27 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** v12 partial sell. percent is 25, 50 or 100. 100 is the same as Close. */
-    suspend fun sellPosition(mint: String, percent: Int, live: Boolean = false): DeskNotice = withContext(Dispatchers.IO) {
+    suspend fun sellPosition(mint: String, percent: Int, live: Boolean = false, sellAnyway: Boolean = false): DeskNotice = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL")
         // v13.7: a live-book position must name its book; no book = the paper book.
         val body = JSONObject().put("mint", mint).put("percent", percent)
         if (live) body.put("book", "live")
-        val notice = post("$base/api/positions/sell", body.toString()).fold(
-            onSuccess = { raw ->
-                val proceeds = runCatching { JSONObject(raw).optFinite("proceedsUsd", Double.NaN) }.getOrNull()
-                val tail = if (proceeds != null && proceeds.isFinite()) " for ${formatUsd(proceeds)}" else ""
-                DeskNotice(true, if (percent >= 100) "Closed." else "Sold $percent%$tail.")
+        if (sellAnyway) body.put("sellAnyway", true)
+        val notice = sendRaw("$base/api/positions/sell", body.toString(), if (live) liveHttp else http).fold(
+            onSuccess = { (code, raw) ->
+                val json = runCatching { JSONObject(raw) }.getOrNull()
+                if (!noteSellResult(mint, mint, live, percent, code, raw)) {
+                    DeskNotice(false, json?.optString("error").orEmpty().ifBlank { "Sell failed." })
+                } else {
+                    val proceeds = json?.optFinite("proceedsUsd", Double.NaN)
+                    val tail = if (proceeds != null && proceeds.isFinite()) " for ${formatUsd(proceeds)}" else ""
+                    DeskNotice(true, if (percent >= 100) "Closed." else "Sold $percent%$tail.")
+                }
             },
             onFailure = { err -> DeskNotice(false, err.message ?: "Sell failed.") }
         )
-        _notice.value = notice
+        if (notice.ok || _sellAnyway.value == null) _notice.value = notice
         refresh()
         notice
     }
@@ -814,7 +848,7 @@ class DeskRepository private constructor(private val context: Context) {
     }
 
     /** v13.3 one-tap sell: closes 100% now. No dialog. Null = already in flight. */
-    suspend fun oneTapSell(mint: String, symbol: String, live: Boolean = false): DeskNotice? = withContext(Dispatchers.IO) {
+    suspend fun oneTapSell(mint: String, symbol: String, live: Boolean = false, sellAnyway: Boolean = false): DeskNotice? = withContext(Dispatchers.IO) {
         val key = if (live) "sell:live:$mint" else "sell:$mint"
         if (!claimTap(key)) return@withContext null
         try {
@@ -822,18 +856,20 @@ class DeskRepository private constructor(private val context: Context) {
             if (base.isBlank()) return@withContext DeskNotice(false, "No desk URL").also { _notice.value = it }
             val body = JSONObject().put("mint", mint).put("percent", 100).put("idemKey", OneTap.newIdemKey())
             if (live) body.put("book", "live")
+            if (sellAnyway) body.put("sellAnyway", true)
             val started = System.nanoTime()
             // v13.39: live sells use the 45s client so a 4s no-route refusal is shown, not "timeout".
             val client = if (live) liveHttp else http
             val notice = sendRaw("$base/api/positions/sell", body.toString(), client).fold(
                 onSuccess = { (code, raw) ->
                     val json = runCatching { JSONObject(raw) }.getOrNull()
-                    val ok = code in 200..299 && json?.optBoolean("ok", false) == true
+                    val offered = !noteSellResult(mint, symbol, live, 100, code, raw)
+                    val ok = !offered && code in 200..299 && json?.optBoolean("ok", false) == true
                     DeskNotice(ok, OneTap.sellText(symbol, json, ok, (System.nanoTime() - started) / 1_000_000))
                 },
                 onFailure = { err -> DeskNotice(false, "$symbol: ${err.message ?: "sell failed"}") }
             )
-            _notice.value = notice
+            if (notice.ok || _sellAnyway.value == null) _notice.value = notice
             refresh()
             notice
         } finally {
@@ -975,21 +1011,22 @@ class DeskRepository private constructor(private val context: Context) {
             .also { refresh() }
     }
 
-    suspend fun closePosition(mint: String, live: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun closePosition(mint: String, live: Boolean = false, sellAnyway: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
         val base = link.baseUrl
         if (base.isBlank()) return@withContext Result.failure(IllegalStateException("No desk URL"))
         // v13.7: a live-book position names its book; no book = the paper book.
         val body = JSONObject().put("mint", mint)
         if (live) body.put("book", "live")
+        if (sellAnyway) body.put("sellAnyway", true)
         // v13.39: live closes use the 45s client and surface the refusal text, not a 12s timeout.
         val client = if (live) liveHttp else http
         sendRaw("$base/api/positions/close", body.toString(), client).fold(
             onSuccess = { (code, raw) ->
                 val json = runCatching { JSONObject(raw) }.getOrNull()
-                val ok = code in 200..299 && json?.optBoolean("ok", true) != false
+                val ok = noteSellResult(mint, mint, live, 100, code, raw)
                 if (!ok) {
                     val text = OneTap.sellText(json?.optString("symbol")?.ifBlank { mint } ?: mint, json, false, 0)
-                    _notice.value = DeskNotice(false, text)
+                    if (_sellAnyway.value == null) _notice.value = DeskNotice(false, text)
                     Result.failure(IllegalStateException(text))
                 } else {
                     Result.success(Unit)

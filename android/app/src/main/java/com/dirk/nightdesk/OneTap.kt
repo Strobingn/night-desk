@@ -145,6 +145,15 @@ object OneTap {
             (if (warning.isEmpty()) "" else " $warning")
     }
 
+    /** True when the desk will take a second tap past the exit cap. A drained pool is not that. */
+    fun offersSellAnyway(json: JSONObject?): Boolean {
+        if (json == null || json.optBoolean("ok", false)) return false
+        if (json.optBoolean("allowSellAnyway", false)) return true
+        val error = json.optString("error")
+        if (error.contains("pool drained", ignoreCase = true) || error.contains("Liquidity gone", ignoreCase = true)) return false
+        return error.contains("would cost", ignoreCase = true)
+    }
+
     fun sellText(symbol: String, json: JSONObject?, ok: Boolean, ms: Long): String {
         if (json == null) return "$symbol: sell failed"
         if (!ok) {

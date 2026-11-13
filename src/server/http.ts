@@ -260,7 +260,8 @@ export function startServer(
           return json(res, first.status, { ...first.body, replayed: true });
         }
         const started = Date.now();
-        const job = desk.closePosition(mint.trim(), fraction, parseBook(record, url)).then((result) => ({ ...result, ms: Date.now() - started }));
+        const sellAnyway = record.sellAnyway === true;
+        const job = desk.closePosition(mint.trim(), fraction, parseBook(record, url), { sellAnyway }).then((result) => ({ ...result, ms: Date.now() - started }));
         const statusOf = (r: Awaited<typeof job>) => (r.ok ? 200 : r.error.startsWith("No open position") ? 404 : 400);
         idem.remember("sell", record.idemKey, job, statusOf);
         const result = await job;

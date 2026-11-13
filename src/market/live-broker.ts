@@ -1,6 +1,6 @@
 import { entryPriceAllowed } from "../agents/execution-math.js";
 import { HARD_RULES, clampEntrySlippage } from "../rules.js";
-import { CONFIRM_TIMEOUT_MS, QUOTE_TIMEOUT_MS, SELL_PRE_SEND_MS, SWAP_TIMEOUT_MS, isAmbiguousSendError, isNoRoutesBody, isNoSellRouteMessage, noSellRouteError, preSendFailure, rejectedSend, sellExitImpactError, sellQuoteTimeoutError, unconfirmedSend, withTimeout } from "./live-submit.js";
+import { CONFIRM_TIMEOUT_MS, QUOTE_TIMEOUT_MS, RECENT_FILL_TOKEN_MS, SELL_PRE_SEND_MS, SWAP_TIMEOUT_MS, isAmbiguousSendError, isNoRoutesBody, isNoSellRouteMessage, noSellRouteError, preSendFailure, rejectedSend, sellExitImpactError, sellQuoteTimeoutError, unconfirmedSend, withTimeout } from "./live-submit.js";
 import { loadDeskKeypair, type WalletKeyInput } from "./wallet-key.js";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -30,6 +30,37 @@ export interface LiveSwapRequest {
   senderTipLamports?: number;
   /** Same key must not broadcast twice. A new order uses a new key. */
   idemKey?: string;
+  /**
+   * The qty is the amount a live buy just filled. If the token-account read is empty or does
+   * not answer quickly, sell that qty instead of refusing.
+   */
+  confirmedFill?: boolean;
+  /**
+   * Manual sell only. Quote this send up to 50% and do not refuse on the exit cap.
+   * The saved maxExitSlippage is not changed. No route is still a refusal.
+   */
+  sellAnyway?: boolean;
+}
+
+/** Quote tolerance for one sell. Sell anyway widens this send only, up to 50%. */
+export function sellQuoteTolerance(exitCap: number, sellAnyway: boolean): number {
+  const cap = Math.min(0.5, Math.max(0.005, exitCap));
+  return sellAnyway ? 0.5 : cap;
+}
+
+/** True when this sell's quoted haircut is over the saved exit cap and the operator did not confirm it. */
+export function sellImpactRefused(worst: number, exitCap: number, sellAnyway: boolean): boolean {
+  return worst > exitCap + 1e-9 && !sellAnyway;
+}
+
+/**
+ * Atoms to sell. A positive wallet balance caps the request. A just-confirmed fill with no
+ * readable balance sells the booked amount. Anything else with no balance is refused.
+ */
+export function resolveSellAtoms(requested: number, walletRaw: number | null, confirmedFill: boolean): number | null {
+  if (!(requested > 0) || !Number.isFinite(requested)) return null;
+  if (walletRaw != null && walletRaw > 0 && Number.isFinite(walletRaw)) return Math.min(requested, Math.floor(walletRaw));
+  return confirmedFill ? Math.floor(requested) : null;
 }
 
 export interface LiveSwapResult {
@@ -100,18 +131,37 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     inputMint = req.mint;
     outputMint = USDC_MINT;
     amount = Math.floor(req.qty * 10 ** decimals);
-    // v13.5: never try to sell more than the wallet holds (fees, rounding, or a manual wallet move).
-    const held = await sellPreSend(
+    // Never sell more than the wallet holds. A fill from the last 30s keeps its booked qty when
+    // that read is empty or does not answer, so the exit is not refused while the account settles.
+    const pending = sellPreSend(
       connection.getParsedTokenAccountsByOwner(keypair.publicKey, { mint: new web3.PublicKey(req.mint) }),
       "wallet token balance"
     );
-    let raw = 0;
-    for (const row of held.value) {
-      const amt = (row.account.data as { parsed?: { info?: { tokenAmount?: { amount?: string } } } }).parsed?.info?.tokenAmount?.amount;
-      if (amt) raw += Number(amt);
+    let walletRaw: number | null = null;
+    try {
+      const held = req.confirmedFill
+        ? await Promise.race([
+            pending.then(
+              (value) => value,
+              () => null
+            ),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), RECENT_FILL_TOKEN_MS))
+          ])
+        : await pending;
+      if (held) {
+        let raw = 0;
+        for (const row of held.value) {
+          const amt = (row.account.data as { parsed?: { info?: { tokenAmount?: { amount?: string } } } }).parsed?.info?.tokenAmount?.amount;
+          if (amt) raw += Number(amt);
+        }
+        walletRaw = raw;
+      }
+    } catch (err) {
+      if (!req.confirmedFill) throw err;
     }
-    if (!(raw > 0)) throw new Error("LIVE_SWAP_FAILED: wallet holds none of this token");
-    amount = Math.min(amount, raw);
+    const atoms = resolveSellAtoms(amount, walletRaw, req.confirmedFill === true);
+    if (atoms == null) throw new Error("LIVE_SWAP_FAILED: wallet holds none of this token");
+    amount = atoms;
   }
   if (!(amount > 0)) throw new Error("LIVE_SWAP_FAILED: amount rounded to zero");
 
@@ -121,7 +171,7 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   quoteEndpoint.searchParams.set("amount", String(amount));
   const entryCap = clampEntrySlippage(req.maxEntrySlippage ?? HARD_RULES.maxEntrySlippage);
   const exitCap = Math.min(0.5, Math.max(0.005, req.maxExitSlippage ?? entryCap + HARD_RULES.exitImpactSlack));
-  const slipCap = req.side === "buy" ? entryCap : exitCap;
+  const slipCap = req.side === "buy" ? entryCap : sellQuoteTolerance(exitCap, req.sellAnyway === true);
   quoteEndpoint.searchParams.set("slippageBps", String(Math.round(slipCap * 10_000)));
   let quoteRes: Response;
   const quoteMs = req.side === "sell" ? Math.min(QUOTE_TIMEOUT_MS, remainMs()) : QUOTE_TIMEOUT_MS;
@@ -148,6 +198,7 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     priceImpactPct?: string | number;
   };
   if (req.side === "sell" && isNoSellRouteMessage(`${quote.error ?? ""} ${quote.errorCode ?? ""}`)) throw noSellRouteError();
+  if (req.side === "sell" && !quote.outAmount && !quote.error) throw noSellRouteError();
   if (!quote.outAmount || quote.error) throw new Error(`LIVE_SWAP_FAILED: ${quote.error ?? "empty quote"}`);
 
   if (req.side === "buy") {
@@ -165,7 +216,7 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     const impactRaw = Number(quote.priceImpactPct);
     const impact = Number.isFinite(impactRaw) ? (impactRaw > 1 ? impactRaw / 100 : impactRaw) : null;
     const worst = Math.max(vsMark ?? 0, impact ?? 0);
-    if ((vsMark != null || impact != null) && worst > exitCap + 1e-9) throw sellExitImpactError(worst, exitCap);
+    if ((vsMark != null || impact != null) && sellImpactRefused(worst, exitCap, req.sellAnyway === true)) throw sellExitImpactError(worst, exitCap);
   }
 
   let swapRes: Response;

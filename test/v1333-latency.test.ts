@@ -304,6 +304,9 @@ describe("v13.33 live exits", () => {
       await desk.submitCandidate(makeToken({ mint, symbol: "STP", priceUsd: 1, liquidityUsd: 180_000 }));
       const bought = await desk.manualBuy(mint, undefined, { book: "live" });
       expect(bought.ok).toBe(true);
+      const pos = desk.liveBook?.positions.get(mint);
+      expect(pos).toBeTruthy();
+      pos!.openedAt = Date.now() - 120_000;
       const started = performance.now();
       const closed = await desk.closePosition(mint, 1, "live");
       const elapsed = performance.now() - started;

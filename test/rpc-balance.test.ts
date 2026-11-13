@@ -260,6 +260,10 @@ describe("wallet balance fail-closed", () => {
       await desk.markPrice(held, 1);
       desk.setOperatorReady(true);
       expect((await desk.manualBuy(held, 5, { book: "live" })).ok).toBe(true);
+      // A sell in the first 30s after a fill uses the booked amount when the wallet read fails.
+      // This stop is an older position, so a stale balance still blocks it.
+      const heldPos = desk.liveBook!.positions.get(held)!;
+      heldPos.openedAt = Date.now() - 120_000;
       desk.setOperatorReady(false);
       const sent = swaps.executeLiveSwap.mock.calls.length;
       next = { sol: null, usdc: null, at: 2, error: "RPC HTTP 429" };

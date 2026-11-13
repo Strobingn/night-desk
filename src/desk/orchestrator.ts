@@ -1,6 +1,6 @@
 import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
-import { LiveSubmitError, isNoSellRouteMessage } from "../market/live-submit.js";
+import { LiveSubmitError, POOL_DRAINED_MESSAGE, isNoSellRouteMessage, offersSellAnyway } from "../market/live-submit.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
@@ -47,7 +47,7 @@ const LIQUIDITY_GONE_NOTE = "Liquidity gone, no sell route";
 class GateError extends Error {
   constructor(
     message: string,
-    readonly code: "EXIT_IMPACT" | "UNVERIFIED_SELL"
+    readonly code: "EXIT_IMPACT" | "UNVERIFIED_SELL" | "NO_SELL_ROUTE"
   ) {
     super(message);
     this.name = "GateError";
@@ -292,8 +292,15 @@ function isAbortError(err: unknown): boolean {
   const name = (err as { name?: string }).name;
   return name === "AbortError" || name === "TimeoutError";
 }
-/** A cached balance older than this cannot authorize a live buy or sell. */
+/** A cached balance older than this cannot authorize a live buy. An exit may use an older successful SOL figure. */
 const LIVE_BALANCE_CACHE_MS = 60_000;
+/**
+ * A live sell of a position that filled inside this window. The buy already confirmed the
+ * token amount and that the wallet could pay. A stale or failed balance read must not refuse it.
+ */
+const RECENT_LIVE_FILL_MS = 30_000;
+/** How long that sell waits for a fresh wallet read before it sends the confirmed amount. */
+const RECENT_FILL_BALANCE_MS = 750;
 
 export class Desk {
   readonly bus = new EventBus<DeskEvents>();
@@ -1185,10 +1192,11 @@ export class Desk {
   async closePosition(
     mint: string,
     fraction = 1,
-    bookArg?: BookKind
+    bookArg?: BookKind,
+    opts?: { sellAnyway?: boolean }
   ): Promise<
     | { ok: true; soldFraction?: number; proceedsUsd?: number; symbol?: string; pnlUsd?: number; pnlPct?: number; exitPrice?: number; exitCode?: string }
-    | { ok: false; error: string; code?: string }
+    | { ok: false; error: string; code?: string; allowSellAnyway?: boolean }
   > {
     // v13.7: a sell names its book. No book = the paper book, so an old client can never sell real coins by accident.
     const kind: BookKind = bookArg === "live" ? "live" : "paper";
@@ -1217,7 +1225,7 @@ export class Desk {
     if (fraction < 1) {
       const split = splitPosition(pos.qty, pos.costUsd, fraction);
       // A remainder worth under a cent is closed in full instead of leaving dust.
-      if (split.ok && split.remainQty * mark >= 0.01) return this.partialSell(pos, mark, split);
+      if (split.ok && split.remainQty * mark >= 0.01) return this.partialSell(pos, mark, split, opts?.sellAnyway === true);
     }
     pos.closing = true;
     const order: ExitOrder = {
@@ -1232,7 +1240,8 @@ export class Desk {
         code: "MANUAL_CLOSE",
         message: "Manual close from the desk. Trail and hard stop were not the trigger."
       },
-      ...(kind === "live" ? { book: "live" as const } : {})
+      ...(kind === "live" ? { book: "live" as const } : {}),
+      ...(opts?.sellAnyway === true ? { sellAnyway: true } : {})
     };
     this.log({
       stage: "system",
@@ -1247,10 +1256,12 @@ export class Desk {
     if (book.positions.has(mint)) {
       const refused = this.closeRefusals.get(bookKey(kind, mint));
       this.closeRefusals.delete(bookKey(kind, mint));
+      const error = refused?.error ?? `Close of ${pos.symbol} did not complete. Position is still open.`;
       return {
         ok: false,
-        error: refused?.error ?? `Close of ${pos.symbol} did not complete. Position is still open.`,
-        ...(refused ? { code: refused.code } : {})
+        error,
+        ...(refused ? { code: refused.code } : {}),
+        ...(offersSellAnyway(error) ? { allowSellAnyway: true } : {})
       };
     }
     const closed = this.store.recentClosed(20).find((trade) => trade.id === pos.tradeId);
@@ -1857,8 +1868,10 @@ export class Desk {
     }
     const now = Date.now();
     if (o.book === "live") {
-      const read = await this.liveBalance(o.side === "limit_buy" ? "buy" : "exit");
-      if (!read || read.error != null || read.sol == null) {
+      const held = o.side === "limit_buy" ? undefined : this.liveBook?.positions.get(o.mint);
+      const recent = this.recentLiveFill(held);
+      const read = await this.liveBalance(o.side === "limit_buy" ? "buy" : "exit", false, recent ? RECENT_FILL_BALANCE_MS : LIVE_BALANCE_WAIT_MS);
+      if ((!read || read.error != null || read.sol == null) && !recent) {
         o.status = "open";
         o.note = `Refused: wallet balance not current${read?.error ? ` (${read.error})` : ""}. Nothing was sent.`;
         o.nextTryAt = now + ORDER_RETRY_MS;
@@ -1992,13 +2005,13 @@ export class Desk {
   private partialSell(
     pos: Position,
     mark: number,
-    split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number }
-  ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string; code?: string } {
+    split: { sellQty: number; soldCostUsd: number; remainQty: number; remainCostUsd: number; fraction: number },
+    sellAnyway = false
+  ): { ok: true; soldFraction: number; proceedsUsd: number } | { ok: false; error: string; code?: string; allowSellAnyway?: boolean } {
     if (this.sellUnverified(pos, mark)) return { ok: false, error: UNVERIFIED_SELL, code: "UNVERIFIED_SELL" };
     const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
-    // Sell 25/50/100 is a manual paper close. The exit-impact gate stays on automatic exits only.
-    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity, true);
-    if (impact) return { ok: false, error: impact, code: "EXIT_IMPACT" };
+    const impact = this.paperExitImpact(pos, mark, split.sellQty, liquidity, true, sellAnyway);
+    if (impact) return this.sellRefusal(impact);
     const quote = quotePaperSell(mark, split.sellQty, liquidity);
     const proceedsUsd = roundUsd(quote.proceedsUsd ?? 0);
     assertNonNegativeFinite("proceedsUsd", proceedsUsd);
@@ -3724,8 +3737,9 @@ export class Desk {
           pos.closing = false;
           return;
         }
-        const read = await this.liveBalance("exit");
-        if (!read || read.error != null || read.sol == null) {
+        const recent = this.recentLiveFill(pos);
+        const read = await this.liveBalance("exit", false, recent ? RECENT_FILL_BALANCE_MS : LIVE_BALANCE_WAIT_MS);
+        if ((!read || read.error != null || read.sol == null) && !recent) {
           throw new Error(`Wallet balance not current${read?.error ? ` (${read.error})` : ""}. Live sell refused. Nothing was sent.`);
         }
         if (this.sellUnverified(pos, order.markPrice)) throw new Error(UNVERIFIED_SELL);
@@ -3737,7 +3751,9 @@ export class Desk {
           markPriceUsd: order.markPrice,
           dex: pos.dex,
           priceFeed: pos.priceFeed,
-          exit: true
+          exit: true,
+          confirmedFill: recent,
+          sellAnyway: order.reason.code === "MANUAL_CLOSE" && order.sellAnyway === true
         });
         void this.refreshWallet();
         this.applySell(pos, {
@@ -3764,8 +3780,8 @@ export class Desk {
       if (!(mark > 0) || this.sellUnverified(pos, mark) || this.sellUnverified(pos, order.markPrice)) throw new GateError(UNVERIFIED_SELL, "UNVERIFIED_SELL");
       const liquidity = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
       const manual = order.reason.code === "MANUAL_CLOSE";
-      const impact = this.paperExitImpact(pos, mark, pos.qty, liquidity, manual);
-      if (impact) throw new GateError(impact, "EXIT_IMPACT");
+      const impact = this.paperExitImpact(pos, mark, pos.qty, liquidity, manual, manual && order.sellAnyway === true);
+      if (impact) throw new GateError(impact, impact === POOL_DRAINED_MESSAGE ? "NO_SELL_ROUTE" : "EXIT_IMPACT");
       const quote = quotePaperSell(mark, pos.qty, liquidity);
       this.applySell(
         pos,
@@ -4563,14 +4579,23 @@ export class Desk {
     return !quoteConfirms(mark, this.otherQuotes(pos.mint, undefined, Date.now()));
   }
 
-  /** Flat or rising paper sells still have to fit the exit-impact cap. A falling mark is a rug and must be able to leave. Manual paper closes skip the gate and still fill at the modeled price. */
-  private paperExitImpact(pos: Position, mark: number, qty: number, liquidityUsd: number, manual = false): string | null {
-    if (manual) return null;
-    if (pos.entryPrice > 0 && mark < pos.entryPrice) return null;
+  /**
+   * Flat or rising automatic sells still have to fit the exit cap. A falling mark is a rug and the engine must be able to leave.
+   * A manual sell over the cap waits for sellAnyway. No measurable pool is a hard stop, even then.
+   */
+  private paperExitImpact(pos: Position, mark: number, qty: number, liquidityUsd: number, manual = false, sellAnyway = false): string | null {
+    if (!manual && pos.entryPrice > 0 && mark < pos.entryPrice) return null;
     const notional = mark * qty;
     const gate = exitImpactAllowed(notional, liquidityUsd, this.config.rules.maxEntrySlippage, this.maxExitSlippage);
     if (gate.ok) return null;
+    if (!Number.isFinite(gate.slippage)) return POOL_DRAINED_MESSAGE;
+    if (manual && sellAnyway) return null;
     return gate.message.replace(/Buy refused/g, "Sell refused");
+  }
+
+  private sellRefusal(error: string): { ok: false; error: string; code: string; allowSellAnyway?: boolean } {
+    const code = error === POOL_DRAINED_MESSAGE ? "NO_SELL_ROUTE" : "EXIT_IMPACT";
+    return { ok: false, error, code, ...(offersSellAnyway(error) ? { allowSellAnyway: true } : {}) };
   }
 
   private paperProceedsUnverified(pos: Position, proceedsUsd: number, fillPrice: number, costUsd: number): boolean {
@@ -5318,8 +5343,15 @@ export class Desk {
    * dollar and SOL checks still run. Exits may use an older successful SOL figure so a stop
    * is not left open when the last good read is past that window. An error or an empty cache refuses.
    */
-  private async liveBalance(kind: "buy" | "exit", pump = false): Promise<WalletBalances | null> {
-    const read = await this.refreshWalletBounded(LIVE_BALANCE_WAIT_MS);
+  /** A live position that filled moments ago. Its booked qty is the amount the sell may send. */
+  private recentLiveFill(pos: { live?: boolean; openedAt: number } | undefined, now = Date.now()): boolean {
+    if (!pos?.live) return false;
+    const age = now - pos.openedAt;
+    return age >= 0 && age <= RECENT_LIVE_FILL_MS;
+  }
+
+  private async liveBalance(kind: "buy" | "exit", pump = false, waitMs = LIVE_BALANCE_WAIT_MS): Promise<WalletBalances | null> {
+    const read = await this.refreshWalletBounded(waitMs);
     const usable = (row: WalletBalances | null): row is WalletBalances =>
       !!row && row.error == null && row.sol != null && (kind === "exit" || pump || row.usdc != null);
     if (usable(read)) return read;
@@ -5466,6 +5498,10 @@ export class Desk {
     dex?: string;
     priceFeed?: string;
     exit?: boolean;
+    /** The qty is the amount the just-confirmed buy booked. A missing token-account read must not refuse the sell. */
+    confirmedFill?: boolean;
+    /** Manual close that the operator confirmed past the exit cap. Engine exits never set this. */
+    sellAnyway?: boolean;
   }): Promise<LiveSwapResult> {
     const slip = input.exit ? (this.maxExitSlippage ?? this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack) : this.config.rules.maxEntrySlippage;
     if (usesPumpRoute(input)) {
@@ -5481,7 +5517,9 @@ export class Desk {
         decimals: input.decimals,
         solPriceUsd: sol,
         markPriceUsd: input.markPriceUsd,
-        slippageFraction: slip,
+        slippageFraction: input.sellAnyway === true ? 0.5 : slip,
+        exitCap: slip,
+        sellAnyway: input.sellAnyway === true,
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
         rpcUrl: this.config.walletRpcUrl,
@@ -5505,6 +5543,8 @@ export class Desk {
       markPriceUsd: input.markPriceUsd,
       maxEntrySlippage: this.config.rules.maxEntrySlippage,
       maxExitSlippage: input.exit ? slip : undefined,
+      confirmedFill: input.confirmedFill === true,
+      sellAnyway: input.exit === true && input.sellAnyway === true,
       rpcFetch: this.net.fetchAt(1),
       senderTipLamports: tipLamports(this.senderTipSol),
       idemKey: randomUUID()

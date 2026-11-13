@@ -16,7 +16,7 @@ async function openPaper(symbol: string, mint: string, priceUsd = 1) {
   return { desk, pos: pos! };
 }
 
-describe("v13.25 manual paper close bypasses the exit-impact gate", () => {
+describe("v13.25 manual paper close confirms past the exit-impact gate", () => {
   it("closes a PAYDAY-shaped paper position by hand and still blocks an automatic exit", async () => {
     const { desk, pos } = await openPaper("PAYDAY", PAYDAY, 1);
     try {
@@ -28,13 +28,22 @@ describe("v13.25 manual paper close bypasses the exit-impact gate", () => {
       expect(desk.book.positions.has(PAYDAY)).toBe(true);
 
       const part = await desk.closePosition(PAYDAY, 0.25);
-      expect(part.ok).toBe(true);
+      expect(part.ok).toBe(false);
+      if (part.ok) return;
+      expect(part.allowSellAnyway).toBe(true);
+      expect(part.error).toMatch(/would cost/);
+      expect(desk.book.positions.has(PAYDAY)).toBe(true);
+      const partSold = await desk.closePosition(PAYDAY, 0.25, undefined, { sellAnyway: true });
+      expect(partSold.ok).toBe(true);
       expect(desk.book.positions.has(PAYDAY)).toBe(true);
 
       const open = desk.book.positions.get(PAYDAY)!;
       const mark = desk.book.price(PAYDAY, open.entryPrice);
       const modeled = quotePaperSell(mark, open.qty, 15);
-      const sold = await desk.closePosition(PAYDAY, 1);
+      const blocked = await desk.closePosition(PAYDAY, 1);
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.allowSellAnyway).toBe(true);
+      const sold = await desk.closePosition(PAYDAY, 1, undefined, { sellAnyway: true });
       expect(sold.ok).toBe(true);
       if (!sold.ok) return;
       expect(sold.exitCode).toBe("MANUAL_CLOSE");

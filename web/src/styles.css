@@ -215,6 +215,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 
 /* Position cards */
 .positions { display: grid; gap: 14px; }
+.dead-book { background: var(--card); border-radius: var(--radius); padding: 12px 14px; }
+.dead-book > summary { cursor: pointer; font-weight: 700; font-size: 14px; color: var(--muted); }
+.dead-book .positions { margin-top: 12px; }
 .pos-card { background: var(--card); border-radius: var(--radius); padding: 16px; }
 .pos-card > header { display: flex; gap: 12px; align-items: center; }
 .pos-title { flex: 1; min-width: 0; }
@@ -413,7 +416,7 @@ input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; border-radius
   .shell { padding-bottom: 32px; }
   .tabs { position: sticky; top: 0; bottom: auto; border-radius: 999px; margin: 4px 0 8px; max-width: 640px; padding: 6px; }
   .home { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); align-items: start; }
-  .home > .hero, .home > .section-head, .home > .positions, .home > .empty, .home > .crash { grid-column: 1; }
+  .home > .hero, .home > .section-head, .home > .positions, .home > .empty, .home > .crash, .home > .dead-book { grid-column: 1; }
   .home > .chart-card, .home > .ready { grid-column: 2; }
   .positions { grid-template-columns: 1fr; }
   .modal-back { place-items: center; }

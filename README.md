@@ -4,6 +4,8 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
+Android `13.50` (versionCode 1350): a live sell in the first 30 seconds after a fill uses the confirmed buy amount when the wallet or token-account read is stale, empty, or still in flight, instead of refusing with "Wallet balance not current." Coins marked liquidity gone sit in a collapsed Dead / no sell route section. A manual Sell anyway can pass the 6% exit cap for that tap; engine exits cannot, and the setting stays 6%. No route says the pool is drained. Caps stay 10 and 8.
+
 Android `13.49` (versionCode 1349): the launch-bundle check reads only the coin's own launch-slot transactions in one small batched request, and downloads the whole slot only when more than 10 transactions launched with the coin or the batch is incomplete.
 
 Android `13.48` (versionCode 1348) keeps the engine's buy-time Helius reads from waiting out a full read lane: the launch-bundle `getBlock` asks for account keys and token balances only, and background reads leave three slots a minute for the priority -1 safety and bundle checks. Caps stay 10 and 8. No size, stop, slippage, or pause changed.

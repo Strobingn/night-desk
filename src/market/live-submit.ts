@@ -12,7 +12,11 @@ export const CONFIRM_TIMEOUT_MS = 20_000;
  * before a transaction exists. A send already in flight is not aborted.
  */
 export const SELL_PRE_SEND_MS = 4_000;
-export const NO_SELL_ROUTE_MESSAGE = "Liquidity gone, no sell route. Nothing was sent.";
+/** A sell of a just-filled position waits this long for the token account, then uses the booked qty. */
+export const RECENT_FILL_TOKEN_MS = 750;
+/** Shown when a sell has no quote at all. The card note stays "Liquidity gone, no sell route". */
+export const POOL_DRAINED_MESSAGE = "No sell route, pool drained. Nothing was sent.";
+export const NO_SELL_ROUTE_MESSAGE = POOL_DRAINED_MESSAGE;
 export const SELL_QUOTE_TIMEOUT_MESSAGE = "Live sell quote timed out. Nothing was sent.";
 export const SELL_EXIT_IMPACT_MESSAGE = (slippage: number, cap: number): string =>
   `Live exit would cost ${(slippage * 100).toFixed(2)}%, more than your ${(cap * 100).toFixed(2)}% exit slippage setting. Nothing was sent.`;
@@ -80,7 +84,13 @@ export function isNoRoutesBody(status: number, body: unknown): boolean {
 }
 
 export function isNoSellRouteMessage(message: string): boolean {
-  return /liquidity gone, no sell route|NO_ROUTES_FOUND|No routes found/i.test(message);
+  return /liquidity gone, no sell route|no sell route, pool drained|NO_ROUTES_FOUND|No routes found/i.test(message);
+}
+
+/** A manual sell may be confirmed past the exit cap. A missing route cannot. */
+export function offersSellAnyway(error: string): boolean {
+  if (isNoSellRouteMessage(error)) return false;
+  return /would cost/i.test(error);
 }
 
 export function noSellRouteError(): LiveSubmitError {
