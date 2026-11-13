@@ -263,8 +263,14 @@ const WATCHLIST_MAX = 60;
  *   every stage result → Logger
  */
 
-/** A live buy waits this long for Helius, then uses a recent cache or refuses. The engine launch-bundle check uses the same backstop and then skips. */
+/** A live buy waits this long for Helius, then uses a recent cache or refuses. */
 const LIVE_BALANCE_WAIT_MS = 4_000;
+/** Manual and background mint reads. An engine entry uses ENGINE_SAFETY_MS instead. */
+const MINT_SAFETY_MS = 2_500;
+/** Engine token-safety (paper and live). One Helius read-lane slot is about 6s at 10/min, plus RPC latency. */
+const ENGINE_SAFETY_MS = 8_000;
+/** Engine live launch-bundle check. Two read-lane calls at 10/min, then fail closed. Manual buys stay on launchBundleSoon. */
+const ENGINE_LIVE_BUNDLE_MS = 15_000;
 /** A cached balance older than this cannot authorize a live buy or sell. */
 const LIVE_BALANCE_CACHE_MS = 60_000;
 
@@ -406,7 +412,7 @@ export class Desk {
   private readonly launchBundleFn?: (mint: string) => Promise<BundleResult | null>;
   private readonly safetyCache = new Map<string, { at: number; ttl: number; result: MintSafety }>();
   private readonly bundleCache = new Map<string, { at: number; forever: boolean; result: BundleResult }>();
-  private readonly safetyInflight = new Map<string, { priority: -1 | 0 | 1 | 2; job: Promise<MintSafety>; abort: () => void }>();
+  private readonly safetyInflight = new Map<string, { priority: -1 | 0 | 1 | 2; budgetMs: number; job: Promise<MintSafety>; abort: () => void }>();
   /** v13.5 live daily spend cap. null = off (the default). */
   private liveDailyCapUsd: number | null = null;
   /** v13.5 live trailing stop, fraction. Armed from entry. */
@@ -1456,13 +1462,9 @@ export class Desk {
     const open = held + this.engineLivePending.size;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     this.engineLivePending.add(token.mint);
-    const turn = this.engineLiveQueue;
-    let done!: () => void;
-    this.engineLiveQueue = new Promise<void>((resolve) => (done = resolve));
     try {
-      // The daily cap and the loss pause only count finished buys, so wait for the one ahead.
-      await turn;
-      // Priority -1 is the manual-buy priority, so this read is not buried behind mark polls.
+      // The read-lane waits sit outside the one-buy lock. The next live buy can run its own checks
+      // while this one is waiting on Helius. The lock below covers only the buy itself.
       const safety = await this.tokenSafety(token.mint, -1, true);
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
       if (isPumpCoin(token)) {
@@ -1472,24 +1474,39 @@ export class Desk {
       }
       const again = this.liveEngineBlock();
       if (again) return skip(again, "ENGINE_LIVE_PAUSED");
-      const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
-        tag: fired.signal.signal,
-        book: "live",
-        engineLive: true,
-        strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
+      await this.withLiveBuyLock(async () => {
+        // Entry slippage and the crash guard run inside the buy, against this signal's mark.
+        const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
+          tag: fired.signal.signal,
+          book: "live",
+          engineLive: true,
+          strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
+        });
+        if (result.ok) {
+          tally.buys += 1;
+          tally.lastBuyAt = Date.now();
+        } else {
+          // The buy path refused (wallet, daily cap, slippage, route...). Keep its own words for the phone.
+          tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
+        }
       });
-      if (result.ok) {
-        tally.buys += 1;
-        tally.lastBuyAt = Date.now();
-      } else {
-        // The buy path refused (wallet, daily cap, slippage, route...). Keep its own words for the phone.
-        tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
-      }
     } catch (err) {
       tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ERROR", message: err instanceof Error ? err.message : String(err) };
       throw err;
     } finally {
       this.engineLivePending.delete(token.mint);
+    }
+  }
+
+  /** One live engine buy at a time, so the next one sees this buy's spend. Held only for the buy, not the reads before it. */
+  private async withLiveBuyLock(run: () => Promise<void>): Promise<void> {
+    const turn = this.engineLiveQueue;
+    let done!: () => void;
+    this.engineLiveQueue = new Promise<void>((resolve) => (done = resolve));
+    try {
+      await turn;
+      await run();
+    } finally {
       done();
     }
   }
@@ -5577,35 +5594,60 @@ export class Desk {
 
   private async tokenSafety(mint: string, priority: -1 | 0 | 1 | 2 = 2, readLane = false): Promise<MintSafety> {
     const front = priority === -1;
+    // readLane is the engine entry (paper buyIfSafe and the live engine buy). Manual buys stay on MINT_SAFETY_MS.
+    const budgetMs = readLane ? ENGINE_SAFETY_MS : MINT_SAFETY_MS;
     const hit = this.safetyCache.get(mint);
     // A front-of-queue caller (a buy) does not settle for a cached "unknown": that is usually a
     // background read that timed out in the queue, and this caller can jump that queue.
     if (hit && Date.now() - hit.at < hit.ttl && !(front && hit.result.status === "unknown")) return hit.result;
     const pending = this.safetyInflight.get(mint);
-    // Nor does it wait on a background read already queued for the same coin.
-    if (pending && pending.priority <= priority) return pending.job;
-    pending?.abort();
-    const flight: { priority: -1 | 0 | 1 | 2; job: Promise<MintSafety>; abort: () => void } = {
+    if (pending && pending.priority <= priority) {
+      if (pending.budgetMs > budgetMs) return this.capSafety(pending.job, budgetMs);
+      if (pending.budgetMs === budgetMs) return pending.job;
+      // A shorter in-flight read stays for its caller. An engine buy does not inherit its timeout.
+    } else {
+      pending?.abort();
+    }
+    const flight: { priority: -1 | 0 | 1 | 2; budgetMs: number; job: Promise<MintSafety>; abort: () => void } = {
       priority,
+      budgetMs,
       job: Promise.resolve(SAFETY_UNKNOWN),
       abort: () => {}
     };
-    flight.job = this.readMintSafety(mint, priority, readLane, flight).finally(() => {
+    flight.job = this.readMintSafety(mint, priority, readLane, budgetMs, flight).finally(() => {
       if (this.safetyInflight.get(mint) === flight) this.safetyInflight.delete(mint);
     });
     this.safetyInflight.set(mint, flight);
     return flight.job;
   }
 
+  /** A caller with a shorter budget does not abort a longer in-flight read, and does not wait past its own budget. */
+  private capSafety(job: Promise<MintSafety>, budgetMs: number): Promise<MintSafety> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(SAFETY_UNKNOWN), budgetMs);
+      job.then(
+        (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(SAFETY_UNKNOWN);
+        }
+      );
+    });
+  }
+
   private async readMintSafety(
     mint: string,
     priority: -1 | 0 | 1 | 2,
     readLane: boolean,
+    budgetMs: number,
     flight: { job: Promise<MintSafety>; abort: () => void }
   ): Promise<MintSafety> {
     const ac = new AbortController();
     flight.abort = () => ac.abort();
-    const timer = setTimeout(() => ac.abort(), 2_500);
+    const timer = setTimeout(() => ac.abort(), budgetMs);
     let account: MintAccountBytes | null = null;
     try {
       const read = this.mintAccounts ? this.mintAccounts(mint) : this.rpcMintAccount(mint, priority, ac.signal, readLane);
@@ -5654,7 +5696,8 @@ export class Desk {
 
   /**
    * Engine live buy only. Same front-of-queue priority as a manual pre-check, then fail closed.
-   * A timeout or an RPC error skips the buy. Manual buys keep launchBundleSoon.
+   * ENGINE_LIVE_BUNDLE_MS covers two read-lane calls. A timeout or an RPC error skips the buy.
+   * Manual buys keep the 1.5s launchBundleSoon budget.
    */
   private async engineLiveBundle(mint: string, supply: bigint | null): Promise<BundleResult | null> {
     const ac = new AbortController();
@@ -5666,7 +5709,7 @@ export class Desk {
           timer = setTimeout(() => {
             ac.abort();
             resolve(null);
-          }, LIVE_BALANCE_WAIT_MS);
+          }, ENGINE_LIVE_BUNDLE_MS);
         })
       ]);
     } catch {
