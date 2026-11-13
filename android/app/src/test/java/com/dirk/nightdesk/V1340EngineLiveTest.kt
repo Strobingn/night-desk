@@ -111,3 +111,30 @@ class V1341Test {
         assertNull(Strategy.parseReplay("not json"))
     }
 }
+
+class V1344LiveWhyTest {
+    private val now = 1_800_000_000_000L
+    private fun view(live: JSONObject): StrategyView = Strategy.parse(
+        JSONObject().put("enabled", true).put("liveVariant", "launch-3").put("live", live.put("tradeUsd", 5).put("targetNetUsd", 0.3).put("open", 0))
+            .put("variants", JSONArray().put(JSONObject().put("variant", "launch-3").put("signal", "launch").put("stopPct", 0.03).put("live", true)))
+    )!!
+
+    @Test
+    fun saysWhyLiveHasNotBought() {
+        val base = { JSONObject().put("blocked", JSONObject.NULL).put("since", now - 3 * 3_600_000L).put("signals", 0).put("otherSignals", 0).put("buys", 0) }
+        assertEquals("No signal has fired since the desk started 3 h ago. Live buys only happen on a signal.", Strategy.liveStatus(view(base()), now))
+        assertEquals(
+            "No launch signal has fired since the desk started 3 h ago. 4 of the other kind fired, which this variant does not trade.",
+            Strategy.liveStatus(view(base().put("otherSignals", 4)), now)
+        )
+        val refused = base().put("signals", 2).put("lastSkip", JSONObject().put("at", now - 120_000).put("symbol", "PEPE").put("code", "LIVE_WALLET").put("message", "Wallet has 0.0100 SOL. This pump buy needs about 0.0340 SOL ($5.00 plus fees)."))
+        assertEquals("Last live attempt (2 min ago): PEPE was refused. Wallet has 0.0100 SOL. This pump buy needs about 0.0340 SOL ($5.00 plus fees).", Strategy.liveStatus(view(refused), now))
+        val capped = base().put("signals", 5).put("buys", 4).put("lastBuyAt", now - 60_000).put("spentTodayUsd", 20).put("dailyCapUsd", 20)
+        assertTrue(Strategy.liveStatus(view(capped), now).startsWith("Daily live cap reached: $20.00 of $20.00"))
+        val bought = base().put("signals", 3).put("buys", 2).put("lastBuyAt", now - 30_000).put("lastSkip", JSONObject().put("at", now - 600_000).put("symbol", "X").put("message", "old"))
+        assertEquals("2 live buys since the desk started, the last just now.", Strategy.liveStatus(view(bought), now))
+        // The desk's own block line already explains it; an older desk reports nothing.
+        assertEquals("", Strategy.liveStatus(view(base().put("blocked", "The live checklist (operatorReady) is not marked.")), now))
+        assertEquals("", Strategy.liveStatus(view(JSONObject().put("blocked", JSONObject.NULL)), now))
+    }
+}

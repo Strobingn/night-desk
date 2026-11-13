@@ -359,4 +359,44 @@ describe("engine live variant", () => {
       desk.stop();
     }
   });
+
+  it("reports why live has not bought: no signal, the wrong kind, a refusal, then a buy", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "momentum-3" });
+      expect(desk.strategyView().live).toMatchObject({ signals: 0, otherSignals: 0, buys: 0, lastSkip: null, blocked: null });
+      await signal(desk);
+      expect(desk.strategyView().live).toMatchObject({ signals: 0, otherSignals: 1, buys: 0 });
+      desk.updateStrategy({ liveVariant: "launch-3" });
+      desk.updateSettings({ liveDailyCapUsd: 5 });
+      await signal(desk, young({ mint: "EngineLive555555555555555555555555555555555", symbol: "EL5" }));
+      expect(desk.strategyView().live).toMatchObject({ signals: 1, buys: 1, lastSkip: null, spentTodayUsd: 5, dailyCapUsd: 5 });
+      expect(desk.strategyView().live?.lastBuyAt).toBeGreaterThan(0);
+      await signal(desk, young({ mint: "EngineLive666666666666666666666666666666666", symbol: "EL6" }));
+      const live = desk.strategyView().live!;
+      expect(live).toMatchObject({ signals: 2, buys: 1 });
+      expect(live.lastSkip).toMatchObject({ symbol: "EL6", code: "LIVE_DAILY_CAP" });
+      expect(live.lastSkip!.message).toMatch(/daily cap/i);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("paper engine buys do not use up the live hourly limit", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateSettings({ maxTradesPerHour: 1 });
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
+      // The paper buy for this signal is one buy this hour. Before 13.44 that alone refused the live buy.
+      await signal(desk);
+      expect(buys()).toHaveLength(1);
+      expect(desk.liveBook!.positions.has(MINT)).toBe(true);
+      // The live limit still counts live buys.
+      await signal(desk, young({ mint: "EngineLive777777777777777777777777777777777", symbol: "EL7" }));
+      expect(buys()).toHaveLength(1);
+      expect(desk.strategyView().live?.lastSkip).toMatchObject({ symbol: "EL7", code: "TRADE_RATE" });
+    } finally {
+      desk.stop();
+    }
+  });
 });

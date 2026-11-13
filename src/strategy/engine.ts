@@ -105,7 +105,22 @@ export interface ScorecardView {
   /** The variant that also trades live, or null. */
   liveVariant: string | null;
   /** Set by the desk: live engine positions open, the live size and target, and why live is not trading (null when it is). */
-  live?: { open: number; tradeUsd: number; targetNetUsd: number; blocked: string | null };
+  live?: {
+    open: number;
+    tradeUsd: number;
+    targetNetUsd: number;
+    blocked: string | null;
+    /** v13.44 since the desk started: signals the live variant could trade, signals of the other kind, live buys sent, and the last refusal. */
+    since?: number;
+    signals?: number;
+    otherSignals?: number;
+    buys?: number;
+    lastSignalAt?: number | null;
+    lastBuyAt?: number | null;
+    lastSkip?: { at: number; symbol: string; code: string; message: string } | null;
+    spentTodayUsd?: number;
+    dailyCapUsd?: number | null;
+  };
   /** Set by the desk: how much market data is saved for analysis. */
   recording?: { enabled: boolean; days: number; quotes: number; signals: number; oldestAt: number | null };
   readyTrades: number;
