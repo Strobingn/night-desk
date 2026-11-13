@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { sellImpactRefused, sellQuoteTolerance } from "../src/market/live-broker.js";
+import { pumpSellShortfall } from "../src/market/pump-live.js";
 import { POOL_DRAINED_MESSAGE, offersSellAnyway, sellExitImpactError } from "../src/market/live-submit.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { isDeadHolding, splitHoldings } from "../web/src/holdings.js";
@@ -38,6 +39,9 @@ describe("v13.50 manual sell past the exit cap", () => {
     expect(sellImpactRefused(0.04, 0.06, false)).toBe(false);
     expect(offersSellAnyway(sellExitImpactError(0.22, 0.06).message)).toBe(true);
     expect(offersSellAnyway(POOL_DRAINED_MESSAGE)).toBe(false);
+    expect(pumpSellShortfall(0.78, 1)).toBeCloseTo(0.22);
+    expect(pumpSellShortfall(1.2, 1)).toBe(0);
+    expect(sellImpactRefused(pumpSellShortfall(1.2, 1), 0.06, false)).toBe(false);
   });
 
   it("refuses a thin paper sell until Sell anyway, and never sells a drained pool", async () => {
