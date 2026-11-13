@@ -76,7 +76,10 @@ describe("trading engine on the desk", () => {
       expect(pos?.strategy).toMatchObject({ variant: "launch-1", signal: "launch", stopPct: 0.01, targetNetUsd: 3, timeLimitMs: STRATEGY.launch.timeLimitMs });
       expect(codes(desk)).toContain("SIGNAL");
       // The three launch shadow books took the same signal.
-      expect(desk.snapshot().strategy?.variants.filter((v) => v.open === 1).map((v) => v.variant).sort()).toEqual(["launch-1", "launch-3", "launch-6"]);
+      expect(desk.snapshot().strategy?.variants.filter((v) => v.open === 1 && !v.trailPct).map((v) => v.variant).sort()).toEqual(["launch-1", "launch-3", "launch-6"]);
+      expect(desk.snapshot().strategy?.variants.filter((v) => v.open === 1 && v.trailPct).map((v) => v.variant).sort()).toEqual(
+        ["launch-3-t12", "launch-3-t12f", "launch-3-t4", "launch-3-t4f", "launch-3-t8", "launch-3-t8f"]
+      );
     } finally {
       desk.stop();
     }
@@ -237,7 +240,7 @@ describe("trading engine on the desk", () => {
       const card = desk.snapshot().strategy!;
       expect(card.mainOpen).toBe(1);
       // ...while each shadow book also holds one, so the shadow sum is not the main-book count.
-      expect(card.variants.filter((v) => v.signal === "launch").map((v) => v.open)).toEqual([1, 1, 1]);
+      expect(card.variants.filter((v) => v.signal === "launch").map((v) => v.open)).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1]);
       // A scorecard reset wipes the shadow books and leaves the main book alone.
       const reset = desk.resetStrategy(true);
       expect(reset.ok && reset.strategy.mainOpen).toBe(1);
@@ -253,7 +256,9 @@ describe("trading engine on the desk", () => {
     try {
       await signal(desk);
       const snap = desk.snapshot();
-      expect(snap.strategy?.variants).toHaveLength(6);
+      expect(snap.strategy?.variants).toHaveLength(18);
+      expect(snap.strategy?.variants.slice(0, 6).map((v) => v.variant)).toEqual(["launch-1", "launch-3", "launch-6", "momentum-1", "momentum-3", "momentum-6"]);
+      expect(snap.strategy?.liveVariant).toBeNull();
       expect(snap.strategy?.note).toMatch(/best case/i);
       expect(snap.perf?.candidateToDecision?.count).toBeGreaterThanOrEqual(1);
       expect(snap.perf?.watchToSignal?.count).toBe(1);

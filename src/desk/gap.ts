@@ -72,6 +72,14 @@ export function exitLabel(code: string): string {
       return "breakeven";
     case "TIME_LIMIT":
       return "time limit";
+    case "ENGINE_TRAIL":
+      return "engine trail";
+    case "PROFIT_LOCK":
+      return "profit lock";
+    case "FADE_EXIT":
+      return "fade exit";
+    case "LIQUIDITY_DROP":
+      return "pool draining";
     default:
       return code.toLowerCase().replace(/_/g, " ");
   }

@@ -14,6 +14,11 @@ export interface TapeQuote {
   vol1hUsd: number | null;
   vol5mUsd: number | null;
   change1hPct: number | null;
+  /** Buys and sells in the last 5 minutes on the pool that priced the quote. Absent when unknown. */
+  buys5m?: number;
+  sells5m?: number;
+  /** When the volume and trade counts were last read from DexScreener. A carried-over reading keeps its old time. */
+  flowAt?: number;
   /** "dexscreener" | "pump.fun curve" | "jupiter" */
   source: string | null;
   at: number;
@@ -30,6 +35,8 @@ export interface DexTapeRow {
   change1hPct: number | null;
   liquidityUsd: number;
   dex?: string;
+  buys5m?: number;
+  sells5m?: number;
 }
 
 const finite = (v: unknown): number | null => {
@@ -56,6 +63,7 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
     priceUsd?: string | number;
     liquidity?: { usd?: number };
     volume?: { h1?: number; m5?: number };
+    txns?: { m5?: { buys?: number; sells?: number } };
     priceChange?: { h1?: number };
     dexId?: string;
   }>;
@@ -69,7 +77,8 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
       vol5mUsd: finite(row.volume?.m5),
       change1hPct: finite(row.priceChange?.h1),
       liquidityUsd: finite(row.liquidity?.usd) ?? 0,
-      dex: typeof row.dexId === "string" ? row.dexId : undefined
+      dex: typeof row.dexId === "string" ? row.dexId : undefined,
+      ...(finite(row.txns?.m5?.buys) != null && finite(row.txns?.m5?.sells) != null ? { buys5m: finite(row.txns?.m5?.buys)!, sells5m: finite(row.txns?.m5?.sells)! } : {})
     };
     const prev = out.get(mint);
     // 1h / 5m volume: the busiest pair, the same way the Scout's filter reads it.
@@ -257,7 +266,9 @@ export class TapeQuoter {
           source,
           at,
           why,
-          ...(d?.priceUsd != null && d.liquidityUsd > 0 ? { liquidityUsd: d.liquidityUsd } : {})
+          ...(d?.priceUsd != null && d.liquidityUsd > 0 ? { liquidityUsd: d.liquidityUsd } : {}),
+          ...(d?.buys5m != null && d.sells5m != null ? { buys5m: d.buys5m, sells5m: d.sells5m } : {}),
+          ...(d ? { flowAt: at } : dexFailed && prev?.flowAt != null ? { flowAt: prev.flowAt } : {})
         });
       }
       return mints.length;

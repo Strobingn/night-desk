@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,8 +43,9 @@ import com.dirk.nightdesk.VariantScore
 import java.util.Locale
 
 /**
- * v13.32 Engine tab: the trading engine's switch, sizes, the six shadow books and the
- * pipeline timings. Everything here is paper. Nothing on this screen can arm live trading.
+ * Engine tab: the trading engine's switch, sizes, the shadow books and the pipeline timings.
+ * v13.40: one variant can also trade the live wallet. That is off until the owner confirms it
+ * here, and it never bypasses the desk's live checklist, live size or daily cap.
  */
 @Composable
 fun EngineScreen(
@@ -55,6 +57,7 @@ fun EngineScreen(
     mainOpen: Int = view?.mainOpen?.coerceAtLeast(0) ?: 0
 ) {
     var askReset by remember { mutableStateOf(false) }
+    var askLive by remember { mutableStateOf<VariantScore?>(null) }
     // A tap steps from the value on screen, not from the last snapshot, so quick taps add up.
     // The pending value is dropped once the desk reports it, or after 6 s if it never does.
     var pendingTrade by remember { mutableStateOf<Double?>(null) }
@@ -76,7 +79,10 @@ fun EngineScreen(
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Engine", color = P.ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
-                if (view != null) Chip(if (view.enabled) "ON · PAPER" else "OFF", if (view.enabled) P.onUp else P.muted, if (view.enabled) P.up else P.card3, size = 11)
+                if (view != null) {
+                    val liveOn = view.enabled && view.liveVariant.isNotBlank()
+                    Chip(if (liveOn) "ON · LIVE" else if (view.enabled) "ON · PAPER" else "OFF", if (liveOn) P.onDown else if (view.enabled) P.onUp else P.muted, if (liveOn) P.down else if (view.enabled) P.up else P.card3, size = 11)
+                }
             }
         }
         if (view == null) {
@@ -114,6 +120,37 @@ fun EngineScreen(
                 }
             }
         }
+        if (view.liveSupported) {
+            item {
+                val liveRow = view.variants.firstOrNull { it.live }
+                val top = Strategy.topEarner(view)
+                Section("Live money", trailing = if (liveRow != null) "ON" else "off", padded = true) {
+                    if (liveRow != null) {
+                        Text(Strategy.label(liveRow), color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Trading real money: $" + "%.2f".format(Locale.US, view.liveTradeUsd) + " a trade, take-profit about $" + "%.2f".format(Locale.US, view.liveTargetUsd) + " net. ${view.liveOpen} open now.",
+                            color = P.muted, fontSize = 12.sp, lineHeight = 16.sp
+                        )
+                        if (view.liveBlocked.isNotBlank()) Text("Not buying: ${view.liveBlocked}", color = P.down, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
+                        TextButton(onClick = { onStrategy(mapOf("liveVariant" to null)) }, modifier = Modifier.testTag("engine-live-off")) {
+                            Text("Turn live off", color = P.down, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        Text(
+                            if (top != null) "Top earner on paper: ${Strategy.label(top)}, net ${Strategy.signedUsd(top.netUsd)} over ${top.trades} trades."
+                            else "No variant has closed a trade in profit yet. You can still pick one with Go live on its row.",
+                            color = P.ink, fontSize = 13.sp, lineHeight = 17.sp
+                        )
+                        Text("Off: the engine trades paper only.", color = P.muted, fontSize = 12.sp)
+                        if (top != null) {
+                            TextButton(onClick = { askLive = top }, modifier = Modifier.testTag("engine-live-top")) {
+                                Text("Go live with the top earner", color = P.down, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         item {
             Section("Sizing", padded = true) {
                 val trade = pendingTrade ?: view.tradeUsd
@@ -134,7 +171,7 @@ fun EngineScreen(
                 Stepper("Trade size", "$" + "%.0f".format(Locale.US, trade), onMinus = { setTrade(-5.0) }, onPlus = { setTrade(5.0) })
                 Stepper("Take-profit, net", "$" + "%.2f".format(Locale.US, target), onMinus = { setTarget(-0.5) }, onPlus = { setTarget(0.5) })
                 Stepper("Max open", "$open", onMinus = { setOpen(-1) }, onPlus = { setOpen(1) })
-                Text("Paper only. New engine buys pause once the paper book is $10 down on the day.", color = P.muted, fontSize = 12.sp)
+                Text("These are the paper sizes. New paper buys pause once the paper book is $10 down on the day. Live uses the live trade size from Settings.", color = P.muted, fontSize = 12.sp)
             }
         }
         item {
@@ -149,7 +186,7 @@ fun EngineScreen(
                     trailing = "${rows.sumOf { it.trades }} trades"
                 ) {
                     rows.forEachIndexed { i, row ->
-                        VariantRow(row) { onStrategy(mapOf("active" to mapOf(row.signal to row.variant))) }
+                        VariantRow(row, onLive = if (view.liveSupported && !row.live) ({ askLive = row }) else null) { onStrategy(mapOf("active" to mapOf(row.signal to row.variant))) }
                         if (i < rows.lastIndex) RowDivider()
                     }
                 }
@@ -157,7 +194,7 @@ fun EngineScreen(
         }
         item {
             Text(
-                "In use: the stop the main paper book trades with. Ready: ${view.readyTrades}+ trades with a net profit; it is information and arms nothing. " + view.note,
+                "In use: the rules the main paper book trades with. Trail: at the target the trade is not sold; the stop follows the high. Fade: also sells when volume dries up, sellers lead, the price stalls or the pool drains. Ready: ${view.readyTrades}+ trades with a net profit; it is information and arms nothing. " + view.note,
                 color = P.muted,
                 fontSize = 12.sp,
                 lineHeight = 16.sp
@@ -179,6 +216,18 @@ fun EngineScreen(
             TextButton(onClick = { askReset = true }) { Text("Reset scorecard", color = P.down, fontWeight = FontWeight.SemiBold) }
         }
     }
+    askLive?.let { row ->
+        AlertDialog(
+            onDismissRequest = { askLive = null },
+            containerColor = P.card,
+            titleContentColor = P.ink,
+            textContentColor = P.ink,
+            title = { Text("Trade real money?") },
+            text = { Text(Strategy.liveWarning(view ?: return@AlertDialog, row)) },
+            confirmButton = { TextButton(onClick = { askLive = null; onStrategy(mapOf("liveVariant" to row.variant)) }, modifier = Modifier.testTag("engine-live-confirm")) { Text("Go live", color = P.down, fontWeight = FontWeight.Bold) } },
+            dismissButton = { TextButton(onClick = { askLive = null }) { Text("Cancel", color = P.muted) } }
+        )
+    }
     if (askReset) {
         AlertDialog(
             onDismissRequest = { askReset = false },
@@ -194,15 +243,17 @@ fun EngineScreen(
 }
 
 @Composable
-private fun VariantRow(row: VariantScore, onUse: () -> Unit) {
+private fun VariantRow(row: VariantScore, onLive: (() -> Unit)? = null, onUse: () -> Unit) {
     val tint = if (row.trades <= 0) P.muted else pnlTint(row.netUsd)
     Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(if (row.active) P.accent else P.line))
-            Text("${"%.0f".format(Locale.US, row.stopPct * 100)}% stop", color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text(Strategy.rules(row), color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            if (row.live) Chip("LIVE", P.onDown, P.down, size = 10)
             if (row.ready) Chip("Ready", P.onUp, P.up, size = 10)
             if (row.active) Chip("In use", P.accent, P.accent.copy(alpha = 0.16f), size = 10)
             else Text("Use", color = P.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable(onClick = onUse).padding(horizontal = 6.dp, vertical = 4.dp))
+            if (onLive != null) Text("Go live", color = P.down, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable(onClick = onLive).padding(horizontal = 6.dp, vertical = 4.dp))
         }
         Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Stat("Net", if (row.trades > 0) Strategy.signedUsd(row.netUsd) else "—", tint, big = true)

@@ -62,7 +62,14 @@ export type ReasonCode =
   | "TAKE_PROFIT"
   | "STRATEGY_STOP"
   | "BREAKEVEN_STOP"
-  | "TIME_LIMIT";
+  | "TIME_LIMIT"
+  /** Trailing engine variants: trail under the high, profit lock, fading run, pool draining. */
+  | "ENGINE_TRAIL"
+  | "PROFIT_LOCK"
+  | "FADE_EXIT"
+  | "LIQUIDITY_DROP"
+  /** Engine live buy skipped: no live variant armed, wallet not armed, or the live loss pause. */
+  | "ENGINE_LIVE_PAUSED";
 
 export interface Rejection {
   code: ReasonCode;
