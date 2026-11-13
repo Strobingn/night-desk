@@ -215,4 +215,45 @@ describe("v13.52 fast sweep in the scout", () => {
     expect(h.dexCalls).toHaveLength(0);
     h.scout.stop();
   });
+  it("does not wave a coin through when its age is the missing number", async () => {
+    const mint = mintOf();
+    const aged = { ...thresholds, maxAgeSeconds: 3_600 };
+    const calls: string[] = [];
+    const scout = new Scout({
+      bus: new EventBus<DeskEvents>(),
+      feedMode: "live",
+      demo: false,
+      rpcUrl: RPC,
+      pumpWsUrl: "ws://unused",
+      fetchImpl: (async (input: unknown) => {
+        const url = String(input);
+        calls.push(url);
+        // Volume clears, depth is there, but no pairCreatedAt.
+        if (url.startsWith(DEX)) return Response.json([{ baseToken: { address: mint }, priceUsd: "0.00002", volume: { h1: 50_000 }, liquidity: { usd: 9_000 } }]);
+        return Response.json({ pairs: [] });
+      }) as typeof fetch,
+      prefilter: () => aged,
+      killMemory: new KillMemory(),
+      onStatus: () => {}
+    });
+    // A list sighting, not a Pump create: the desk did not see it born.
+    scout.ingest(create(mint, { devWallet: undefined, source: "raydium" }), "jupiter");
+    await scout.sweepTick(Date.now() + 11_000);
+    expect(scout.prefilterView().sweep).toMatchObject({ promoted: 0, watching: 1 });
+    expect(calls.every((url) => url.startsWith(DEX))).toBe(true);
+    scout.stop();
+  });
+
+  it("remembers a hard kill the sweep finds on a coin that was only soft-killed", async () => {
+    const mint = mintOf();
+    // Price a thousand times the first print: a decimals-scale jump, a hard kill.
+    const h = harness(new Map([[mint, { vol: 60_000, liq: 9_000, price: 20 }]]));
+    h.scout.ingest(create(mint, { devWallet: undefined, volume1hUsd: 300, liquidityUsd: 9_000, priceUsd: 0.00002 }), "dexscreener");
+    expect(h.memory.isHard(mint)).toBe(false);
+    await h.scout.sweepTick(Date.now() + 11_000);
+    expect(h.sweep()).toMatchObject({ promoted: 0, watching: 0 });
+    expect(h.memory.isHard(mint)).toBe(true);
+    expect(h.kills).toHaveLength(1); // counted once
+    h.scout.stop();
+  });
 });

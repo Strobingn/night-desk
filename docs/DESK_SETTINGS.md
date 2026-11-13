@@ -308,9 +308,9 @@ Why it was slow. A Pump stream create carries a name and a creator and no number
 What the sweep does:
 
 - Every parked coin is looked up on DexScreener `/tokens/v1/solana/{mints}`, 30 coins a request, at 10 s, 25 s, 45 s, 75 s, 2, 3, 5, 8 and 12 minutes after it was parked (`SWEEP_LOOKS_MS`). Youngest coins go first.
-- Parked means: a sighting the pre-filter is waiting on, or one it killed only for `VOLUME_TOO_LOW`, `LIQUIDITY_TOO_THIN` or `TOKEN_TOO_NEW`. A hard kill (junk name, unusable price, ban, too old, market cap) is never swept.
+- Parked means: a sighting the pre-filter is waiting on, or one it killed only for `VOLUME_TOO_LOW`, `LIQUIDITY_TOO_THIN` or `TOKEN_TOO_NEW`. A hard kill (junk name, unusable price, ban, too old, market cap) is never swept. A hard failure the sweep finds on a soft-killed coin is remembered as a hard kill.
 - When a look shows one-hour volume at or above the existing minimum and nothing else fails, the coin goes to enrich at once. It does not wait out the five-minute soft-kill backoff. This spends the coin's one soft recheck.
-- DexScreener prints no depth for some curve pairs. If volume clears and depth is the only number missing, the coin is promoted and enrich reads depth from the chain. Filter still applies the liquidity floor.
+- DexScreener prints no depth for some curve pairs. If volume clears and depth is the only number missing, the coin is promoted and enrich reads depth from the chain. Filter still applies the liquidity floor. A missing age or market cap, when those limits are set, is not waved through: that coin waits for a look that has it.
 - A coin that is still quiet stays parked. Only the last look kills it, once.
 - A refused or timed-out request decides nothing. The looks go back and the sweep pauses 15 s.
 

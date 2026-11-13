@@ -148,6 +148,9 @@ export interface ScoutOptions {
   onPumpFrame?: (text: string) => void;
 }
 
+/** Kills a coin can grow out of. Everything else is a hard kill. */
+const SOFT_KILL_CODES = new Set(["VOLUME_TOO_LOW", "LIQUIDITY_TOO_THIN", "TOKEN_TOO_NEW"]);
+
 /**
  * Scout is the only publisher of `scout.candidate`.
  * Live sightings that survive the free-feed pre-filter are enriched, then handed to Filter.
@@ -512,19 +515,28 @@ export class Scout {
     item.raw = fresh;
     if (row) this.opts.onTape?.(draftFromRaw(fresh, "pending"));
     const decision = prefilterFree(fresh, thresholds, Date.now(), slot.price);
-    const volumeClears = typeof fresh.volume1hUsd === "number" && fresh.volume1hUsd >= thresholds.minVolume1hUsd;
     if (decision.action === "kill") {
       if (decision.hard) {
         if (slot.state !== "killed") this.finishPrefilterKill(fresh, decision.reasons, true, true);
+        // Already counted as a soft kill. The memory still has to learn it is now a hard one,
+        // or a later list print could bring the coin back. A ban expires and is not remembered.
+        else if (decision.reasons.some((reason) => reason.code !== "BANNED" && !SOFT_KILL_CODES.has(reason.code))) {
+          this.opts.killMemory?.note(mint, true, Date.now(), fresh.volume1hUsd ?? 0);
+        }
         this.sweep.finish(mint);
         return;
       }
       if (last) this.sweepExpire(fresh, slot, decision.reasons);
       return;
     }
-    // Pass, or volume clears and only a number DexScreener does not print is missing
-    // (curve depth). Enrich reads that number from the chain, and Filter still gates on it.
-    if (decision.action === "pass" || volumeClears) {
+    // Pass, or depth is the one number missing: DexScreener prints none for some curve pairs.
+    // Enrich reads it from the chain and Filter still gates on it. A missing age or market cap
+    // is not waved through; that coin waits for a look that has it.
+    const depthOnly =
+      decision.action === "wait" &&
+      decision.missing === "liquidityUsd" &&
+      prefilterFree({ ...fresh, liquidityUsd: thresholds.minLiquidityUsd }, thresholds, Date.now(), slot.price).action === "pass";
+    if (decision.action === "pass" || depthOnly) {
       this.promote(fresh, slot);
       return;
     }
