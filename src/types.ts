@@ -68,8 +68,12 @@ export type ReasonCode =
   | "PROFIT_LOCK"
   | "FADE_EXIT"
   | "LIQUIDITY_DROP"
-  /** Engine live buy skipped: no live variant armed, wallet not armed, or the live loss pause. */
-  | "ENGINE_LIVE_PAUSED";
+  /** Engine live buy skipped because the engine, the wallet, the checklist, or the live-loss pause blocked it. */
+  | "ENGINE_LIVE_PAUSED"
+  /** Engine live buy skipped for a reason other than a pause: safety, a flagged bundle, already held, or the open limit. */
+  | "ENGINE_LIVE_SKIP"
+  /** Engine live buy skipped because the launch-bundle check timed out or failed. Nothing was sent. */
+  | "LAUNCH_BUNDLE_UNVERIFIED";
 
 export interface Rejection {
   code: ReasonCode;

@@ -180,13 +180,14 @@ function execLaneId(id: string): string | null {
   return null;
 }
 
-export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown): BucketSpec | null {
+export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown, readLane = false): BucketSpec | null {
   if (!spec) return null;
   const pri = priority ?? 1;
   const execId = execLaneId(spec.id);
   if (!execId) return spec;
-  // Safety and bundle reads share the existing read budget at the lowest priority.
-  if (pri === 2 && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
+  // Priority 2, and an engine read that asked to stay here at priority -1, share the read budget.
+  // A plain priority -1 getAccountInfo (manual buy) still uses the exec lane below.
+  if ((pri === 2 || (readLane && pri === -1)) && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
   // Wallet balance (-1) and mark polls (0) stay on the read lane. Higher priorities are the exec lane.
   if (pri > 0) return BY_ID.get(execId)!;
   if (typeof body === "string" && !SOLANA_POLL_METHODS.has(rpcMethod(body) ?? "")) return BY_ID.get(execId)!;
@@ -265,6 +266,8 @@ interface Waiter {
   seq: number;
   resolve: () => void;
   reject: (err: Error) => void;
+  /** Set once this waiter is granted a token or dropped, so a late abort cannot settle it twice. */
+  settled: boolean;
   /** Set for priority-0 Helius polls so a newer read of the same accounts replaces this one. */
   key?: string;
 }
@@ -337,6 +340,13 @@ export class RateLimitError extends Error {
   }
 }
 
+/** A caller gave up while its request was still waiting for a token. The waiter is not sent. */
+function abortedError(): Error {
+  const err = new Error("aborted");
+  err.name = "AbortError";
+  return err;
+}
+
 export class NetLimiter {
   private readonly buckets = new Map<string, Bucket>();
   private readonly inflight = new Map<string, Promise<CachedResponse>>();
@@ -386,13 +396,38 @@ export class NetLimiter {
     return b;
   }
 
-  /** Wait for a token in this bucket. Lower priority number goes first. */
-  acquire(spec: BucketSpec, priority: Priority = 1, coalesceKey?: string): Promise<void> {
+  /** Wait for a token in this bucket. Lower priority number goes first. An aborted signal drops a waiter that is still queued. */
+  acquire(spec: BucketSpec, priority: Priority = 1, coalesceKey?: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(abortedError());
     const b = this.bucket(spec);
     return new Promise<void>((resolve, reject) => {
       if (spec.id === "helius" && priority === 0) {
         this.shedHeliusPriority0(b, coalesceKey);
       }
+      const waiter: Waiter = {
+        priority,
+        seq: this.seq++,
+        key: coalesceKey,
+        settled: false,
+        resolve: () => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        reject: (err: Error) => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          signal?.removeEventListener("abort", onAbort);
+          reject(err);
+        }
+      };
+      const onAbort = () => {
+        if (waiter.settled) return;
+        const idx = b.queue.indexOf(waiter);
+        if (idx >= 0) b.queue.splice(idx, 1);
+        waiter.reject(abortedError());
+      };
       if (b.queue.length >= MAX_QUEUE) {
         // Shed the newest lowest-priority waiter so marks and lookups never wait behind a pile.
         const worst = b.queue.reduce((acc, w) => (w.priority > acc.priority || (w.priority === acc.priority && w.seq > acc.seq) ? w : acc));
@@ -403,7 +438,8 @@ export class NetLimiter {
         b.queue.splice(b.queue.indexOf(worst), 1);
         worst.reject(new RateLimitError(`${spec.id} budget queue full`));
       }
-      b.queue.push({ priority, seq: this.seq++, resolve, reject, key: coalesceKey });
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      b.queue.push(waiter);
       b.queue.sort((a, c) => a.priority - c.priority || a.seq - c.seq);
       this.pump(b);
     });
@@ -619,12 +655,12 @@ export class NetLimiter {
    * Never throws on 429 itself: the 429 Response is returned after the bucket is paused,
    * so callers keep their own error handling. GETs retry once after the pause when asked.
    */
-  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number }): Promise<Response> => {
+  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number; ndReadLane?: boolean }): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const spec = this.specFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
-    const { ndPriority: priority, retry429, timeoutMs, ...rest } = init ?? {};
-    const lane = rpcLane(spec, priority, rest.body);
+    const { ndPriority: priority, retry429, timeoutMs, ndReadLane, ...rest } = init ?? {};
+    const lane = rpcLane(spec, priority, rest.body, ndReadLane === true);
     if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
     const rpcRead = method === "POST" && typeof rest.body === "string" && (lane.id === "solana:public" || lane.id === "helius") && rpcReadMethod(rest.body) != null;
@@ -642,7 +678,10 @@ export class NetLimiter {
         return toResponse(await shared);
       }
     }
-    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000);
+    // A shared GET keeps its own transport. One caller's abort must not fail everyone joined to it.
+    // A request that is not shared (Helius cache is 0) still drops its own queued waiter on abort.
+    const shareable = (isGet || rpcRead) && lane.cacheMs > 0;
+    const run = this.send(lane, url, rest, priority ?? 1, retry429 ?? isGet, timeoutMs ?? 8_000, shareable ? undefined : rest.signal ?? undefined);
     if (isGet || rpcRead) {
       this.inflight.set(key, run);
       try {
@@ -667,7 +706,7 @@ export class NetLimiter {
     return ((input: string | URL | Request, init?: RequestInit) => this.fetch(input, { ...(init ?? {}), ndPriority: priority })) as typeof fetch;
   }
 
-  private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number): Promise<CachedResponse> {
+  private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number, callerSignal?: AbortSignal): Promise<CachedResponse> {
     for (let attempt = 0; ; attempt += 1) {
       // A paused enrich host returns at once so the sighting stays pending.
       // This lane is not Helius, so a wallet or mark read is not held here.
@@ -686,8 +725,10 @@ export class NetLimiter {
         return { status: 429, statusText: "Desk backing off", headers: [["x-nd-local", "1"]], body: "" };
       }
       const coalesceKey = spec.id === "helius" && priority === 0 ? heliusPollKey(init.body) ?? undefined : undefined;
-      await this.acquire(spec, priority, coalesceKey);
+      await this.acquire(spec, priority, coalesceKey, callerSignal);
       const { signal: _ignored, ...rest } = init;
+      // The caller signal only removes a waiter that has not been sent. It does not abort the socket,
+      // so a shared in-flight GET is not cancelled when one subscriber gives up.
       const res = await this.baseFetch(url, { ...rest, signal: AbortSignal.timeout(timeoutMs) });
       const cached: CachedResponse = {
         status: res.status,
