@@ -271,6 +271,12 @@ const MINT_SAFETY_MS = 2_500;
 const ENGINE_SAFETY_MS = 8_000;
 /** Engine live launch-bundle check. Two read-lane calls at 10/min, then fail closed. Manual buys stay on launchBundleSoon. */
 const ENGINE_LIVE_BUNDLE_MS = 15_000;
+/**
+ * Most launch-slot transactions the bundle check reads one by one, in a single batched request.
+ * Above this it reads the whole slot. Ten matches the smallest Helius plan's 10 requests a second,
+ * in case each call in a batch is counted on its own.
+ */
+const BUNDLE_TX_BATCH_MAX = 10;
 
 /** Why an engine live bundle check did not return a verdict. Timeout and RPC error are logged apart. */
 interface BundleFailure {
@@ -5786,11 +5792,15 @@ export class Desk {
     return result;
   }
 
+  /** Set once the RPC has refused a batched request. The bundle check then reads the slot directly. */
+  private bundleBatchOff = false;
+
   private async rpcBundle(mint: string, supply: bigint | null, priority: -1 | 0 | 1 | 2 = 2, signal?: AbortSignal): Promise<BundleResult | BundleFailure | null> {
     if (supply == null || supply <= 0n) return null;
     const rpc = (this.config.walletRpcUrl || this.config.rpcUrl || "").trim();
     if (!rpc) return null;
     const front = priority === -1;
+    let upper: BundleResult | null = null;
     try {
       const sigBody = JSON.stringify({
         jsonrpc: "2.0",
@@ -5809,12 +5819,54 @@ export class Desk {
       });
       if (signal?.aborted) return { reason: "timeout" };
       if (!sigRes.ok) return { reason: "rpc" };
-      const sigJson = (await sigRes.json()) as { error?: unknown; result?: Array<{ slot?: number }> };
+      const sigJson = (await sigRes.json()) as { error?: unknown; result?: Array<{ slot?: number; signature?: string; err?: unknown }> };
       if (sigJson.error) return { reason: "rpc" };
       const rows = sigJson.result ?? [];
       if (!rows.length || rows.length >= 1000) return null;
       const slot = rows[rows.length - 1]?.slot;
       if (slot == null) return null;
+      // Every launch-slot buy of this coin names the mint, so it is already in the list above.
+      // Reading just those transactions is a few kilobytes. The whole slot is megabytes.
+      // Failed transactions moved no tokens and are left out.
+      const launchRows = rows.filter((row) => row.slot === slot);
+      const launchSigs = launchRows.filter((row) => row.err == null && typeof row.signature === "string").map((row) => row.signature!);
+      const listed = launchRows.every((row) => typeof row.signature === "string");
+      // A launch-slot transfer that moves the coin between wallets without naming the mint is not
+      // in that list, so the batch can count a share too high, never too low. A clean batch is
+      // therefore final. A flagged one is checked against the whole slot before it is believed.
+      if (!this.bundleBatchOff && listed && launchSigs.length > 0 && launchSigs.length <= BUNDLE_TX_BATCH_MAX) {
+        const txBody = JSON.stringify(
+          launchSigs.map((signature, id) => ({
+            jsonrpc: "2.0",
+            id,
+            method: "getTransaction",
+            params: [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]
+          }))
+        );
+        const txRes = await this.net.fetch(rpc, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: txBody,
+          signal,
+          ndPriority: priority,
+          ndReadLane: front,
+          ...(front ? { timeoutMs: ENGINE_LIVE_BUNDLE_MS } : {})
+        });
+        if (signal?.aborted) return { reason: "timeout" };
+        const txJson = txRes.ok ? ((await txRes.json().catch(() => null)) as unknown) : null;
+        // An RPC that answers a batch with a single error object does not take batches. Stop
+        // asking, so every later check is two requests again and not three.
+        if (!Array.isArray(txJson) && (txRes.status === 400 || (txRes.ok && txJson != null))) this.bundleBatchOff = true;
+        const txs = Array.isArray(txJson) ? txJson.map((row) => (row as { result?: SlotTransaction | null })?.result ?? null) : [];
+        // All of them or none: a missing transaction could be the bundled buy.
+        if (txs.length === launchSigs.length && txs.every((tx) => tx != null)) {
+          const activity = slotActivity(mint, txs as SlotTransaction[]);
+          const share = bundleShare({ supply, deltas: activity.deltas, excluded: pumpExcluded(mint), funders: activity.funders });
+          if (!share.flagged) return share;
+          upper = share;
+        }
+        // Flagged, refused or incomplete: fall through to the whole-slot read.
+      }
       // Accounts, not full transactions: token balances and account keys are enough to
       // measure the launch share. Rewards and decoded instructions stay off so the slot is small.
       const blockBody = JSON.stringify({
@@ -5832,14 +5884,16 @@ export class Desk {
         ndReadLane: front,
         ...(front ? { timeoutMs: ENGINE_LIVE_BUNDLE_MS } : {})
       });
-      if (signal?.aborted) return { reason: "timeout" };
-      if (!blockRes.ok) return { reason: "rpc" };
+      // With no slot read to check it against, a flagged batch stands: it errs toward not buying.
+      if (signal?.aborted) return upper ?? { reason: "timeout" };
+      if (!blockRes.ok) return upper ?? { reason: "rpc" };
       const blockJson = (await blockRes.json()) as { error?: unknown; result?: { transactions?: SlotTransaction[] } | null };
-      if (blockJson.error || blockJson.result == null) return { reason: "rpc" };
+      if (blockJson.error || blockJson.result == null) return upper ?? { reason: "rpc" };
       const txs = blockJson.result.transactions ?? [];
       const activity = slotActivity(mint, txs);
       return bundleShare({ supply, deltas: activity.deltas, excluded: pumpExcluded(mint), funders: activity.funders });
     } catch (err) {
+      if (upper) return upper;
       if (signal?.aborted || isAbortError(err)) return { reason: "timeout" };
       return { reason: "rpc" };
     }

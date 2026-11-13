@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-13 (13.48). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-13 (13.49). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -279,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.48** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.48, `versionCode` 1348, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.49** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.49, `versionCode` 1349, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -298,6 +298,18 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.49 notes
+
+The launch-bundle check no longer downloads a whole block when it does not have to. No setting changed, and the bundle rule and its thresholds are the same.
+
+- The first call (`getSignaturesForAddress` on the mint) already lists every transaction that touched the coin. The ones in the launch slot are the only ones the check needs.
+- Those are now read in one batched `getTransaction` request, at most 10 (`BUNDLE_TX_BATCH_MAX`). That is a few kilobytes, where the slot read is megabytes. Failed transactions are skipped: they moved no tokens.
+- Full transactions carry the SOL transfers again, so the same-funder grouping the 13.48 accounts-only block read could not see is back on this path.
+- The whole-slot `getBlock` (accounts only, as in 13.48) is still used when more than 10 transactions launched with the coin, or when the batch is refused or comes back with any transaction missing. A missing one could be the bundled buy, so a partial answer is never used.
+- The batch can miss a launch-slot transfer that moves the coin between wallets without naming the mint. That can only make the share look higher, never lower. So a clean batch is final, and a flagged batch is checked against the whole slot before it is believed. If that slot read fails, the flag stands and the coin is not bought.
+- If the RPC refuses a batched request, the desk stops batching until it restarts and reads the slot directly, so the refusal costs one extra request once and not on every check.
+- Still two Helius requests for a buy (three on the fallback), at priority -1 on the read lane for the live engine. A batch is one request to the desk's limiter. Helius may count each call in it, which is why the batch stops at 10.
 
 ## 13.48 notes
 
