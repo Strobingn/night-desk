@@ -42,7 +42,7 @@ describe("13.41 market recorder", () => {
     expect(out.rows[0]).toMatchObject({ mint: "MintR", symbol: "REC", priceUsd: 1, buys5m: 30, sells5m: 20, source: "dexscreener" });
     expect(rec.quotesBetween({ mint: "Other" }).rows).toHaveLength(1);
     expect(rec.quotesBetween({ limit: 2 })).toMatchObject({ more: true });
-    expect(rec.stats().oldestAt).toBe(1_000);
+    return rec.latestQuotes(0, 3).then((rows) => expect(rows.map((r) => r.t)).toEqual([8_000, 9_000, 40_000]));
   });
 
   it("is off at 0 days and reads the env value safely", () => {
@@ -120,6 +120,51 @@ describe("13.41 replay on saved data", () => {
     expect(out.rows.filter((r) => r.signal === "momentum").every((r) => r.trades === 0)).toBe(true);
     expect(out.note).toMatch(/under the 200/);
     expect(rulesLabel({ stopPct: 0.03, trailPct: 0.08, lockShare: 0.5, fade: true })).toBe("3% stop, 8% trail, lock 50% of target, fade");
+  });
+
+  it("takes a repeat signal for every rule set, even while a slow rule still holds the coin", async () => {
+    const t0 = 1_700_000_000_000;
+    // First signal runs and keeps trailing; the coin signals again 31 minutes later.
+    const quotes = [
+      q(t0 + 10_000, 1.09),
+      q(t0 + 20_000, 1.2),
+      q(t0 + 31 * 60_000 + 10_000, 1.3),
+      q(t0 + 31 * 60_000 + 20_000, 1.4),
+      q(t0 + 31 * 60_000 + 30_000, 1.0)
+    ];
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000 };
+    const signals = [
+      { t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail },
+      { t: t0 + 31 * 60_000, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1.25, detail }
+    ];
+    const out = await replaySaved(quotes, signals, { yieldEvery: 1 });
+    const launch = out.rows.filter((r) => r.signal === "launch");
+    expect(launch.every((r) => r.trades + r.open === 2)).toBe(true);
+    expect(launch.find((r) => r.label === "3% stop, sell at target")!.trades).toBe(2);
+    expect(launch.find((r) => r.label === "3% stop, 12% trail, lock breakeven")!.trades).toBe(2);
+  });
+
+  it("opens a signal on its own firing quote, keeps late signals open, and honours a stale flow time", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000 };
+    // Signal stamped with its firing quote's time: the trade opens on that quote and rides the next one.
+    const out = await replaySaved([q(t0, 1), q(t0 + 10_000, 1.09)], [
+      { t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail },
+      { t: t0 + 60_000, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1.1, detail }
+    ]);
+    const fixed = out.rows.find((r) => r.signal === "launch" && r.label === "3% stop, sell at target")!;
+    expect(fixed).toMatchObject({ trades: 1, open: 1 });
+    // Volume carried over an outage (old flowAt) must not fire a volume fade in the replay.
+    const run = (flowAt: number | null) =>
+      replaySaved(
+        [q(t0 + 10_000, 1.09), q(t0 + 20_000, 1.1), q(t0 + 30_000, 1.11, { vol5mUsd: 1_000, flowAt }), q(t0 + 40_000, 1.5), q(t0 + 50_000, 1.0)],
+        [{ t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail }]
+      ).then((r) => r.rows.find((row) => row.signal === "launch" && row.label === "3% stop, 12% trail, lock breakeven, fade")!);
+    const fresh = await run(null);
+    const stale = await run(t0 - 600_000);
+    // Fresh reading: the fade sells at 1.11. Stale reading: no fade, so the trade rides on to the later prices.
+    expect(fresh.netUsd).toBeGreaterThan(4);
+    expect(stale.netUsd).toBeLessThan(0);
   });
 
   it("says so when there is nothing to replay", async () => {

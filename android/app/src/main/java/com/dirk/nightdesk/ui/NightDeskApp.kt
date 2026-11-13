@@ -558,7 +558,7 @@ fun NightDeskApp(desk: DeskRepository) {
                     onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } },
                     onReset = { scope.launch { desk.resetStrategy() } },
                     mainOpen = snap?.strategy?.let { com.dirk.nightdesk.Strategy.mainOpen(it, snap?.positions.orEmpty()) } ?: 0,
-                    onReplay = { desk.pumpGet("/api/market/replay?days=3") }
+                    onReplay = { desk.marketReplay(3) }
                 )
                 else -> when (settingsSub) {
                     "link" -> SubScreen("Link", onBack = { settingsSub = null }) { LinkScreen(desk) }

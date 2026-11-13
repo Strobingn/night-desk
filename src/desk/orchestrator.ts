@@ -1364,7 +1364,8 @@ export class Desk {
         change1hPct: q.change1hPct,
         buys5m: q.buys5m ?? null,
         sells5m: q.sells5m ?? null,
-        source: q.source ?? null
+        source: q.source ?? null,
+        flowAt: q.flowAt ?? null
       });
       // A position is marked only by the feed that priced its entry, so a signal must come from that feed too.
       const anchor = this.strategyFeed.get(mint);
@@ -1452,7 +1453,8 @@ export class Desk {
     const watchedAt = this.watchAt.get(mint);
     if (watchedAt != null) this.latency.record("watchToSignal", now - watchedAt);
     this.recorder.signal({
-      t: now,
+      // The firing quote's own time, so a replay opens the trade on that quote and not the one after.
+      t: quote.at,
       mint,
       symbol: fired.token.symbol,
       kind: fired.signal.signal,
@@ -1463,7 +1465,8 @@ export class Desk {
         vol5mUsd: quote.vol5mUsd,
         vol1hUsd: quote.vol1hUsd,
         change1hPct: quote.change1hPct,
-        liquidityUsd: quote.liquidityUsd ?? null,
+        // The depth the engine actually sized against: the quote's, else the watched coin's.
+        liquidityUsd: fired.token.liquidityUsd,
         buys5m: quote.buys5m ?? null,
         sells5m: quote.sells5m ?? null,
         ageSeconds: fired.token.ageSeconds,
@@ -4583,10 +4586,12 @@ export class Desk {
     if (this.replayRunning) return this.replayRunning;
     const span = Math.max(1, Math.min(this.recorder.days || 1, Math.floor(days)));
     const since = Date.now() - span * 86_400_000;
-    const quotes = this.recorder.latestQuotes(since);
-    const from = quotes.length ? quotes[0]!.t : since;
-    const signals = this.recorder.signalsBetween({ since: from, limit: 50_000 });
-    const run = replaySaved(quotes, signals, { targetNetUsd: this.strategy.settings.targetNetUsd, tradeUsd: this.strategy.settings.tradeUsd }).finally(() => {
+    const run = (async () => {
+      const quotes = await this.recorder.latestQuotes(since);
+      const from = quotes.length ? quotes[0]!.t : since;
+      const signals = this.recorder.signalsBetween({ since: from, limit: 50_000 });
+      return replaySaved(quotes, signals, { targetNetUsd: this.strategy.settings.targetNetUsd, tradeUsd: this.strategy.settings.tradeUsd });
+    })().finally(() => {
       this.replayRunning = null;
     });
     this.replayRunning = run;

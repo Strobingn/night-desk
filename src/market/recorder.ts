@@ -13,6 +13,8 @@ export interface RecordedQuote {
   buys5m: number | null;
   sells5m: number | null;
   source: string | null;
+  /** When volume and trade counts were actually read. Null: the quote's own time. A reading carried over an outage keeps its old time. */
+  flowAt?: number | null;
 }
 
 /** One saved engine signal, with the numbers that fired it. */
@@ -46,7 +48,8 @@ export const RECORDER = {
   pruneEveryMs: 3_600_000,
   exportMax: 50_000,
   /** The most quotes one replay reads. */
-  replayMax: 250_000
+  replayMax: 250_000,
+  replayPage: 4_000
 } as const;
 
 export function recordDays(raw: string | undefined): number {
@@ -87,7 +90,8 @@ export class MarketRecorder {
         chg1h REAL,
         buys5m INTEGER,
         sells5m INTEGER,
-        src TEXT
+        src TEXT,
+        flow_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS market_quotes_ts ON market_quotes(ts);
       CREATE INDEX IF NOT EXISTS market_quotes_mint_ts ON market_quotes(mint, ts);
@@ -103,7 +107,7 @@ export class MarketRecorder {
     `);
     if (this.enabled) {
       this.insertQuote = this.db.prepare(
-        `INSERT INTO market_quotes (ts, mint, symbol, price, liq, vol5m, vol1h, chg1h, buys5m, sells5m, src) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO market_quotes (ts, mint, symbol, price, liq, vol5m, vol1h, chg1h, buys5m, sells5m, src, flow_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       this.insertSignal = this.db.prepare(`INSERT INTO market_signals (ts, mint, symbol, kind, price, detail) VALUES (?, ?, ?, ?, ?, ?)`);
     }
@@ -152,7 +156,7 @@ export class MarketRecorder {
     try {
       this.db.exec("BEGIN");
       for (const r of rows) {
-        this.insertQuote.run(r.t, r.mint, r.symbol, r.priceUsd, num(r.liquidityUsd), num(r.vol5mUsd), num(r.vol1hUsd), num(r.change1hPct), num(r.buys5m), num(r.sells5m), r.source);
+        this.insertQuote.run(r.t, r.mint, r.symbol, r.priceUsd, num(r.liquidityUsd), num(r.vol5mUsd), num(r.vol1hUsd), num(r.change1hPct), num(r.buys5m), num(r.sells5m), r.source, num(r.flowAt ?? null));
       }
       this.db.exec("COMMIT");
       this.quotes += rows.length;
@@ -199,23 +203,34 @@ export class MarketRecorder {
     const limit = Math.max(1, Math.min(RECORDER.exportMax, Math.floor(opts.limit ?? 5_000)));
     const since = opts.since ?? 0;
     const until = opts.until ?? Number.MAX_SAFE_INTEGER;
-    const sql = `SELECT ts AS t, mint, symbol, price AS priceUsd, liq AS liquidityUsd, vol5m AS vol5mUsd, vol1h AS vol1hUsd, chg1h AS change1hPct, buys5m, sells5m, src AS source
+    const sql = `SELECT ts AS t, mint, symbol, price AS priceUsd, liq AS liquidityUsd, vol5m AS vol5mUsd, vol1h AS vol1hUsd, chg1h AS change1hPct, buys5m, sells5m, src AS source, flow_at AS flowAt
                  FROM market_quotes WHERE ts >= ? AND ts <= ?${opts.mint ? " AND mint = ?" : ""} ORDER BY ts ASC LIMIT ?`;
     const args: Array<number | string> = opts.mint ? [since, until, opts.mint, limit + 1] : [since, until, limit + 1];
     const rows = this.db.prepare(sql).all(...args) as unknown as RecordedQuote[];
     return { rows: rows.slice(0, limit), more: rows.length > limit };
   }
 
-  /** The newest `limit` quotes at or after `since`, oldest first. For the replay. */
-  latestQuotes(since: number, limit: number = RECORDER.replayMax): RecordedQuote[] {
+  /**
+   * The newest `limit` quotes at or after `since`, oldest first, read a page at a time with the
+   * event loop handed back between pages: the desk is trading while a replay loads.
+   */
+  async latestQuotes(since: number, limit: number = RECORDER.replayMax): Promise<RecordedQuote[]> {
     this.flush();
-    const rows = this.db
-      .prepare(
-        `SELECT ts AS t, mint, symbol, price AS priceUsd, liq AS liquidityUsd, vol5m AS vol5mUsd, vol1h AS vol1hUsd, chg1h AS change1hPct, buys5m, sells5m, src AS source
-         FROM market_quotes WHERE ts >= ? ORDER BY ts DESC LIMIT ?`
-      )
-      .all(since, Math.max(1, Math.min(RECORDER.replayMax, Math.floor(limit)))) as unknown as RecordedQuote[];
-    return rows.reverse();
+    const cap = Math.max(1, Math.min(RECORDER.replayMax, Math.floor(limit)));
+    const page = this.db.prepare(
+      `SELECT rowid AS id, ts AS t, mint, symbol, price AS priceUsd, liq AS liquidityUsd, vol5m AS vol5mUsd, vol1h AS vol1hUsd, chg1h AS change1hPct, buys5m, sells5m, src AS source, flow_at AS flowAt
+       FROM market_quotes WHERE ts >= ? AND rowid < ? ORDER BY rowid DESC LIMIT ?`
+    );
+    const out: RecordedQuote[] = [];
+    let before = Number.MAX_SAFE_INTEGER;
+    while (out.length < cap) {
+      const rows = page.all(since, before, Math.min(RECORDER.replayPage, cap - out.length)) as unknown as Array<RecordedQuote & { id: number }>;
+      if (rows.length === 0) break;
+      for (const row of rows) out.push(row);
+      before = rows[rows.length - 1]!.id;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return out.sort((a, b) => a.t - b.t);
   }
 
   signalsBetween(opts: { since?: number; until?: number; limit?: number } = {}): RecordedSignal[] {

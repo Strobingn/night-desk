@@ -1,5 +1,6 @@
 import type { RecordedQuote, RecordedSignal } from "../market/recorder.js";
 import { SIGNALS, STRATEGY, type SignalKind, type StrategyConfig, type Variant } from "./config.js";
+import { performance } from "node:perf_hooks";
 import type { MarketFlow } from "./exits.js";
 import { scoreVariant } from "./scorecard.js";
 import { ShadowBook } from "./shadow-book.js";
@@ -69,20 +70,28 @@ export function replayGrid(): ReplayRules[] {
 
 /**
  * Replays saved signals and quotes through the same shadow-book code the desk trades with, once
- * per rule set. Every saved signal is taken (no open limit, no daily pause), so rule sets are
- * compared on the same trades. Fills use the paper model: results are estimates, and a rule set
+ * per rule set. Every saved signal is taken as its own position (no open limit, no daily pause,
+ * no skip while the coin is still held), so rule sets are compared on the same entries. Fills use the paper model: results are estimates, and a rule set
  * that wins on a few dozen trades has not shown anything yet.
  */
 export async function replaySaved(
   quotes: RecordedQuote[],
   signals: RecordedSignal[],
-  opts: { targetNetUsd?: number; tradeUsd?: number; grid?: ReplayRules[]; yieldEvery?: number } = {}
+  opts: { targetNetUsd?: number; tradeUsd?: number; grid?: ReplayRules[]; /** Quotes between clock checks. Tests set 1 to force yields. */ yieldEvery?: number } = {}
 ): Promise<ReplayResult> {
   const targetNetUsd = opts.targetNetUsd ?? STRATEGY.targetNetUsd;
   const tradeUsd = opts.tradeUsd ?? STRATEGY.tradeUsd;
   const grid = opts.grid ?? replayGrid();
   const flows = new Map<string, MarketFlow>();
-  const books: Array<{ signal: SignalKind; rules: ReplayRules; book: ShadowBook }> = [];
+  // Each saved signal gets its own position key, so a coin that signals again while a slow rule
+  // still holds it is taken by every rule set: all of them see the same entries.
+  const coinOf = (key: string) => key.slice(0, key.indexOf("#"));
+  interface Entry {
+    signal: SignalKind;
+    rules: ReplayRules;
+    book: ShadowBook;
+  }
+  const books: Entry[] = [];
   for (const signal of SIGNALS) {
     grid.forEach((rules, index) => {
       const cfg = {
@@ -95,35 +104,56 @@ export async function replaySaved(
         trail: { ...STRATEGY.trail, lockShare: rules.lockShare ?? STRATEGY.trail.lockShare }
       } as unknown as StrategyConfig;
       const variant: Variant = { id: `replay-${signal}-${index}`, signal, stopPct: rules.stopPct, ...(rules.trailPct != null ? { trailPct: rules.trailPct } : {}), ...(rules.fade ? { fade: true } : {}) };
-      books.push({ signal, rules, book: new ShadowBook(variant, { cfg, flow: (mint) => flows.get(mint), sizing: () => ({ targetNetUsd, tradeUsd, maxOpen: Number.MAX_SAFE_INTEGER }) }) });
+      books.push({ signal, rules, book: new ShadowBook(variant, { cfg, flow: (key) => flows.get(coinOf(key)), sizing: () => ({ targetNetUsd, tradeUsd, maxOpen: Number.MAX_SAFE_INTEGER }) }) });
     });
   }
 
   const sortedSignals = [...signals].sort((a, b) => a.t - b.t);
-  const yieldEvery = Math.max(1_000, opts.yieldEvery ?? 5_000);
+  /** Coin → open position keys and the book holding each. A quote only visits books that hold the coin. */
+  const holders = new Map<string, Array<{ key: string; entry: Entry }>>();
   let next = 0;
   const openSignals = (until: number) => {
     while (next < sortedSignals.length && sortedSignals[next]!.t <= until) {
+      const index = next;
       const s = sortedSignals[next++]!;
       const liquidityUsd = Number(s.detail.liquidityUsd);
       if (!(s.priceUsd > 0) || !(liquidityUsd > 0)) continue;
       const vol5mUsd = Number(s.detail.vol5mUsd);
+      const key = `${s.mint}#${index}`;
       for (const entry of books) {
         if (entry.signal !== s.kind) continue;
-        entry.book.open({ mint: s.mint, symbol: s.symbol, priceUsd: s.priceUsd, liquidityUsd, vol5mUsd: Number.isFinite(vol5mUsd) ? vol5mUsd : null }, s.t);
+        const opened = entry.book.open({ mint: key, symbol: s.symbol, priceUsd: s.priceUsd, liquidityUsd, vol5mUsd: Number.isFinite(vol5mUsd) ? vol5mUsd : null }, s.t);
+        if (!opened.ok) continue;
+        const list = holders.get(s.mint);
+        if (list) list.push({ key, entry });
+        else holders.set(s.mint, [{ key, entry }]);
       }
     }
   };
+  // The desk is trading while this runs: work in short slices and hand the event loop back.
+  const sliceMs = 6;
+  const checkEvery = Math.max(1, Math.min(200, opts.yieldEvery ?? 200));
+  let sliceStart = performance.now();
   for (let i = 0; i < quotes.length; i += 1) {
     const q = quotes[i]!;
     openSignals(q.t);
-    flows.set(q.mint, { at: q.t, vol5mUsd: q.vol5mUsd, buys5m: q.buys5m, sells5m: q.sells5m, liquidityUsd: q.liquidityUsd });
-    for (const entry of books) {
-      if (entry.book.positions.has(q.mint)) entry.book.onMark(q.mint, q.priceUsd, q.t, q.liquidityUsd ?? undefined);
+    flows.set(q.mint, { at: q.flowAt ?? q.t, vol5mUsd: q.vol5mUsd, buys5m: q.buys5m, sells5m: q.sells5m, liquidityUsd: q.liquidityUsd });
+    const held = holders.get(q.mint);
+    if (held) {
+      for (let h = held.length - 1; h >= 0; h -= 1) {
+        const { key, entry } = held[h]!;
+        entry.book.onMark(key, q.priceUsd, q.t, q.liquidityUsd ?? undefined);
+        if (!entry.book.positions.has(key)) held.splice(h, 1);
+      }
+      if (held.length === 0) holders.delete(q.mint);
     }
-    // The desk is trading while this runs: hand the event loop back regularly.
-    if (i > 0 && i % yieldEvery === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    if (i % checkEvery === 0 && performance.now() - sliceStart >= sliceMs) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      sliceStart = performance.now();
+    }
   }
+  // Signals after the last saved quote open and stay open: they are reported, not scored.
+  openSignals(Number.POSITIVE_INFINITY);
 
   const rows: ReplayRow[] = books.map(({ signal, rules, book }) => {
     const score = scoreVariant(book.variant, book.trades);

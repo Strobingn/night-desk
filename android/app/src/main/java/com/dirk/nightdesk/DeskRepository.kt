@@ -1144,10 +1144,10 @@ class DeskRepository private constructor(private val context: Context) {
         }
     }
 
-    private suspend fun get(url: String): Result<String> = withContext(Dispatchers.IO) {
+    private suspend fun get(url: String, client: OkHttpClient = http): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val request = Request.Builder().url(withToken(url)).authed().build()
-            http.newCall(request).execute().use { response ->
+            client.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) error("HTTP ${response.code}")
                 body
@@ -1270,6 +1270,16 @@ class DeskRepository private constructor(private val context: Context) {
         scope.launch {
             runCatching { File(context.filesDir, SNAPSHOT_FILE).writeText(copy) }
         }
+    }
+
+    /** v13.41 the replay reads days of saved quotes, so it gets its own patient client. */
+    private val slowHttp by lazy { http.newBuilder().callTimeout(90, TimeUnit.SECONDS).readTimeout(90, TimeUnit.SECONDS).build() }
+
+    /** GET /api/market/replay: exit rules tried against the desk's saved market data. */
+    suspend fun marketReplay(days: Int = 3): Result<String> {
+        val base = link.baseUrl.ifBlank { _activeUrl.value }
+        if (base.isBlank()) return Result.failure(IllegalStateException("Desk URL is not set."))
+        return get(base.trimEnd('/') + "/api/market/replay?days=$days", slowHttp)
     }
 
     /** Pump feature GET. Token header matches the rest of the desk. */
