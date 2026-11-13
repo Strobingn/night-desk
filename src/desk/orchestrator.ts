@@ -1438,11 +1438,13 @@ export class Desk {
     const meta = fired.liveMeta;
     if (!meta) return;
     const { token, score } = fired;
-    this.liveEngine.signals += 1;
-    this.liveEngine.lastSignalAt = Date.now();
+    // Results are written to the counters this attempt started under. A change of live variant swaps in new ones.
+    const tally = this.liveEngine;
+    tally.signals += 1;
+    tally.lastSignalAt = Date.now();
     const skip = (message: string) => {
       this.pipeline.executorSkips += 1;
-      this.liveEngine.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message };
+      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message };
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code: "ENGINE_LIVE_PAUSED", message: `Engine live buy skipped ${token.symbol}. ${message}` });
     };
     const block = this.liveEngineBlock();
@@ -1475,14 +1477,14 @@ export class Desk {
         strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
       });
       if (result.ok) {
-        this.liveEngine.buys += 1;
-        this.liveEngine.lastBuyAt = Date.now();
+        tally.buys += 1;
+        tally.lastBuyAt = Date.now();
       } else {
         // The buy path refused (wallet, daily cap, slippage, route...). Keep its own words for the phone.
-        this.liveEngine.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
+        tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
       }
     } catch (err) {
-      this.liveEngine.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ERROR", message: err instanceof Error ? err.message : String(err) };
+      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: "ERROR", message: err instanceof Error ? err.message : String(err) };
       throw err;
     } finally {
       this.engineLivePending.delete(token.mint);
