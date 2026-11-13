@@ -181,6 +181,42 @@ describe("engine live variant", () => {
     }
   });
 
+  it("two live buys in one pass cannot both pass the daily cap", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateSettings({ liveDailyCapUsd: 5 });
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 2 });
+      const other = "EngineLive444444444444444444444444444444444";
+      await desk.submitCandidate(young());
+      await desk.submitCandidate(young({ mint: other, symbol: "EL4" }));
+      const t = Date.now();
+      for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 10_000, 1.01), t + 10_000);
+      for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 22_000, 1.025), t + 22_000);
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(buys()).toHaveLength(1);
+      expect(desk.liveSpentTodayUsd()).toBe(5);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("says so everywhere once the engine can spend live", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true });
+      expect(desk.snapshot().liveScope).toBe("manual");
+      desk.updateStrategy({ liveVariant: "launch-3" });
+      const snap = desk.snapshot();
+      expect(snap.liveScope).toBe("all");
+      expect(snap.wallet?.liveScopeLine).toMatch(/you and the engine \(launch-3\)/);
+      expect(desk.readiness().liveScope).toBe("all");
+      desk.updateStrategy({ enabled: false });
+      expect(desk.snapshot().liveScope).toBe("manual");
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("still refuses any other AI live buy", async () => {
     const desk = liveDesk();
     try {

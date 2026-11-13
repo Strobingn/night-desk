@@ -17,6 +17,8 @@ export interface TapeQuote {
   /** Buys and sells in the last 5 minutes on the pool that priced the quote. Absent when unknown. */
   buys5m?: number;
   sells5m?: number;
+  /** When the volume and trade counts were last read from DexScreener. A carried-over reading keeps its old time. */
+  flowAt?: number;
   /** "dexscreener" | "pump.fun curve" | "jupiter" */
   source: string | null;
   at: number;
@@ -265,7 +267,8 @@ export class TapeQuoter {
           at,
           why,
           ...(d?.priceUsd != null && d.liquidityUsd > 0 ? { liquidityUsd: d.liquidityUsd } : {}),
-          ...(d?.buys5m != null && d.sells5m != null ? { buys5m: d.buys5m, sells5m: d.sells5m } : {})
+          ...(d?.buys5m != null && d.sells5m != null ? { buys5m: d.buys5m, sells5m: d.sells5m } : {}),
+          ...(d ? { flowAt: at } : dexFailed && prev?.flowAt != null ? { flowAt: prev.flowAt } : {})
         });
       }
       return mints.length;

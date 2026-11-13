@@ -153,4 +153,12 @@ describe("strategy settings patch", () => {
       expect(patchSettings(base, bad).ok).toBe(false);
     }
   });
+
+  it("a carried-over volume reading keeps its own age", () => {
+    const engine = new StrategyEngine({ settings: on() });
+    engine.onQuote("MintF", { ...quote(t0 + 100_000, 1), flowAt: t0 }, t0 + 100_000);
+    expect(engine.flowFor("MintF")?.at).toBe(t0);
+    engine.onQuote("MintF", quote(t0 + 110_000, 1), t0 + 110_000);
+    expect(engine.flowFor("MintF")?.at).toBe(t0 + 110_000);
+  });
 });

@@ -70,6 +70,8 @@ export interface EngineQuote extends TrackedMark {
   liquidityUsd?: number | null;
   buys5m?: number | null;
   sells5m?: number | null;
+  /** When volume and trade counts were actually read. Absent: the quote's own time. */
+  flowAt?: number;
 }
 
 export interface FiredSignal {
@@ -220,7 +222,7 @@ export class StrategyEngine {
 
   /** A price for a coin the engine cares about. Returns a signal for the desk when one fires. */
   onQuote(mint: string, quote: EngineQuote, now: number): FiredSignal | null {
-    this.flows.set(mint, { at: quote.at, vol5mUsd: quote.vol5mUsd, buys5m: quote.buys5m ?? null, sells5m: quote.sells5m ?? null, liquidityUsd: quote.liquidityUsd ?? null });
+    this.flows.set(mint, { at: quote.flowAt ?? quote.at, vol5mUsd: quote.vol5mUsd, buys5m: quote.buys5m ?? null, sells5m: quote.sells5m ?? null, liquidityUsd: quote.liquidityUsd ?? null });
     this.markShadows(mint, quote.priceUsd, now, quote.liquidityUsd ?? undefined);
     if (!this.settings.enabled || !this.tracker.has(mint)) return null;
     if (!this.tracker.note(mint, quote)) return null;

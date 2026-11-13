@@ -361,6 +361,8 @@ export class Desk {
   private strategyExitRetryAt = new Map<string, number>();
   /** Live engine buys in flight. They count against the engine's open limit before they fill. */
   private engineLivePending = new Set<string>();
+  /** Live engine buys run one after another, so each sees the spend and the result of the one before it. */
+  private engineLiveQueue: Promise<void> = Promise.resolve();
   readonly latency = new LatencyStats();
   private candidateAt = new BoundedMap<string, number>(2_000);
   private watchAt = new BoundedMap<string, number>(400);
@@ -1345,7 +1347,7 @@ export class Desk {
       const anchor = this.strategyFeed.get(mint);
       const feed = q.source === "dexscreener" ? "dexscreener" : q.source === "jupiter" ? "jupiter" : q.source === "pump.fun curve" ? "chain" : q.source;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null }, now);
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt }, now);
     }
     this.strategy.tick(now);
     for (const mint of [...this.strategyQuoteAt.keys()]) if (!pinned.includes(mint)) this.strategyQuoteAt.delete(mint);
@@ -1389,7 +1391,12 @@ export class Desk {
     const open = held + this.engineLivePending.size;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     this.engineLivePending.add(token.mint);
+    const turn = this.engineLiveQueue;
+    let done!: () => void;
+    this.engineLiveQueue = new Promise<void>((resolve) => (done = resolve));
     try {
+      // The daily cap and the loss pause only count finished buys, so wait for the one ahead.
+      await turn;
       const safety = await this.tokenSafety(token.mint);
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
       if (isPumpCoin(token)) {
@@ -1406,6 +1413,7 @@ export class Desk {
       });
     } finally {
       this.engineLivePending.delete(token.mint);
+      done();
     }
   }
 
@@ -2783,7 +2791,7 @@ export class Desk {
         ? "operatorReady is true because a person sent it. The mark does not set LIVE_TRADING, does not send an order, and does not store a wallet."
         : "operatorReady is false. It stays false until a person sends {\"operatorReady\": true}. A balance read, including one that recovers, does not flip it."
     ];
-    return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, liveScope: this.liveBook ? "manual" : null, lines };
+    return { mode, liveTradingFlag, keypairPresent, walletPublicKey, rpcPresent, operatorReady, liveScope: this.liveScopeNow(), lines };
   }
 
   /** One advisory pass. Logs notes. Does not buy, sell, or change a rule. */
@@ -2823,7 +2831,7 @@ export class Desk {
     const seq = ++this.snapshotSeq;
     return {
       seq,
-      liveScope: this.liveBook ? "manual" : null,
+      liveScope: this.liveScopeNow(),
       liveBook: this.liveBookView(),
       liveNotArmed: this.liveNotArmedReason(),
       tapeQuotes: this.tape?.view() ?? {},
@@ -4245,7 +4253,7 @@ export class Desk {
     const equityUsd = this.displayEquity("live");
     const startingUsd = this.liveStartingUsd;
     return {
-      scope: "manual",
+      scope: this.liveScopeNow() ?? "manual",
       line: this.liveScopeLine(),
       cashUsd: roundUsd(this.liveBook.cashUsd),
       cashKnown: this.walletBalances != null && this.walletBalances.error == null && this.walletBalances.usdc != null,
@@ -4997,8 +5005,17 @@ export class Desk {
   }
 
   /** v13.7 plain words for the live scope, shown on the wallet card, readiness and the log. */
+  /** "all" while the engine has a live variant and is on: real swaps can be sent without a tap. */
+  private liveScopeNow(): "manual" | "all" | null {
+    if (!this.liveBook) return null;
+    return this.strategy.settings.enabled && this.strategy.settings.liveVariant ? "all" : "manual";
+  }
+
   private liveScopeLine(): string {
     if (!this.liveBook) return "Live trading is off. Everything is paper.";
+    if (this.liveScopeNow() === "all") {
+      return `Live: you and the engine (${this.strategy.settings.liveVariant}). The engine buys with real money on its own at the live size. Other AI buys stay on the paper book.`;
+    }
     return "Live: manual only · AI: paper. Your buys, limits and stops can send real swaps. AI auto-buys stay on the paper book.";
   }
 
@@ -5293,7 +5310,7 @@ export class Desk {
       balanceStale: bal == null || bal.error != null || Date.now() - bal.at > LIVE_BALANCE_CACHE_MS,
       balanceError: bal?.error ?? null,
       live: this.config.mode === "live",
-      liveScope: this.liveBook ? "manual" : null,
+      liveScope: this.liveScopeNow(),
       liveScopeLine: this.liveScopeLine(),
       liveAutoBuy: this.liveAutoBuy,
       liveRequested: this.config.liveRequested,
