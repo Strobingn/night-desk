@@ -1,6 +1,7 @@
 import { tinyPx } from "../price-text.js";
 import { NetLimiter } from "../market/net.js";
 import { LiveSubmitError, POOL_DRAINED_MESSAGE, isNoSellRouteMessage, offersSellAnyway } from "../market/live-submit.js";
+import { deadFromMarks, readSellRoute } from "../market/dead-holding.js";
 import { BANNER_AFTER_MS } from "../agents/feed-health.js";
 import { fetchJupiterQuotes } from "../market/dex-prices.js";
 import { fetchDexTape, TapeQuoter, TAPE_TICK_MS } from "../market/tape-quotes.js";
@@ -462,6 +463,9 @@ export class Desk {
   private walletBalances: WalletBalances | null = null;
   private walletInflight: Promise<WalletBalances | null> | null = null;
   private walletTimer: NodeJS.Timeout | null = null;
+  /** Display-only. A read-only quote found no pool. Never a sell and never a ledger write. */
+  private noRoute = new Set<string>();
+  private routeProbeTimer: NodeJS.Timeout | null = null;
   private readonly walletReader: () => Promise<WalletBalances>;
   private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
   /** A live swap that was submitted (or may have been) and is not a booked fill. Blocks another send. */
@@ -911,6 +915,11 @@ export class Desk {
     }
     this.commentTimer = setInterval(() => void this.commentOnce(), 60_000);
     setTimeout(() => void this.commentOnce(), 8_000);
+    // Read-only sell quotes for the Dead section. One pass a minute. No swap is built or sent.
+    if (this.config.feedMode !== "replay" && !this.config.demoFeed && this.config.jupiterQuoteUrl) {
+      this.routeProbeTimer = setInterval(() => void this.probeSellRoutes(), 60_000);
+      this.routeProbeTimer.unref?.();
+    }
     this.heartbeat = setInterval(() => {
       const snap = this.snapshot();
       console.log(
@@ -938,6 +947,7 @@ export class Desk {
     if (this.orderTimer) clearInterval(this.orderTimer);
     if (this.strategyTimer) clearInterval(this.strategyTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
+    if (this.routeProbeTimer) clearInterval(this.routeProbeTimer);
     if (this.solTimer) clearInterval(this.solTimer);
     if (this.recheckTimer) clearTimeout(this.recheckTimer);
     this.recheckTimer = null;
@@ -3837,6 +3847,7 @@ export class Desk {
     const book = this.bk(order.book === "live" ? "live" : "paper");
     if (!book.positions.has(pos.mint)) return;
     this.clearLiquidityGone(order.book === "live" ? "live" : "paper", pos.mint);
+    this.noRoute.delete(bookKey(order.book === "live" ? "live" : "paper", pos.mint));
     const rawProceeds = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     const proceedsUsd = typeof rawProceeds === "number" && Number.isFinite(rawProceeds) && rawProceeds > 0 ? roundUsd(rawProceeds) : 0;
     if (fill.mode === "paper" && this.paperProceedsUnverified(pos, proceedsUsd, fill.priceUsd, pos.costUsd)) {
@@ -3981,6 +3992,53 @@ export class Desk {
     });
   }
 
+  /**
+   * Card-only. A collapsed mark, or a quote that came back with no pool.
+   * Does not write the book, the stop, settings, or the ledger, and does not exit.
+   */
+  private deadHolding(pos: Position, kind: BookKind): boolean {
+    if (this.noRoute.has(bookKey(kind, pos.mint))) return true;
+    const shown = this.displayMark(pos, kind);
+    return (
+      deadFromMarks({
+        entryPrice: pos.entryPrice,
+        qty: pos.qty,
+        markPrice: shown.price,
+        marks: this.bk(kind).points(pos.mint).map((point) => point.priceUsd)
+      }) != null
+    );
+  }
+
+  /**
+   * Ask whether a held coin still has a sell quote. GET only. Nothing is signed or sent.
+   * No route sets the same card note a failed sell would. A quote clears only that flag.
+   */
+  async probeSellRoutes(fetchImpl?: typeof fetch): Promise<void> {
+    const quoteUrl = this.config.jupiterQuoteUrl;
+    if (!quoteUrl) return;
+    const held: Array<{ kind: BookKind; pos: Position }> = [];
+    for (const pos of this.book.positions.values()) held.push({ kind: "paper", pos });
+    for (const pos of this.liveBook?.positions.values() ?? []) held.push({ kind: "live", pos });
+    const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    for (const { kind, pos } of held) {
+      const decimals = pos.decimals ?? 6;
+      const atoms = Math.floor(pos.qty * 10 ** decimals);
+      if (!(atoms > 0) || !Number.isFinite(atoms)) continue;
+      const verdict = await readSellRoute({
+        quoteUrl,
+        inputMint: pos.mint,
+        outputMint: usdc,
+        amount: String(atoms),
+        fetchImpl
+      });
+      const key = bookKey(kind, pos.mint);
+      if (verdict === "no_route") {
+        this.noRoute.add(key);
+        this.bus.emit("position.mark", { mint: pos.mint, at: Date.now() });
+      } else if (verdict === "route") this.noRoute.delete(key);
+    }
+  }
+
   private view(pos: Position, kind: BookKind = "paper"): PositionView {
     const book = this.bk(kind);
     const shown = this.displayMark(pos, kind);
@@ -4018,7 +4076,7 @@ export class Desk {
       ...(pos.tag ? { tag: pos.tag } : pos.entry === "manual" ? { tag: "manual" } : {}),
       ...this.cardChips(pos.mint),
       ...this.netFields(pos, kind, shown, markPrice),
-      ...(this.liquidityGone.has(bookKey(kind, pos.mint)) ? { liquidityNote: LIQUIDITY_GONE_NOTE } : {})
+      ...(this.liquidityGone.has(bookKey(kind, pos.mint)) || this.deadHolding(pos, kind) ? { liquidityNote: LIQUIDITY_GONE_NOTE } : {})
     };
   }
 
