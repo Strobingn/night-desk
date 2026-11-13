@@ -3,6 +3,7 @@ import { Keypair } from "@solana/web3.js";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { NetLimiter } from "../src/market/net.js";
+import { safeMintAccount } from "../src/market/mint-safety.js";
 import { STRATEGY } from "../src/strategy/config.js";
 import type { FiredSignal } from "../src/strategy/engine.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
@@ -157,7 +158,7 @@ describe("v13.45 engine safety priority", () => {
     }
   });
 
-  it("skips the engine live buy when the launch bundle check times out", async () => {
+  it("skips the engine live buy when the launch bundle check exceeds 15s", async () => {
     const desk = liveDesk({ launchBundle: () => new Promise(() => {}) });
     try {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
@@ -165,8 +166,8 @@ describe("v13.45 engine safety priority", () => {
       const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young({ source: "pumpfun" }), score: 0.8, meta: meta(), liveMeta: meta() };
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       const elapsed = Date.now() - started;
-      expect(elapsed).toBeGreaterThanOrEqual(3_500);
-      expect(elapsed).toBeLessThan(6_000);
+      expect(elapsed).toBeGreaterThanOrEqual(14_000);
+      expect(elapsed).toBeLessThan(18_000);
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
       expect(codes(desk)).toContain("LAUNCH_BUNDLE_UNVERIFIED");
       expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
@@ -174,7 +175,7 @@ describe("v13.45 engine safety priority", () => {
     } finally {
       desk.stop();
     }
-  });
+  }, 20_000);
 
   it("skips the engine live buy when the launch bundle check errors", async () => {
     const desk = liveDesk({ launchBundle: () => Promise.reject(new Error("rpc down")) });
@@ -308,6 +309,145 @@ describe("v13.45 engine safety priority", () => {
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
       expect(codes(desk)).toContain("ENGINE_LIVE_SKIP");
       expect(codes(desk)).not.toContain("LAUNCH_BUNDLE_UNVERIFIED");
+    } finally {
+      desk.stop();
+    }
+  });
+});
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("v13.46 engine check timeouts", () => {
+  it("accepts an engine safety read that answers in about 6s", async () => {
+    const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }), {
+      mintAccounts: () => new Promise((resolve) => setTimeout(() => resolve(safeMintAccount()), 6_000))
+    });
+    try {
+      desk.updateStrategy({ enabled: true });
+      const started = Date.now();
+      await signal(desk);
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(5_500);
+      expect(elapsed).toBeLessThan(8_000);
+      expect(codes(desk)).not.toContain("TOKEN_SAFETY");
+      expect(desk.book.positions.get(MINT)?.strategy).toBeDefined();
+    } finally {
+      desk.stop();
+    }
+  }, 12_000);
+
+  it("accepts a live engine safety read that answers in about 6s", async () => {
+    const desk = liveDesk({
+      mintAccounts: () => new Promise((resolve) => setTimeout(() => resolve(safeMintAccount()), 6_000))
+    });
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
+      const started = Date.now();
+      const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young(), score: 0.8, meta: meta(), liveMeta: meta() };
+      await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(5_500);
+      expect(elapsed).toBeLessThan(8_000);
+      expect(liveBroker.executeLiveSwap).toHaveBeenCalled();
+      expect(codes(desk)).not.toContain("ENGINE_LIVE_SKIP");
+      expect(codes(desk)).not.toContain("TOKEN_SAFETY");
+    } finally {
+      desk.stop();
+    }
+  }, 12_000);
+
+  it("skips an engine safety read that exceeds 8s as Unknown", async () => {
+    const desk = liveDesk({ mintAccounts: () => new Promise(() => {}) });
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
+      const started = Date.now();
+      const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young(), score: 0.8, meta: meta(), liveMeta: meta() };
+      await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(7_500);
+      expect(elapsed).toBeLessThan(11_000);
+      expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
+      expect(codes(desk)).toContain("ENGINE_LIVE_SKIP");
+      expect(codes(desk)).not.toContain("LAUNCH_BUNDLE_UNVERIFIED");
+      const skip = desk.snapshot().events.find((e) => e.code === "ENGINE_LIVE_SKIP");
+      expect(skip?.message).toMatch(/Unknown/);
+    } finally {
+      desk.stop();
+    }
+  }, 12_000);
+
+  it("keeps a manual safety read at 2.5s while an engine read waits 8s", async () => {
+    const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }), { mintAccounts: () => new Promise(() => {}) });
+    const safety = (readLane: boolean) =>
+      (desk as unknown as { tokenSafety: (mint: string, priority: number, readLane?: boolean) => Promise<{ status: string }> }).tokenSafety(MINT, -1, readLane);
+    try {
+      const started = Date.now();
+      const engine = safety(true);
+      await delay(30);
+      const manualStarted = Date.now();
+      const manual = safety(false);
+      await expect(manual).resolves.toMatchObject({ status: "unknown" });
+      const manualElapsed = Date.now() - manualStarted;
+      expect(manualElapsed).toBeGreaterThanOrEqual(2_300);
+      expect(manualElapsed).toBeLessThan(4_000);
+      await expect(engine).resolves.toMatchObject({ status: "unknown" });
+      const engineElapsed = Date.now() - started;
+      expect(engineElapsed).toBeGreaterThanOrEqual(7_500);
+      expect(engineElapsed).toBeLessThan(11_000);
+    } finally {
+      desk.stop();
+    }
+  }, 12_000);
+
+  it("uses a shorter in-flight safety read when it answers Safe", async () => {
+    let reads = 0;
+    const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }), {
+      mintAccounts: () => {
+        reads += 1;
+        return new Promise((resolve) => setTimeout(() => resolve(safeMintAccount()), 400));
+      }
+    });
+    const safety = (readLane: boolean) =>
+      (desk as unknown as { tokenSafety: (mint: string, priority: number, readLane?: boolean) => Promise<{ status: string }> }).tokenSafety(MINT, -1, readLane);
+    try {
+      const manual = safety(false);
+      const engine = safety(true);
+      await expect(engine).resolves.toMatchObject({ status: "safe", chip: "Safe" });
+      await expect(manual).resolves.toMatchObject({ status: "safe" });
+      expect(reads).toBe(1);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("does not hold the one-live-buy lock across another coin's safety read", async () => {
+    let reads = 0;
+    const desk = liveDesk({
+      mintAccounts: async () => {
+        reads += 1;
+        await delay(150);
+        return safeMintAccount();
+      }
+    });
+    liveBroker.executeLiveSwap.mockImplementation(() => new Promise(() => {}));
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 2 });
+      const buy = (mint: string, symbol: string) => {
+        const fired: FiredSignal = {
+          signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" },
+          token: young({ mint, symbol }),
+          score: 0.8,
+          meta: meta(),
+          liveMeta: meta()
+        };
+        return (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
+      };
+      const first = buy(MINT, "ELV");
+      const second = buy("EngineLive222222222222222222222222222222222", "EL2");
+      await delay(400);
+      expect(reads).toBe(2);
+      void first;
+      void second;
     } finally {
       desk.stop();
     }
