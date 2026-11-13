@@ -216,6 +216,8 @@ export interface LiveBookView {
   startingUsd: number;
   pnlUsd: number;
   openPnlUsd: number;
+  /** v13.41 the live book's equity over time (wallet USDC plus live positions), at most 240 points. Only sampled while the wallet read is good. */
+  equity?: EquityPoint[];
   positions: PositionView[];
   tradeUsd: number;
   trailPct: number;

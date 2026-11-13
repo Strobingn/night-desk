@@ -120,7 +120,13 @@ data class LiveBookInfo(
     val positions: List<PositionRow>,
     val tradeUsd: Double,
     val trailPct: Double,
-    val dailyCapUsd: Double?
+    val dailyCapUsd: Double?,
+    /** v13.41 the live book's equity over time. Empty on an older desk or before the first good wallet read. */
+    val equityPoints: List<EquityPoint> = emptyList(),
+    /** What the live book started with. 0 when the desk has not measured it. */
+    val startingUsd: Double = 0.0,
+    /** Live equity minus the starting figure. 0 when the start is unknown. */
+    val pnlUsd: Double = 0.0
 ) {
     val manualOnly: Boolean get() = scope != "all"
 }
@@ -1013,8 +1019,22 @@ internal fun parseLiveBook(row: JSONObject?, receivedAt: Long): LiveBookInfo? {
         positions = parsePositionRows(row.optJSONArray("positions"), receivedAt, live = true),
         tradeUsd = row.optFinite("tradeUsd", 5.0),
         trailPct = row.optFinite("trailPct", 0.05),
-        dailyCapUsd = if (!row.has("dailyCapUsd") || row.isNull("dailyCapUsd")) null else row.optFinite("dailyCapUsd", Double.NaN).takeIf { it.isFinite() && it > 0 }
+        dailyCapUsd = if (!row.has("dailyCapUsd") || row.isNull("dailyCapUsd")) null else row.optFinite("dailyCapUsd", Double.NaN).takeIf { it.isFinite() && it > 0 },
+        equityPoints = parseEquityPoints(row.optJSONArray("equity")),
+        startingUsd = row.optFinite("startingUsd"),
+        pnlUsd = row.optFinite("pnlUsd")
     )
+}
+
+/** An `equity` array of {t, equity} rows. A row without a finite equity is dropped, never drawn as 0. */
+internal fun parseEquityPoints(rows: JSONArray?): List<EquityPoint> = buildList {
+    if (rows == null) return@buildList
+    for (i in 0 until rows.length()) {
+        val row = rows.optJSONObject(i) ?: continue
+        val eq = row.optFinite("equity", Double.NaN)
+        val t = row.optFinite("t", Double.NaN)
+        if (eq.isFinite() && t.isFinite() && t > 0) add(EquityPoint(t.toLong(), eq))
+    }
 }
 
 /** v13.5 wallet card from /api/state `wallet`. Null on a desk older than v13.5. */

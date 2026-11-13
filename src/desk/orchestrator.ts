@@ -54,6 +54,8 @@ class GateError extends Error {
   }
 }
 import { visibleEquity } from "./equity-series.js";
+import { replaySaved, type ReplayResult } from "../strategy/replay.js";
+import { feedOf, MarketRecorder, type RecordedQuote, type RecordedSignal, type RecorderStats } from "../market/recorder.js";
 import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type RecapReport } from "./recap.js";
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
@@ -458,6 +460,11 @@ export class Desk {
   private commentTimer: NodeJS.Timeout | null = null;
   private lastNotes = new Set<string>();
   private lastEquityAt = 0;
+  /** v13.41 live equity curve: last sample time and value. */
+  private lastLiveEquityAt = 0;
+  private lastLiveEquity: number | null = null;
+  /** v13.41 saves quotes and signals for coins the engine follows, for later analysis. */
+  readonly recorder: MarketRecorder;
   /** Last equity sample actually written. A bogus jump is not stored and does not move this. */
   private lastEquitySample: { equity: number; cash: number } | null = null;
   private pipeline: PipelineCounts = {
@@ -541,6 +548,7 @@ export class Desk {
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(-1);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
+    this.recorder = new MarketRecorder(this.store.db, config.marketRecordDays);
     const savedSol = this.store.readJson("solUsd") as { value?: unknown; at?: unknown } | null;
     if (savedSol && typeof savedSol.value === "number" && savedSol.value > 0 && Number.isFinite(savedSol.value) && typeof savedSol.at === "number") {
       this.solUsdCache = { value: savedSol.value, at: savedSol.at };
@@ -871,6 +879,7 @@ export class Desk {
   }
 
   stop(): void {
+    this.recorder.flush();
     this.replay.stop();
     this.scout.stop();
     this.rawTape.stop();
@@ -1230,7 +1239,8 @@ export class Desk {
     return {
       ...card,
       mainOpen,
-      live: { open: liveOpen, tradeUsd: this.liveTradeUsd, targetNetUsd: this.liveEngineTarget(), blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen." }
+      live: { open: liveOpen, tradeUsd: this.liveTradeUsd, targetNetUsd: this.liveEngineTarget(), blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen." },
+      recording: this.recorder.stats()
     };
   }
 
@@ -1343,14 +1353,33 @@ export class Desk {
       if (!q || q.priceUsd == null || !(q.priceUsd > 0) || !Number.isFinite(q.priceUsd)) continue;
       if (this.strategyQuoteAt.get(mint) === q.at) continue;
       this.strategyQuoteAt.set(mint, q.at);
+      this.recorder.quote({
+        t: q.at,
+        mint,
+        symbol: this.sightings.get(mint)?.symbol ?? "",
+        priceUsd: q.priceUsd,
+        liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null,
+        vol5mUsd: q.vol5mUsd,
+        vol1hUsd: q.vol1hUsd,
+        change1hPct: q.change1hPct,
+        buys5m: q.buys5m ?? null,
+        sells5m: q.sells5m ?? null,
+        source: q.source ?? null,
+        flowAt: q.flowAt ?? null
+      });
       // A position is marked only by the feed that priced its entry, so a signal must come from that feed too.
       const anchor = this.strategyFeed.get(mint);
-      const feed = q.source === "dexscreener" ? "dexscreener" : q.source === "jupiter" ? "jupiter" : q.source === "pump.fun curve" ? "chain" : q.source;
+      const feed = feedOf(q.source) ?? undefined;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt }, now);
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt, ...(feed ? { feed } : {}) }, now);
     }
     this.strategy.tick(now);
-    for (const mint of [...this.strategyQuoteAt.keys()]) if (!pinned.includes(mint)) this.strategyQuoteAt.delete(mint);
+    this.recorder.flush();
+    this.recorder.tidy(now, pinned);
+    if (this.strategyQuoteAt.size > pinned.length) {
+      const keep = new Set(pinned);
+      for (const mint of [...this.strategyQuoteAt.keys()]) if (!keep.has(mint)) this.strategyQuoteAt.delete(mint);
+    }
     for (const pos of [...this.book.positions.values()]) {
       if (!pos.strategy || pos.closing) continue;
       const at = this.book.markedAt(pos.mint);
@@ -1423,6 +1452,31 @@ export class Desk {
     if (!fired) return;
     const watchedAt = this.watchAt.get(mint);
     if (watchedAt != null) this.latency.record("watchToSignal", now - watchedAt);
+    this.recorder.signal({
+      // The firing quote's own time, so a replay opens the trade on that quote and not the one after.
+      t: quote.at,
+      mint,
+      symbol: fired.token.symbol,
+      kind: fired.signal.signal,
+      priceUsd: fired.signal.priceUsd,
+      detail: {
+        risePct: fired.signal.risePct,
+        reason: fired.signal.reason,
+        vol5mUsd: quote.vol5mUsd,
+        vol1hUsd: quote.vol1hUsd,
+        change1hPct: quote.change1hPct,
+        // The depth the engine actually sized against: the quote's, else the watched coin's.
+        liquidityUsd: fired.token.liquidityUsd,
+        buys5m: quote.buys5m ?? null,
+        sells5m: quote.sells5m ?? null,
+        ageSeconds: fired.token.ageSeconds,
+        score: fired.score,
+        // The feed that priced the signal. The position is marked only by this feed, and so is its replay.
+        feed: quote.feed ?? null,
+        paperVariant: fired.meta.variant,
+        liveVariant: fired.liveMeta?.variant ?? null
+      }
+    });
     this.log({
       stage: "analyst",
       kind: "pass",
@@ -3016,6 +3070,9 @@ export class Desk {
       // A rejected outlier must not become the crash-guard high and block the next buy.
       if (!markUnusable(tick.priceUsd) && !(anchor != null && outlierReason(anchor, tick.priceUsd))) {
         this.momentum.note(tick.mint, tick.priceUsd, tick.liquidityUsd, tick.at);
+        if (this.strategy.holding(tick.mint)) {
+          this.recorder.tick(tick.at, tick.mint, this.sightings.get(tick.mint)?.symbol ?? held?.symbol ?? "", tick.priceUsd, tick.liquidityUsd ?? null);
+        }
         this.strategy.onTick(tick.mint, tick.priceUsd, tick.at, tick.liquidityUsd);
       }
       this.noteFeedQuote(tick.mint, tick.feed, tick.priceUsd, tick.at);
@@ -4272,6 +4329,7 @@ export class Desk {
       startingUsd: roundUsd(startingUsd),
       pnlUsd: startingUsd > 0 ? roundUsd(equityUsd - startingUsd) : 0,
       openPnlUsd: roundUsd(positions.reduce((sum, p) => sum + p.pnlUsd, 0)),
+      equity: this.store.liveEquityCurve(0),
       positions,
       tradeUsd: this.liveTradeUsd,
       trailPct: this.liveTrailPct,
@@ -4489,6 +4547,60 @@ export class Desk {
     if (prev && !cashUp && equity > prev.equity * 1.02 && prevMv > 1 && mv > prevMv * 25 && mv - prevMv > 500) return;
     this.lastEquitySample = { equity, cash };
     this.store.insertEquity({ t: now, equity, cash });
+    this.markLiveEquity(now);
+  }
+
+  /**
+   * The live book's curve. Sampled only while the wallet read is good, so a failed read never
+   * draws a fall to zero. A changed value is saved at most every 10 s, an unchanged one once a minute.
+   */
+  private markLiveEquity(now: number): void {
+    if (!this.liveBook) return;
+    const known = this.walletBalances != null && this.walletBalances.error == null && this.walletBalances.usdc != null;
+    if (!known) return;
+    const equity = roundUsd(this.displayEquity("live"));
+    if (!Number.isFinite(equity) || equity < 0) return;
+    const gap = now - this.lastLiveEquityAt;
+    if (gap < 10_000) return;
+    if (this.lastLiveEquity != null && equity === this.lastLiveEquity && gap < 60_000) return;
+    this.lastLiveEquityAt = now;
+    this.lastLiveEquity = equity;
+    this.store.insertLiveEquity({ t: now, equity, cash: roundUsd(this.liveBook.cashUsd) });
+  }
+
+  /** v13.41 saved market data for analysis. */
+  recorderStats(): RecorderStats {
+    return this.recorder.stats();
+  }
+
+  marketQuotes(opts: { since?: number; until?: number; mint?: string; limit?: number }): { rows: RecordedQuote[]; more: boolean } {
+    return this.recorder.quotesBetween(opts);
+  }
+
+  marketSignals(opts: { since?: number; until?: number; limit?: number }): RecordedSignal[] {
+    return this.recorder.signalsBetween(opts);
+  }
+
+  private replayRunning: Promise<ReplayResult> | null = null;
+
+  /**
+   * Tries a grid of exit rules against the saved quotes and signals of the last `days` days.
+   * Read-only: it changes no setting and no book. One replay runs at a time.
+   */
+  marketReplay(days = 3): Promise<ReplayResult> {
+    if (this.replayRunning) return this.replayRunning;
+    const span = Math.max(1, Math.min(this.recorder.days || 1, Math.floor(days)));
+    const since = Date.now() - span * 86_400_000;
+    const run = (async () => {
+      const quotes = await this.recorder.latestQuotes(since);
+      const from = quotes.length ? quotes[0]!.t : since;
+      const signals = this.recorder.signalsBetween({ since: from, limit: 50_000 });
+      return replaySaved(quotes, signals, { targetNetUsd: this.strategy.settings.targetNetUsd, tradeUsd: this.strategy.settings.tradeUsd, until: Date.now() });
+    })().finally(() => {
+      this.replayRunning = null;
+    });
+    this.replayRunning = run;
+    return run;
   }
 
   private remember(token: CandidateToken, fresh?: ReadonlySet<ChainFactField>): void {

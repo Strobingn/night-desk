@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-12 (13.40). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-13 (13.41). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -279,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.40** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.40, `versionCode` 1340, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.41** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.41, `versionCode` 1341, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Live sells are the change on top of main `aa1e16c` (PR 40, the 13.39 Home charts and math audit, which includes 13.38). Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -298,6 +298,18 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.41 notes
+
+Live equity chart, market recording, replay, transport speed. No trading rule, limit, stop, cap or default changed.
+
+- `liveBook.equity` in `/api/state`: up to 240 `{t, equity, cash}` points for the live book (wallet USDC plus live positions). Sampled only while the wallet read is good, a changed value at most every 10 s and an unchanged one once a minute. Stored in the `live_equity` table.
+- Market recorder (`src/market/recorder.ts`). Env `MARKET_RECORD_DAYS`: days kept, default 14, max 90, 0 = off. Tables `market_quotes` and `market_signals` in the desk database. A quote is saved for each coin the engine watches or holds, at most every 5 s per coin, and every 30 s when the price has not changed. A signal is saved with the numbers that fired it. Writes are batched in one transaction per engine pass. Rows past the window are deleted hourly. It makes no network call.
+- `GET /api/market/quotes?since=&until=&mint=&limit=&format=csv` (limit max 50000), `GET /api/market/signals?since=&until=&limit=`, `GET /api/market/replay?days=` (default 3, at most 250000 quotes). All read-only and behind the desk token.
+- Replay (`src/strategy/replay.ts`): every saved signal is taken at the engine's paper size and target, through the shadow-book code, once per rule set: 1/3/6% stop with sell-at-target, or a 4/8/12% trail with the profit lock at breakeven, 25% or 50% of the target, with and without fade exits. No open limit and no daily pause, so rule sets see the same trades. It changes no setting.
+- Math check of the 13.40 exits: the evaluator matched an independent reference on 400 random paths. One property to know: with the lock at 50% of the target, a trailing trade is sold about 2.8% under the price where it started trailing, so the 8% and 12% trails only take over once the high is 5.6% and 10.4% above that price. The replay grid tests other lock levels on real data before the default is changed.
+- `strategy.recording` in the scorecard: `enabled`, `days`, `quotes`, `signals`, `oldestAt`.
+- HTTP JSON replies over 1 KB are gzipped when the client accepts gzip. The phone does not fetch `/api/state` while a socket snapshot is under 4.5 s old.
 
 ## 13.40 notes
 

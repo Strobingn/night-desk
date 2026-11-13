@@ -557,7 +557,8 @@ fun NightDeskApp(desk: DeskRepository) {
                     snap?.perf.orEmpty(),
                     onStrategy = { patch -> scope.launch { desk.saveStrategy(patch) } },
                     onReset = { scope.launch { desk.resetStrategy() } },
-                    mainOpen = snap?.strategy?.let { com.dirk.nightdesk.Strategy.mainOpen(it, snap?.positions.orEmpty()) } ?: 0
+                    mainOpen = snap?.strategy?.let { com.dirk.nightdesk.Strategy.mainOpen(it, snap?.positions.orEmpty()) } ?: 0,
+                    onReplay = { desk.marketReplay(3) }
                 )
                 else -> when (settingsSub) {
                     "link" -> SubScreen("Link", onBack = { settingsSub = null }) { LinkScreen(desk) }
@@ -731,6 +732,7 @@ private fun BookScreen(
                     P.down
                 )
             }
+            item { LiveMoneyCard(liveBook) }
             if (liveBook.positions.isEmpty()) {
                 item { Text("No live positions. LIVE BUY on a coin sends a real ${money(liveBook.tradeUsd)} buy.", color = P.muted, fontSize = 13.sp) }
             } else {
@@ -2250,6 +2252,29 @@ internal fun SubScreen(title: String, onBack: () -> Unit, body: @Composable () -
             Text(title, color = P.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
         Box(Modifier.weight(1f)) { body() }
+    }
+}
+
+/** v13.41 the live book's equity and curve, the real-money twin of the paper hero card. */
+@Composable
+private fun LiveMoneyCard(live: com.dirk.nightdesk.LiveBookInfo) {
+    val known = live.startingUsd > 0
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(P.card).padding(horizontal = 14.dp, vertical = 12.dp).testTag("live-money-card")
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Live money", color = P.muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Chip("LIVE", P.onDown, P.down, size = 10)
+        }
+        Text(money(live.equityUsd), color = P.ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text(
+            if (!live.cashKnown) "Wallet balance not read. The curve pauses until it is."
+            else if (known) "${signed(live.pnlUsd)} since the live book started at ${money(live.startingUsd)}"
+            else "Wallet USDC plus open live positions",
+            color = if (!live.cashKnown) P.down else if (known) pnlTint(live.pnlUsd) else P.muted,
+            fontSize = 12.sp
+        )
+        PerformanceChart(live.equityPoints, if (known) live.startingUsd else live.equityUsd, Modifier.padding(top = 8.dp), tag = "live-performance-chart")
     }
 }
 

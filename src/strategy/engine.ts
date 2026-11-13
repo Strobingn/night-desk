@@ -72,6 +72,8 @@ export interface EngineQuote extends TrackedMark {
   sells5m?: number | null;
   /** When volume and trade counts were actually read. Absent: the quote's own time. */
   flowAt?: number;
+  /** The feed that priced this quote ("dexscreener", "jupiter", "chain"). Saved with a signal for the replay. */
+  feed?: string;
 }
 
 export interface FiredSignal {
@@ -104,6 +106,8 @@ export interface ScorecardView {
   liveVariant: string | null;
   /** Set by the desk: live engine positions open, the live size and target, and why live is not trading (null when it is). */
   live?: { open: number; tradeUsd: number; targetNetUsd: number; blocked: string | null };
+  /** Set by the desk: how much market data is saved for analysis. */
+  recording?: { enabled: boolean; days: number; quotes: number; signals: number; oldestAt: number | null };
   readyTrades: number;
   watching: number;
   /**
@@ -269,6 +273,12 @@ export class StrategyEngine {
   }
 
   /** A faster mark for a coin a shadow book holds (the desk's own position ticks). Never fires a signal. */
+  /** True while any shadow book holds the coin. */
+  holding(mint: string): boolean {
+    for (const book of this.books.values()) if (book.positions.has(mint)) return true;
+    return false;
+  }
+
   onTick(mint: string, priceUsd: number, now: number, liquidityUsd?: number): void {
     this.markShadows(mint, priceUsd, now, liquidityUsd);
   }

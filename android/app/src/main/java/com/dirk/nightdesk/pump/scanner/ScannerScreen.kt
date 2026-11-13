@@ -50,7 +50,8 @@ fun ScannerScreen(onBack: () -> Unit) {
         }
     }
 
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp)) {
+    // The Pump terminal already scrolls this screen. A second scroll inside it crashes on open.
+    Column(Modifier.padding(4.dp)) {
         Text("Hot scanner", color = P.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text("Refreshes every 5 seconds. Rug-flagged coins score 0.", color = P.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
         Text(body, color = P.dim, fontSize = 13.sp)

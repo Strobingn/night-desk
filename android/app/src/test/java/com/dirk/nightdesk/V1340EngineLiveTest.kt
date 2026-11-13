@@ -67,3 +67,47 @@ class V1340EngineLiveTest {
         assertTrue(text.contains("under the 200 trades"))
     }
 }
+
+class V1341Test {
+    @Test
+    fun parsesLiveEquityAndDropsBadRows() {
+        val rows = JSONArray()
+            .put(JSONObject().put("t", 1000).put("equity", 20.5).put("cash", 20.5))
+            .put(JSONObject().put("t", 2000).put("cash", 1))
+            .put(JSONObject().put("t", 0).put("equity", 9))
+            .put(JSONObject().put("t", 3000).put("equity", 22.0))
+        val points = parseEquityPoints(rows)
+        assertEquals(listOf(1000L, 3000L), points.map { it.t })
+        assertEquals(22.0, points.last().equity, 1e-9)
+        assertTrue(parseEquityPoints(null).isEmpty())
+        val live = parseLiveBook(
+            JSONObject().put("scope", "all").put("line", "x").put("cashUsd", 18).put("equityUsd", 22).put("openPnlUsd", 0.4)
+                .put("startingUsd", 20).put("pnlUsd", 2).put("equity", rows).put("positions", JSONArray()),
+            0L
+        )!!
+        assertEquals(2, live.equityPoints.size)
+        assertEquals(20.0, live.startingUsd, 1e-9)
+        assertEquals(2.0, live.pnlUsd, 1e-9)
+        val old = parseLiveBook(JSONObject().put("scope", "manual").put("line", "x").put("cashUsd", 1).put("equityUsd", 1).put("positions", JSONArray()), 0L)!!
+        assertTrue(old.equityPoints.isEmpty())
+    }
+
+    @Test
+    fun parsesRecordingAndReplay() {
+        val card = JSONObject().put("enabled", true).put("variants", JSONArray())
+            .put("recording", JSONObject().put("enabled", true).put("days", 14).put("quotes", 12340).put("signals", 18).put("oldestAt", 5))
+        val view = Strategy.parse(card)!!
+        assertEquals("Saving market data for analysis: 12,340 quotes and 18 signals, kept 14 days.", Strategy.recordingLine(view))
+        assertEquals("", Strategy.recordingLine(Strategy.parse(JSONObject().put("enabled", true).put("variants", JSONArray()))!!))
+        val replay = Strategy.parseReplay(
+            JSONObject().put("ok", true).put("quotes", 900).put("signals", 31).put("note", "Paper-model results.")
+                .put("rows", JSONArray().put(JSONObject().put("signal", "launch").put("label", "3% stop, 8% trail, lock breakeven").put("trades", 31).put("winRate", 0.58).put("netUsd", 12.4).put("avgNetUsd", 0.4).put("maxDrawdownUsd", 4.1)))
+                .toString()
+        )!!
+        assertEquals(1, replay.rows.size)
+        assertEquals("Launch · 3% stop, 8% trail, lock breakeven", Strategy.replayTitle(replay.rows[0]))
+        assertEquals("+$12.40 over 31 trades · 58% wins · worst dip $4.10", Strategy.replayStats(replay.rows[0]))
+        assertNull(Strategy.parseReplay("{\"ok\":false}"))
+        assertNull(Strategy.parseReplay("not json"))
+    }
+}

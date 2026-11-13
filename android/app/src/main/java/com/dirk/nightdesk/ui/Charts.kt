@@ -231,7 +231,7 @@ private fun chartSignedUsd(n: Double): String = (if (n > 0.004) "+" else if (n <
  * the desk has sent enough points inside it.
  */
 @Composable
-fun PerformanceChart(points: List<EquityPoint>, startBalance: Double, modifier: Modifier = Modifier) {
+fun PerformanceChart(points: List<EquityPoint>, startBalance: Double, modifier: Modifier = Modifier, tag: String = "performance-chart") {
     var picked by rememberSaveable { mutableStateOf(ChartRange.ALL) }
     val all = remember(points) { ChartMath.clean(points.map { ChartPoint(it.t, it.equity) }) }
     val offered = remember(all) { ChartRange.entries.filter { ChartMath.usable(all, it) } }
@@ -245,7 +245,7 @@ fun PerformanceChart(points: List<EquityPoint>, startBalance: Double, modifier: 
     val color = if (change >= 0) P.up else P.down
     var scrubAt by remember { mutableIntStateOf(-1) }
     val point = model.points.getOrNull(scrubAt)
-    Column(modifier.fillMaxWidth().testTag("performance-chart")) {
+    Column(modifier.fillMaxWidth().testTag(tag)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(

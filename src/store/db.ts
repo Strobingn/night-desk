@@ -90,6 +90,9 @@ export class DeskStore {
    * once per insert, not by resampling the previous cap.
    */
   private curveCache: EquityCurveCache | null = null;
+  private liveCurve: { since: number; max: number; points: EquityPoint[] } | null = null;
+  private liveInsert: import("node:sqlite").StatementSync | null = null;
+  private equityInsert: import("node:sqlite").StatementSync | null = null;
 
   constructor(
     private readonly dbPath: string,
@@ -123,6 +126,12 @@ export class DeskStore {
       );
       CREATE INDEX IF NOT EXISTS equity_ts ON equity(ts);
       CREATE INDEX IF NOT EXISTS equity_ts_value ON equity(ts, equity_usd, cash_usd);
+      CREATE TABLE IF NOT EXISTS live_equity (
+        ts INTEGER NOT NULL,
+        equity_usd REAL NOT NULL,
+        cash_usd REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS live_equity_ts ON live_equity(ts);
       CREATE TABLE IF NOT EXISTS trades (
         id TEXT PRIMARY KEY,
         mint TEXT NOT NULL,
@@ -267,7 +276,9 @@ export class DeskStore {
   }
 
   insertEquity(point: EquityPoint): void {
-    this.db.prepare(`INSERT INTO equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`).run(point.t, point.equity, point.cash);
+    // Prepared once: this runs every two seconds for the life of the desk.
+    this.equityInsert ??= this.db.prepare(`INSERT INTO equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`);
+    this.equityInsert.run(point.t, point.equity, point.cash);
     const cache = this.curveCache;
     if (!cache || point.t < cache.since) return;
     if (cache.buckets.size > 0 && point.t < cache.origin) {
@@ -275,6 +286,33 @@ export class DeskStore {
       return;
     }
     absorbEquityPoint(cache, point);
+  }
+
+  /** v13.41 the live book's equity (wallet USDC plus live positions). Saved far less often than the paper curve. */
+  insertLiveEquity(point: EquityPoint): void {
+    this.liveInsert ??= this.db.prepare(`INSERT INTO live_equity (ts, equity_usd, cash_usd) VALUES (?, ?, ?)`);
+    this.liveInsert.run(point.t, point.equity, point.cash);
+    this.liveCurve = null;
+  }
+
+  /** The live curve since `sinceTs`, at most `max` points, each time bucket keeping its first, last, low and high. Cached until the next insert. */
+  liveEquityCurve(sinceTs: number, max = EQUITY_CURVE_POINTS): EquityPoint[] {
+    const hit = this.liveCurve;
+    if (hit && hit.since === sinceTs && hit.max === max) return hit.points;
+    const rows = this.db
+      .prepare(`SELECT ts as t, equity_usd as equity, cash_usd as cash FROM live_equity WHERE ts >= ? ORDER BY ts ASC`)
+      .all(sinceTs) as unknown as EquityPoint[];
+    let points = rows;
+    if (rows.length > max) {
+      const origin = rows[0]!.t;
+      const span = Math.max(1, Math.floor(max / 4));
+      const bucketMs = Math.max(1, Math.ceil((rows[rows.length - 1]!.t - origin + 1) / span));
+      const buckets = new Map<number, EquityBucket>();
+      for (const row of rows) touchEquityBucket(buckets, bucketIndex(row.t, origin, bucketMs, span - 1), row);
+      points = flattenEquityBuckets(buckets);
+    }
+    this.liveCurve = { since: sinceTs, max, points };
+    return points;
   }
 
   /** Full rows. Recap and the paper-reset archive still want the ledger. The poll path uses [equityCurve]. */

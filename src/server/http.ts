@@ -1,4 +1,6 @@
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { gzip } from "node:zlib";
+import { quotesCsv } from "../market/recorder.js";
 import { IdempotencyCache } from "./idempotency.js";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
@@ -135,6 +137,36 @@ export function startServer(
         const result = desk.updateSettings(patch);
         if (!result.ok) return json(res, 400, result);
         return json(res, 200, { ok: true, ...result.settings, settings: result.settings });
+      }
+      // v13.41 saved market data. ?since=&until= (ms), ?mint=, ?limit= (max 50000), ?format=csv
+      if (url.pathname === "/api/market/quotes" && req.method === "GET") {
+        const num = (key: string) => {
+          const raw = url.searchParams.get(key);
+          const n = raw == null || raw === "" ? NaN : Number(raw);
+          return Number.isFinite(n) ? n : undefined;
+        };
+        const mint = url.searchParams.get("mint") || undefined;
+        const out = desk.marketQuotes({ since: num("since"), until: num("until"), mint, limit: num("limit") });
+        if (url.searchParams.get("format") === "csv") {
+          res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "cache-control": "no-store", "content-disposition": 'attachment; filename="night-desk-quotes.csv"' });
+          return void res.end(quotesCsv(out.rows));
+        }
+        return json(res, 200, { ok: true, stats: desk.recorderStats(), count: out.rows.length, more: out.more, quotes: out.rows });
+      }
+      // v13.41 exit rules tried against the saved data. ?days= (default 3). Read-only.
+      if (url.pathname === "/api/market/replay" && req.method === "GET") {
+        const days = Number(url.searchParams.get("days") ?? "3");
+        const result = await desk.marketReplay(Number.isFinite(days) && days > 0 ? days : 3);
+        return json(res, 200, { ok: true, stats: desk.recorderStats(), ...result });
+      }
+      if (url.pathname === "/api/market/signals" && req.method === "GET") {
+        const num = (key: string) => {
+          const raw = url.searchParams.get(key);
+          const n = raw == null || raw === "" ? NaN : Number(raw);
+          return Number.isFinite(n) ? n : undefined;
+        };
+        const signals = desk.marketSignals({ since: num("since"), until: num("until"), limit: num("limit") });
+        return json(res, 200, { ok: true, stats: desk.recorderStats(), count: signals.length, signals });
       }
       if (url.pathname === "/api/strategy/scorecard" && req.method === "GET") {
         return json(res, 200, { ok: true, strategy: desk.strategyView() });
@@ -547,12 +579,33 @@ function unauthorized(res: http.ServerResponse): void {
   res.end("Unauthorized");
 }
 
+/** Bodies under this size are sent as they are: gzip would not pay for itself. */
+const GZIP_MIN_BYTES = 1_024;
+
+/**
+ * v13.41 a JSON reply, gzipped when the client accepts it. The phone polls /api/state every few
+ * seconds and that body is mostly repeated keys, so it travels about eight times smaller.
+ * Compression runs off the event loop; a failure falls back to the plain body.
+ */
 function json(res: http.ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store"
+  const text = JSON.stringify(body);
+  const headers: Record<string, string> = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", vary: "accept-encoding" };
+  const accepts = /\bgzip\b/i.test(String(res.req?.headers["accept-encoding"] ?? ""));
+  if (!accepts || text.length < GZIP_MIN_BYTES) {
+    res.writeHead(status, headers);
+    res.end(text);
+    return;
+  }
+  gzip(text, { level: 4 }, (err, packed) => {
+    if (res.destroyed || res.writableEnded) return;
+    if (err) {
+      res.writeHead(status, headers);
+      res.end(text);
+      return;
+    }
+    res.writeHead(status, { ...headers, "content-encoding": "gzip", "content-length": String(packed.length) });
+    res.end(packed);
   });
-  res.end(JSON.stringify(body));
 }
 
 async function serveStatic(dist: string, pathname: string, res: http.ServerResponse): Promise<void> {

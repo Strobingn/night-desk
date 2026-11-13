@@ -1,4 +1,5 @@
 import path from "node:path";
+import { recordDays } from "./market/recorder.js";
 import { resolveRules, HARD_RULES, type ResolvedRules } from "./rules.js";
 import { resolveDeskToken } from "./server/auth.js";
 import type { FeedStatus } from "./types.js";
@@ -10,6 +11,8 @@ export interface DeskConfig {
   liveRequested: boolean;
   armError?: string;
   startingBalanceUsd: number;
+  /** v13.41 days of market quotes and signals kept for later analysis. 0 = off. Unset = 14. */
+  marketRecordDays?: number;
   dbPath: string;
   jsonlPath: string;
   /** Plain-text mirror of every stage event. Survives restarts. */
@@ -90,6 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DeskConfig {
     liveRequested,
     armError,
     startingBalanceUsd: Number.isFinite(starting) && starting > 0 ? starting : HARD_RULES.paperStartingUsd,
+    marketRecordDays: recordDays(env.MARKET_RECORD_DAYS),
     dbPath: path.resolve(env.DB_PATH?.trim() || "./data/desk.sqlite"),
     jsonlPath: path.resolve(env.LOG_JSONL?.trim() || "./data/desk.jsonl"),
     logPath: path.resolve(env.LOG_FILE?.trim() || "./data/desk.log"),

@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -54,8 +55,14 @@ fun EngineScreen(
     onStrategy: (Map<String, Any?>) -> Unit,
     onReset: () -> Unit,
     /** Engine positions on the main paper book. */
-    mainOpen: Int = view?.mainOpen?.coerceAtLeast(0) ?: 0
+    mainOpen: Int = view?.mainOpen?.coerceAtLeast(0) ?: 0,
+    /** v13.41 fetches /api/market/replay. Null where there is no desk to ask (previews). */
+    onReplay: (suspend () -> Result<String>)? = null
 ) {
+    var replay by remember { mutableStateOf<com.dirk.nightdesk.ReplayView?>(null) }
+    var replayBusy by remember { mutableStateOf(false) }
+    var replayError by remember { mutableStateOf<String?>(null) }
+    val replayScope = androidx.compose.runtime.rememberCoroutineScope()
     var askReset by remember { mutableStateOf(false) }
     var askLive by remember { mutableStateOf<VariantScore?>(null) }
     // A tap steps from the value on screen, not from the last snapshot, so quick taps add up.
@@ -188,6 +195,40 @@ fun EngineScreen(
                     rows.forEachIndexed { i, row ->
                         VariantRow(row, onLive = if (view.liveSupported && !row.live) ({ askLive = row }) else null) { onStrategy(mapOf("active" to mapOf(row.signal to row.variant))) }
                         if (i < rows.lastIndex) RowDivider()
+                    }
+                }
+            }
+        }
+        if (Strategy.recordingLine(view).isNotBlank()) {
+            item {
+                Section("Saved market data", padded = true) {
+                    Text(Strategy.recordingLine(view), color = P.muted, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.testTag("engine-recording"))
+                    if (onReplay != null) {
+                        TextButton(
+                            enabled = !replayBusy,
+                            onClick = {
+                                replayBusy = true
+                                replayError = null
+                                replayScope.launch {
+                                    val result = onReplay()
+                                    replay = result.getOrNull()?.let { Strategy.parseReplay(it) }
+                                    replayError = if (replay == null) (result.exceptionOrNull()?.message ?: "The desk did not return a replay.") else null
+                                    replayBusy = false
+                                }
+                            },
+                            modifier = Modifier.testTag("engine-replay")
+                        ) { Text(if (replayBusy) "Testing…" else "Test exit rules on the last 3 days", color = P.accent, fontWeight = FontWeight.Bold) }
+                    }
+                    replayError?.let { Text(it, color = P.down, fontSize = 12.sp) }
+                    replay?.let { out ->
+                        Text(out.note, color = P.ink, fontSize = 12.sp, lineHeight = 16.sp)
+                        val shown = out.rows.filter { it.trades > 0 }.take(6)
+                        for (row in shown) {
+                            Column(Modifier.padding(top = 8.dp)) {
+                                Text(Strategy.replayTitle(row), color = P.ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Text(Strategy.replayStats(row), color = pnlTint(row.netUsd), fontSize = 12.sp)
+                            }
+                        }
                     }
                 }
             }
