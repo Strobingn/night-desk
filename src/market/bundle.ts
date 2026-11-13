@@ -103,6 +103,8 @@ export interface SlotTransaction {
     innerInstructions?: Array<{ instructions?: unknown[] }>;
   } | null;
   transaction?: {
+    /** getBlock transactionDetails "accounts" puts the keys here, not under message. */
+    accountKeys?: Array<string | { pubkey?: string }>;
     message?: {
       accountKeys?: Array<string | { pubkey?: string }>;
       instructions?: unknown[];
@@ -127,7 +129,7 @@ export function slotActivity(mint: string, transactions: SlotTransaction[]): { d
   };
   const funders = new Map<string, string>();
   for (const tx of transactions) {
-    const keys = tx.transaction?.message?.accountKeys ?? [];
+    const keys = tx.transaction?.message?.accountKeys ?? tx.transaction?.accountKeys ?? [];
     take(tx.meta?.preTokenBalances, pre, keys);
     take(tx.meta?.postTokenBalances, post, keys);
     for (const ix of tx.transaction?.message?.instructions ?? []) noteFunder(ix, funders);
