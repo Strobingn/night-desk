@@ -69,6 +69,8 @@ export interface StrategyExit {
 
 const usd = (n: number) => `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
 const good = (n: number | null | undefined): n is number => n != null && Number.isFinite(n) && n > 0;
+/** A reading that may be zero: no volume, or an emptied pool, is an observation and not a gap in the data. */
+const seen = (n: number | null | undefined): n is number => n != null && Number.isFinite(n) && n >= 0;
 
 /**
  * The engine stop line. Measured from the mark the buy was priced at, like the desk's hard stop.
@@ -90,7 +92,7 @@ export function strategyLinePrice(entryPrice: number, entryMark: number | undefi
 /** A reason the run is fading, or null. Uses only fresh flow data. */
 export function fadeReason(meta: StrategyMeta, flow: MarketFlow | null | undefined, now: number, cfg: StrategyConfig = STRATEGY): string | null {
   if (!meta.fade || !flow || now - flow.at > cfg.fade.freshMs) return null;
-  if (good(flow.vol5mUsd) && good(meta.entryVol5mUsd) && flow.vol5mUsd < meta.entryVol5mUsd * cfg.fade.volShare) {
+  if (seen(flow.vol5mUsd) && good(meta.entryVol5mUsd) && flow.vol5mUsd < meta.entryVol5mUsd * cfg.fade.volShare) {
     return `5-minute volume is ${usd(flow.vol5mUsd)}, under ${Math.round(cfg.fade.volShare * 100)}% of the ${usd(meta.entryVol5mUsd)} at the buy.`;
   }
   const buys = flow.buys5m ?? null;
@@ -125,7 +127,7 @@ export function assessStrategyExit(input: StrategyExitInput, cfg: StrategyConfig
   const trailing = meta.trailPct != null && meta.trailPct > 0;
   const flow = input.flow && now - input.flow.at <= cfg.fade.freshMs ? input.flow : null;
 
-  if (trailing && meta.fade && markFresh && flow && good(flow.liquidityUsd) && good(meta.entryLiquidityUsd)) {
+  if (trailing && meta.fade && markFresh && flow && seen(flow.liquidityUsd) && good(meta.entryLiquidityUsd)) {
     if (flow.liquidityUsd <= meta.entryLiquidityUsd * (1 - cfg.fade.liquidityDrop)) {
       return exit("LIQUIDITY_DROP", `Pool depth fell to ${usd(flow.liquidityUsd)} from ${usd(meta.entryLiquidityUsd)} at the buy.`);
     }

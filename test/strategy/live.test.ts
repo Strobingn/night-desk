@@ -141,6 +141,46 @@ describe("engine live variant", () => {
     }
   });
 
+  it("two signals in the same pass cannot both take the last live slot", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 1 });
+      const other = "EngineLive333333333333333333333333333333333";
+      await desk.submitCandidate(young());
+      await desk.submitCandidate(young({ mint: other, symbol: "EL3" }));
+      const t = Date.now();
+      for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 10_000, 1.01), t + 10_000);
+      // Both signals fire before either buy has finished.
+      for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 22_000, 1.025), t + 22_000);
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(buys()).toHaveLength(1);
+      expect(desk.liveBook!.positions.size).toBe(1);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("the manual live trail does not sell a live engine position before its own rules", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3-t8" });
+      await signal(desk);
+      const pos = desk.liveBook!.positions.get(MINT)!;
+      const feed = pos.priceFeed ?? "test";
+      const tick = async (priceUsd: number) => {
+        desk.bus.emit("market.tick", { mint: MINT, priceUsd, liquidityUsd: 180_000, at: Date.now(), feed } as never);
+        await (desk as unknown as { drain: () => Promise<void> }).drain();
+      };
+      // Up 2%, then back 1.5%: past the 1% manual live trail, inside the engine's 3% stop.
+      await tick(1.025 * 1.02);
+      await tick(1.025 * 1.02 * 0.985);
+      expect(liveBroker.executeLiveSwap.mock.calls.filter((c) => c[0].side === "sell")).toHaveLength(0);
+      expect(desk.liveBook!.positions.has(MINT)).toBe(true);
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("still refuses any other AI live buy", async () => {
     const desk = liveDesk();
     try {

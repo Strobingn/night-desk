@@ -69,6 +69,11 @@ describe("trailing and fade exits", () => {
     expect(at(fade, 1.01, 0.2, 10_000, { flow: { at: 9_000, liquidityUsd: 40_000 } }).action).toBe("hold");
     expect(at(fade, 1.01, 0.2, 10_000, { flow: { at: 9_000, liquidityUsd: 37_000 } }).code).toBe("LIQUIDITY_DROP");
     expect(at({ ...base, entryLiquidityUsd: 50_000 }, 1.01, 0.2, 10_000, { flow: { at: 9_000, liquidityUsd: 10_000 } }).action).toBe("hold");
+    // An emptied pool and zero volume are readings, not missing data.
+    expect(at(fade, 1.01, 0.2, 10_000, { flow: { at: 9_000, liquidityUsd: 0 } }).code).toBe("LIQUIDITY_DROP");
+    const armed = { ...fade, trailArmed: true, peakMark: 1.2, peakAt: 9_500, entryVol5mUsd: 40_000 };
+    expect(at(armed, 1.19, 8, 10_000, { flow: { at: 9_000, vol5mUsd: 0, liquidityUsd: 50_000 } }).code).toBe("FADE_EXIT");
+    expect(at(armed, 1.19, 8, 10_000, { flow: { at: 9_000, vol5mUsd: null, liquidityUsd: null } }).action).toBe("hold");
   });
 
   it("a trailing trade that never gets going still has the breakeven and the time limit, and a long cap once trailing", () => {

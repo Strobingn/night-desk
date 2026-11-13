@@ -359,6 +359,8 @@ export class Desk {
   /** Price feed each watched coin is anchored to. A quote from another feed is not used. */
   private strategyFeed = new BoundedMap<string, string | undefined>(400);
   private strategyExitRetryAt = new Map<string, number>();
+  /** Live engine buys in flight. They count against the engine's open limit before they fill. */
+  private engineLivePending = new Set<string>();
   readonly latency = new LatencyStats();
   private candidateAt = new BoundedMap<string, number>(2_000);
   private watchAt = new BoundedMap<string, number>(400);
@@ -1381,21 +1383,30 @@ export class Desk {
     const block = this.liveEngineBlock();
     if (block) return skip(block);
     const live = this.liveBook!;
-    if (live.positions.has(token.mint)) return skip("Already held on the live book.");
-    const open = [...live.positions.values()].filter((pos) => pos.strategy && !pos.closing).length;
+    if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
+    // A buy still in flight holds a slot, so two signals in one pass cannot both take the last one.
+    const held = [...live.positions.values()].filter((pos) => pos.strategy && !pos.closing && !this.engineLivePending.has(pos.mint)).length;
+    const open = held + this.engineLivePending.size;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
-    const safety = await this.tokenSafety(token.mint);
-    if (safety.status !== "safe") return skip(`${safety.chip}.`);
-    if (isPumpCoin(token)) {
-      const bundle = await this.launchBundle(token.mint, safety.supply);
-      if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
+    this.engineLivePending.add(token.mint);
+    try {
+      const safety = await this.tokenSafety(token.mint);
+      if (safety.status !== "safe") return skip(`${safety.chip}.`);
+      if (isPumpCoin(token)) {
+        const bundle = await this.launchBundle(token.mint, safety.supply);
+        if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
+      }
+      const again = this.liveEngineBlock();
+      if (again) return skip(again);
+      await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
+        tag: fired.signal.signal,
+        book: "live",
+        engineLive: true,
+        strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
+      });
+    } finally {
+      this.engineLivePending.delete(token.mint);
     }
-    await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
-      tag: fired.signal.signal,
-      book: "live",
-      engineLive: true,
-      strategy: { ...meta, targetNetUsd: this.liveEngineTarget() }
-    });
   }
 
   /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
@@ -3738,7 +3749,9 @@ export class Desk {
     if (this.sellUnverified(pos, mark)) return;
     // The first absurd post-fill mark is not a rug. A second agreeing print still stops.
     if (this.holdAbsurdStop(pos, mark, kind, shockConfirmed)) return;
-    const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit, liveTrailPct: this.liveTrailFor(pos) });
+    // The hard stop applies to every position. The desk's own trails do not apply to an engine position:
+    // its variant's stop, target and trail decide the rest.
+    const view = assessPosition(pos, mark, this.config.rules, { trailExits: this.trailTakeProfit && !pos.strategy, liveTrailPct: this.liveTrailFor(pos) });
     const peakRose = view.peakPrice > pos.peakPrice || (view.markPeak != null && view.markPeak > (pos.markPeak ?? 0));
     const armChanged = view.trailArmed !== pos.trailArmed;
     pos.peakPrice = view.peakPrice;
@@ -4990,8 +5003,9 @@ export class Desk {
   }
 
   /** v13.5 the live trail applies to live positions only. */
+  /** The manual live trail. An engine position is sold by its variant's rules, so it has none. */
   private liveTrailFor(pos: Position): number | null {
-    return pos.live === true ? this.liveTrailPct : null;
+    return pos.live === true && !pos.strategy ? this.liveTrailPct : null;
   }
 
   /** v13.5 read-only SOL / USDC balance. In live mode the wallet's USDC is the book's cash. */
