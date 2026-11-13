@@ -5604,10 +5604,11 @@ export class Desk {
     if (pending && pending.priority <= priority) {
       if (pending.budgetMs > budgetMs) return this.capSafety(pending.job, budgetMs);
       if (pending.budgetMs === budgetMs) return pending.job;
-      // A shorter in-flight read stays for its caller. An engine buy does not inherit its timeout.
-    } else {
-      pending?.abort();
+      // A shorter in-flight read may already be holding the lane slot. Keep its answer when it
+      // is Safe or Blocked. Unknown is that read's own timeout, so this caller starts its longer one.
+      return pending.job.then((result) => (result.status === "unknown" ? this.tokenSafety(mint, priority, readLane) : result));
     }
+    pending?.abort();
     const flight: { priority: -1 | 0 | 1 | 2; budgetMs: number; job: Promise<MintSafety>; abort: () => void } = {
       priority,
       budgetMs,

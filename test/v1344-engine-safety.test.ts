@@ -382,10 +382,12 @@ describe("v13.46 engine check timeouts", () => {
       (desk as unknown as { tokenSafety: (mint: string, priority: number, readLane?: boolean) => Promise<{ status: string }> }).tokenSafety(MINT, -1, readLane);
     try {
       const started = Date.now();
-      const manual = safety(false);
       const engine = safety(true);
+      await delay(30);
+      const manualStarted = Date.now();
+      const manual = safety(false);
       await expect(manual).resolves.toMatchObject({ status: "unknown" });
-      const manualElapsed = Date.now() - started;
+      const manualElapsed = Date.now() - manualStarted;
       expect(manualElapsed).toBeGreaterThanOrEqual(2_300);
       expect(manualElapsed).toBeLessThan(4_000);
       await expect(engine).resolves.toMatchObject({ status: "unknown" });
@@ -396,6 +398,27 @@ describe("v13.46 engine check timeouts", () => {
       desk.stop();
     }
   }, 12_000);
+
+  it("uses a shorter in-flight safety read when it answers Safe", async () => {
+    let reads = 0;
+    const desk = new Desk(testConfig({ walletRpcUrl: HELIUS }), {
+      mintAccounts: () => {
+        reads += 1;
+        return new Promise((resolve) => setTimeout(() => resolve(safeMintAccount()), 400));
+      }
+    });
+    const safety = (readLane: boolean) =>
+      (desk as unknown as { tokenSafety: (mint: string, priority: number, readLane?: boolean) => Promise<{ status: string }> }).tokenSafety(MINT, -1, readLane);
+    try {
+      const manual = safety(false);
+      const engine = safety(true);
+      await expect(engine).resolves.toMatchObject({ status: "safe", chip: "Safe" });
+      await expect(manual).resolves.toMatchObject({ status: "safe" });
+      expect(reads).toBe(1);
+    } finally {
+      desk.stop();
+    }
+  });
 
   it("does not hold the one-live-buy lock across another coin's safety read", async () => {
     let reads = 0;
