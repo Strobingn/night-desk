@@ -50,16 +50,16 @@ describe("v13.49 launch-bundle check reads the coin's own launch transactions", 
     result: [{ slot: 12, signature: "later2", err: null }, { slot: 11, signature: "later1", err: null }, ...launch.map((row) => ({ slot: 9, err: null, ...row }))]
   });
 
-  it("fetches only the launch-slot transactions, in one batch, and never the block", async () => {
+  it("a clean coin costs one small batch and never the block", async () => {
     const { desk, calls } = deskWith((call) => {
       if (call.method === "getSignaturesForAddress") return signatures([{ signature: "buy" }, { signature: "failed", err: { InstructionError: [] } }, { signature: "create" }]);
-      if (call.method === "getTransaction") return call.items.map((item, id) => ({ jsonrpc: "2.0", id, result: tx(item.params[0] === "buy" ? "250000" : "0") }));
+      if (call.method === "getTransaction") return call.items.map((item, id) => ({ jsonrpc: "2.0", id, result: tx(item.params[0] === "buy" ? "100000" : "0") }));
       throw new Error("the block must not be read");
     });
     try {
       const result = (await rpc(desk)(mint, 1_000_000n, -1)) as { flagged: boolean; pct: number };
-      expect(result.flagged).toBe(true);
-      expect(result.pct).toBe(25);
+      expect(result.flagged).toBe(false);
+      expect(result.pct).toBe(10);
       expect(calls.map((call) => call.method)).toEqual(["getSignaturesForAddress", "getTransaction"]);
       expect(calls[1]!.items.map((item) => item.params[0])).toEqual(["buy", "create"]); // failed one left out, later slots left out
       expect(calls.every((call) => call.priority === -1 && call.readLane === true)).toBe(true);
@@ -68,10 +68,48 @@ describe("v13.49 launch-bundle check reads the coin's own launch transactions", 
     }
   });
 
+  const flaggedBatch = (blockReply: () => unknown) =>
+    deskWith((call) => {
+      if (call.method === "getSignaturesForAddress") return signatures([{ signature: "buy" }, { signature: "create" }]);
+      if (call.method === "getTransaction") return call.items.map((item, id) => ({ jsonrpc: "2.0", id, result: tx(item.params[0] === "buy" ? "250000" : "0") }));
+      return blockReply();
+    });
+
+  it("checks a flagged batch against the whole slot, which confirms it", async () => {
+    const { desk, calls } = flaggedBatch(() => block("250000"));
+    try {
+      const result = (await rpc(desk)(mint, 1_000_000n, -1)) as { flagged: boolean; pct: number };
+      expect(result).toMatchObject({ flagged: true, pct: 25 });
+      expect(calls.map((call) => call.method)).toEqual(["getSignaturesForAddress", "getTransaction", "getBlock"]);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("clears a flagged batch when the slot shows the coins moved on in transfers the batch cannot see", async () => {
+    const { desk } = flaggedBatch(() => block("50000")); // net 5% once the unseen transfer and sale are counted
+    try {
+      const result = (await rpc(desk)(mint, 1_000_000n, -1)) as { flagged: boolean; pct: number };
+      expect(result).toMatchObject({ flagged: false, pct: 5 });
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("keeps a flagged batch when the slot read fails: no buy on an unchecked flag", async () => {
+    const { desk } = flaggedBatch(() => ({ error: { code: -32004, message: "block not available" } }));
+    try {
+      const result = (await rpc(desk)(mint, 1_000_000n, -1)) as { flagged: boolean; pct: number };
+      expect(result).toMatchObject({ flagged: true, pct: 25 });
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("reads the whole slot when the batch comes back incomplete", async () => {
     const { desk, calls } = deskWith((call) => {
       if (call.method === "getSignaturesForAddress") return signatures([{ signature: "buy" }, { signature: "create" }]);
-      if (call.method === "getTransaction") return [{ jsonrpc: "2.0", id: 0, result: tx("250000") }, { jsonrpc: "2.0", id: 1, result: null }];
+      if (call.method === "getTransaction") return [{ jsonrpc: "2.0", id: 0, result: tx("100000") }, { jsonrpc: "2.0", id: 1, result: null }];
       return block("250000");
     });
     try {
@@ -83,16 +121,19 @@ describe("v13.49 launch-bundle check reads the coin's own launch transactions", 
     }
   });
 
-  it("reads the whole slot when the batch is refused outright", async () => {
+  it("stops batching once the RPC refuses a batch, so later checks are two requests", async () => {
     const { desk, calls } = deskWith((call) => {
       if (call.method === "getSignaturesForAddress") return signatures([{ signature: "create" }]);
       if (call.method === "getTransaction") return { jsonrpc: "2.0", error: { code: -32600, message: "batch requests are not allowed" } };
       return block("100000");
     });
     try {
-      const result = (await rpc(desk)(mint, 1_000_000n, -1)) as { flagged: boolean };
-      expect(result.flagged).toBe(false);
-      expect(calls.at(-1)!.method).toBe("getBlock");
+      const first = (await rpc(desk)(mint, 1_000_000n, -1)) as { flagged: boolean };
+      expect(first.flagged).toBe(false);
+      expect(calls.map((call) => call.method)).toEqual(["getSignaturesForAddress", "getTransaction", "getBlock"]);
+      calls.length = 0;
+      await rpc(desk)(mint, 1_000_000n, -1);
+      expect(calls.map((call) => call.method)).toEqual(["getSignaturesForAddress", "getBlock"]);
     } finally {
       desk.stop();
     }

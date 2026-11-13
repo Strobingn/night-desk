@@ -307,6 +307,8 @@ The launch-bundle check no longer downloads a whole block when it does not have 
 - Those are now read in one batched `getTransaction` request, at most 10 (`BUNDLE_TX_BATCH_MAX`). That is a few kilobytes, where the slot read is megabytes. Failed transactions are skipped: they moved no tokens.
 - Full transactions carry the SOL transfers again, so the same-funder grouping the 13.48 accounts-only block read could not see is back on this path.
 - The whole-slot `getBlock` (accounts only, as in 13.48) is still used when more than 10 transactions launched with the coin, or when the batch is refused or comes back with any transaction missing. A missing one could be the bundled buy, so a partial answer is never used.
+- The batch can miss a launch-slot transfer that moves the coin between wallets without naming the mint. That can only make the share look higher, never lower. So a clean batch is final, and a flagged batch is checked against the whole slot before it is believed. If that slot read fails, the flag stands and the coin is not bought.
+- If the RPC refuses a batched request, the desk stops batching until it restarts and reads the slot directly, so the refusal costs one extra request once and not on every check.
 - Still two Helius requests for a buy (three on the fallback), at priority -1 on the read lane for the live engine. A batch is one request to the desk's limiter. Helius may count each call in it, which is why the batch stops at 10.
 
 ## 13.48 notes
