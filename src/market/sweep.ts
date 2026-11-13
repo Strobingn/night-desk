@@ -28,6 +28,8 @@ export interface SweepItem {
   firstAt: number;
   /** Index into SWEEP_LOOKS_MS of the next look. */
   look: number;
+  /** Set only when the desk saw the coin created on the Pump stream. Never inferred from a listing. */
+  bornAt?: number;
 }
 
 export interface SweepDue {
@@ -53,12 +55,13 @@ export class SweepSchedule {
   }
 
   /** Park a coin. A coin already parked keeps its clock and takes the newer numbers. */
-  watch(raw: RawSighting, now: number): boolean {
+  watch(raw: RawSighting, now: number, bornAt?: number): boolean {
     const mint = raw.mint;
     if (!mint || this.finished.has(mint)) return false;
     const prev = this.items.get(mint);
     if (prev) {
       prev.raw = { ...prev.raw, ...defined(raw), observedAt: prev.raw.observedAt };
+      if (bornAt != null && prev.bornAt == null) prev.bornAt = bornAt;
       return false;
     }
     while (this.items.size >= this.max) {
@@ -67,7 +70,7 @@ export class SweepSchedule {
       this.items.delete(oldest);
       this.stats.evicted += 1;
     }
-    this.items.set(mint, { raw: { ...raw }, firstAt: now, look: 0 });
+    this.items.set(mint, { raw: { ...raw }, firstAt: now, look: 0, ...(bornAt != null ? { bornAt } : {}) });
     this.stats.watched += 1;
     return true;
   }

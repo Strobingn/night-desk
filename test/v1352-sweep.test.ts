@@ -256,4 +256,41 @@ describe("v13.52 fast sweep in the scout", () => {
     expect(h.kills).toHaveLength(1); // counted once
     h.scout.stop();
   });
+  it("does not promote a pool DexScreener prints with zero depth", async () => {
+    const mint = mintOf();
+    const h = harness(new Map([[mint, { vol: 50_000, liq: 0 }]]));
+    h.scout.ingest(create(mint), "pump");
+    await h.scout.sweepTick(Date.now() + 11_000);
+    expect(h.sweep()).toMatchObject({ promoted: 0, watching: 1 });
+    expect(h.otherCalls()).toBe(0);
+    h.scout.stop();
+  });
+
+  it("uses the Pump create time as the age, and makes none up for a listing that looks like one", async () => {
+    const aged = { ...thresholds, maxAgeSeconds: 3_600 };
+    const fromStream = mintOf();
+    const fromList = mintOf();
+    const scout = new Scout({
+      bus: new EventBus<DeskEvents>(),
+      feedMode: "live",
+      demo: false,
+      rpcUrl: RPC,
+      pumpWsUrl: "ws://unused",
+      fetchImpl: (async (input: unknown) => {
+        const url = String(input);
+        if (!url.startsWith(DEX)) return Response.json({ pairs: [] });
+        // No pairCreatedAt on either.
+        return Response.json(url.slice(DEX.length).split(",").map((mint) => ({ baseToken: { address: mint }, priceUsd: "0.00002", volume: { h1: 50_000 }, liquidity: { usd: 9_000 } })));
+      }) as typeof fetch,
+      prefilter: () => aged,
+      killMemory: new KillMemory(),
+      onStatus: () => {}
+    });
+    scout.ingest(create(fromStream), "pump");
+    // Jupiter's recent list also says pumpfun and names the developer.
+    scout.ingest(create(fromList), "jupiter");
+    await scout.sweepTick(Date.now() + 11_000);
+    expect(scout.prefilterView().sweep).toMatchObject({ promoted: 1, watching: 1 });
+    scout.stop();
+  });
 });

@@ -148,6 +148,11 @@ export interface ScoutOptions {
   onPumpFrame?: (text: string) => void;
 }
 
+/** The create frame of the Pump stream is the one sighting whose time is the coin's birth. */
+function pumpBirth(raw: RawSighting, origin: SourceId | undefined): number | undefined {
+  return origin === "pump" && raw.source === "pumpfun" && raw.devWallet ? raw.observedAt : undefined;
+}
+
 /** Kills a coin can grow out of. Everything else is a hard kill. */
 const SOFT_KILL_CODES = new Set(["VOLUME_TOO_LOW", "LIQUIDITY_TOO_THIN", "TOKEN_TOO_NEW"]);
 
@@ -331,7 +336,7 @@ export class Scout {
         prior.refreshes = Math.max(prior.refreshes, 1);
         if ((raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
         if (hint > prior.volume) prior.volume = hint;
-        this.park(raw);
+        this.park(raw, pumpBirth(raw, origin));
         return;
       }
       prior.state = "queued";
@@ -356,7 +361,7 @@ export class Scout {
       if (gate === "wait") {
         slot.state = "waiting";
         slot.refreshes = 1;
-        this.park(raw);
+        this.park(raw, pumpBirth(raw, origin));
         return;
       }
     }
@@ -451,9 +456,9 @@ export class Scout {
   }
 
   /** Hand a parked coin to the sweep. It asks DexScreener about it; nothing is read from the RPC. */
-  private park(raw: RawSighting): void {
+  private park(raw: RawSighting, bornAt?: number): void {
     if (!this.opts.prefilter || this.opts.sweep === false) return;
-    this.sweep.watch(raw, Date.now());
+    this.sweep.watch(raw, Date.now(), bornAt);
   }
 
   /**
@@ -501,14 +506,15 @@ export class Scout {
       this.sweep.finish(mint);
       return;
     }
-    // A Pump stream create is the coin's birth: the desk saw it happen.
-    const born = row?.createdAt ?? item.raw.createdAt ?? (item.raw.source === "pumpfun" && item.raw.devWallet ? item.raw.observedAt : undefined);
+    // A Pump stream create is the coin's birth: the desk saw it happen. A listing with no
+    // creation time gets no age made up for it.
+    const born = row?.createdAt ?? item.raw.createdAt ?? item.bornAt;
     const fresh: RawSighting = {
       ...item.raw,
       ...(row?.priceUsd != null ? { priceUsd: row.priceUsd } : {}),
       ...(row?.vol1hUsd != null ? { volume1hUsd: row.vol1hUsd } : {}),
-      // DexScreener prints no depth for some curve pairs. Unknown is not zero.
-      ...(row && row.liquidityUsd > 0 ? { liquidityUsd: row.liquidityUsd } : {}),
+      // DexScreener prints no depth for some curve pairs. Unknown is not zero, and a printed zero is zero.
+      ...(row?.liquidityKnown ? { liquidityUsd: row.liquidityUsd } : {}),
       ...(row?.marketCapUsd != null ? { marketCapUsd: row.marketCapUsd } : {}),
       ...(born != null ? { createdAt: born } : {})
     };
