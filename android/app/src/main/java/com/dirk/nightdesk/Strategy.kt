@@ -248,13 +248,13 @@ object Strategy {
         val kind = view.variants.firstOrNull { it.live }?.signal.orEmpty().ifBlank { "matching" }
         val cap = view.liveDailyCapUsd
         if (cap > 0 && view.liveSpentTodayUsd + view.liveTradeUsd > cap + 1e-9) {
-            return "Daily live cap reached: $" + "%.2f".format(Locale.US, view.liveSpentTodayUsd) + " of $" + "%.2f".format(Locale.US, cap) + " spent today. Live buys resume on the next UTC day, or raise the cap in Settings."
+            return "Daily live cap reached: $" + "%.2f".format(Locale.US, view.liveSpentTodayUsd) + " of $" + "%.2f".format(Locale.US, cap) + " spent today. Live buys resume when the desk's day rolls over, or raise the cap in Settings."
         }
         if (view.liveSkipAt > 0 && view.liveSkipAt >= view.liveLastBuyAt) {
             return "Last live attempt (${ago(nowMs, view.liveSkipAt)}): ${view.liveSkipSymbol} was refused. ${view.liveSkipMessage}"
         }
-        if (view.liveBuys > 0) return "${view.liveBuys} live ${if (view.liveBuys == 1) "buy" else "buys"} since the desk started, the last ${ago(nowMs, view.liveLastBuyAt)}."
-        val since = if (view.liveSince > 0) " since the desk started ${ago(nowMs, view.liveSince)}" else ""
+        if (view.liveBuys > 0) return "${view.liveBuys} live ${if (view.liveBuys == 1) "buy" else "buys"} so far, the last ${ago(nowMs, view.liveLastBuyAt)}."
+        val since = if (view.liveSince > 0) " since ${ago(nowMs, view.liveSince)}" else ""
         if (view.liveSignals == 0 && view.liveOtherSignals > 0) {
             return "No $kind signal has fired$since. ${view.liveOtherSignals} of the other kind fired, which this variant does not trade."
         }

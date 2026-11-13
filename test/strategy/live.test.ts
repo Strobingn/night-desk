@@ -368,6 +368,8 @@ describe("engine live variant", () => {
       await signal(desk);
       expect(desk.strategyView().live).toMatchObject({ signals: 0, otherSignals: 1, buys: 0 });
       desk.updateStrategy({ liveVariant: "launch-3" });
+      // A new live variant starts its own count: the momentum variant's tally does not carry over.
+      expect(desk.strategyView().live).toMatchObject({ signals: 0, otherSignals: 0, buys: 0, lastSkip: null });
       desk.updateSettings({ liveDailyCapUsd: 5 });
       await signal(desk, young({ mint: "EngineLive555555555555555555555555555555555", symbol: "EL5" }));
       expect(desk.strategyView().live).toMatchObject({ signals: 1, buys: 1, lastSkip: null, spentTodayUsd: 5, dailyCapUsd: 5 });

@@ -460,8 +460,8 @@ export class Desk {
   /** Latest quote-side USD from a Dex tick, used when a later NO_ROUTES has no quote on the request. */
   private lastQuoteUsd = new Map<string, number>();
   private startedAt = Date.now();
-  /** When this process started. The live engine counters are since then. */
-  private readonly processStartedAt = Date.now();
+  /** When the live engine counters started: process start, or the last change of live variant. */
+  private liveEngineSince = Date.now();
   /** Earliest instant the current paper book owns. Recaps never look past it. */
   private resetAt = 0;
   /** Bumped by a paper reset so a fill already in flight cannot reopen the book. */
@@ -1255,7 +1255,7 @@ export class Desk {
         tradeUsd: this.liveTradeUsd,
         targetNetUsd: this.liveEngineTarget(),
         blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen.",
-        since: this.processStartedAt,
+        since: this.liveEngineSince,
         signals: this.liveEngine.signals,
         otherSignals: this.liveEngine.otherSignals,
         buys: this.liveEngine.buys,
@@ -1318,6 +1318,9 @@ export class Desk {
     this.strategy.settings = result.settings;
     this.store.writeJson("strategy", result.settings);
     if (wasLive !== (result.settings.liveVariant ?? null)) {
+      // The counters describe the variant that is live now, so they start over with it.
+      this.liveEngine = { signals: 0, otherSignals: 0, buys: 0, lastSignalAt: null, lastBuyAt: null, lastSkip: null };
+      this.liveEngineSince = Date.now();
       const block = this.liveEngineBlock();
       this.log({
         stage: "system",

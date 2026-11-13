@@ -303,7 +303,7 @@ Not settings, but useful context: paper cash $549.86, paper equity $682.87 (mark
 
 Why the live engine is not buying.
 
-- `strategy.live` gains, all since the desk process started: `since`, `signals` (signals of the live variant's kind), `otherSignals` (the other kind, which it does not trade), `buys`, `lastSignalAt`, `lastBuyAt`, `lastSkip` (`at`, `symbol`, `code`, `message`: the last refused live attempt in the buy path's own words), plus `spentTodayUsd` and `dailyCapUsd`.
+- `strategy.live` gains, all since the desk process started or the live variant last changed: `since`, `signals` (signals of the live variant's kind), `otherSignals` (the other kind, which it does not trade), `buys`, `lastSignalAt`, `lastBuyAt`, `lastSkip` (`at`, `symbol`, `code`, `message`: the last refused live attempt in the buy path's own words), plus `spentTodayUsd` and `dailyCapUsd`.
 - The Engine tab shows one line from these under Live money.
 - Changed limit: for an engine live buy, `maxTradesPerHour` (default 0 = off) counts live buy fills in the last hour only. Paper engine buys used to count against it, so a set limit could be used up before any live buy. Paper auto-buys are counted as before.
 - A fresh-launch coin still on the pump.fun curve is bought with SOL, not USDC. A live buy of one needs about the live trade size in SOL plus fees in the wallet; with USDC only it is refused with `LIVE_WALLET`, and that is now visible in `lastSkip`.
