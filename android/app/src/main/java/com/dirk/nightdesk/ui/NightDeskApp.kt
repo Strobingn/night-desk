@@ -356,6 +356,7 @@ fun NightDeskApp(desk: DeskRepository) {
     val lastGood by desk.lastGoodUrl.collectAsState()
     val activeUrl by desk.activeUrl.collectAsState()
     val notice by desk.notice.collectAsState()
+    val sellAnyway by desk.sellAnywayAsk.collectAsState()
     val hardKill by desk.hardKillAsk.collectAsState()
     val shared by desk.sharedCoin.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
@@ -449,6 +450,23 @@ fun NightDeskApp(desk: DeskRepository) {
         )
     }
     val positionCount = snap?.positions?.size ?: 0
+    sellAnyway?.let { ask ->
+        AlertDialog(
+            onDismissRequest = { desk.dismissSellAnyway() },
+            containerColor = Panel,
+            titleContentColor = Ink,
+            textContentColor = Ink,
+            title = { Text("Sell ${ask.symbol} anyway?") },
+            text = { Text("${ask.message}\n\nThis tap ignores the exit slippage cap. The 6% setting stays. Engine and automatic exits still refuse.") },
+            confirmButton = {
+                Button(
+                    onClick = { scope.launch { desk.confirmSellAnyway() } },
+                    colors = ButtonDefaults.buttonColors(containerColor = P.down, contentColor = P.onDown)
+                ) { Text("Sell anyway", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { desk.dismissSellAnyway() }) { Text("Cancel", color = Dim) } }
+        )
+    }
     Scaffold(
         containerColor = P.bg,
         bottomBar = {
@@ -653,6 +671,8 @@ private fun Header(status: String, live: Boolean, mode: String, compact: Boolean
     }
 }
 
+private fun isDeadHolding(pos: com.dirk.nightdesk.PositionRow): Boolean = pos.liquidityNote.isNotBlank()
+
 private fun liveCashLabel(book: LiveBookInfo, wallet: com.dirk.nightdesk.WalletInfo?): String =
     com.dirk.nightdesk.OneTap.liveCashLabel(
         wallet?.solBalance,
@@ -709,10 +729,13 @@ private fun BookScreen(
                 pnlTint(openPnl)
             )
         }
-        if (snap == null || snap.positions.isEmpty()) {
+        val paperOpen = snap?.positions?.filter { !isDeadHolding(it) }.orEmpty()
+        val paperDead = snap?.positions?.filter { isDeadHolding(it) }.orEmpty()
+        if (snap == null || paperOpen.isEmpty()) {
             item {
                 Text(
-                    if (snap?.strategy?.enabled == true) "No open positions. The engine buys when a watched coin fires a signal."
+                    if (paperDead.isNotEmpty()) "No paper positions with a sell route. Coins with no route are under Dead / no sell route."
+                    else if (snap?.strategy?.enabled == true) "No open positions. The engine buys when a watched coin fires a signal."
                     else "No open positions. A name still has to clear every hard filter.",
                     color = P.muted,
                     fontSize = 14.sp,
@@ -720,7 +743,7 @@ private fun BookScreen(
                 )
             }
         } else {
-            itemsIndexed(snap.positions, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
+            itemsIndexed(paperOpen, key = { index, pos -> "${pos.mint}#$index" }) { _, pos ->
                 OpenPositionCard(pos, onClose, onSell, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
             }
         }
@@ -733,10 +756,19 @@ private fun BookScreen(
                 )
             }
             item { LiveMoneyCard(liveBook) }
-            if (liveBook.positions.isEmpty()) {
-                item { Text("No live positions. LIVE BUY on a coin sends a real ${money(liveBook.tradeUsd)} buy.", color = P.muted, fontSize = 13.sp) }
+            val liveOpen = liveBook.positions.filter { !isDeadHolding(it) }
+            val liveDead = liveBook.positions.filter { isDeadHolding(it) }
+            if (liveOpen.isEmpty()) {
+                item {
+                    Text(
+                        if (liveDead.isNotEmpty()) "No live positions with a sell route. Coins with no route are under Dead / no sell route."
+                        else "No live positions. LIVE BUY on a coin sends a real ${money(liveBook.tradeUsd)} buy.",
+                        color = P.muted,
+                        fontSize = 13.sp
+                    )
+                }
             } else {
-                itemsIndexed(liveBook.positions, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
+                itemsIndexed(liveOpen, key = { index, pos -> "live:${pos.mint}#$index" }) { _, pos ->
                     OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap.trailArmPct, trailOn = snap.trailTakeProfit, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
                 }
             }
@@ -748,6 +780,20 @@ private fun BookScreen(
                     color = P.muted,
                     fontSize = 12.sp
                 )
+            }
+        }
+        val dead = (snap?.positions?.filter { isDeadHolding(it) }.orEmpty()) + (liveBook?.positions?.filter { isDeadHolding(it) }.orEmpty())
+        if (dead.isNotEmpty()) {
+            item {
+                Section("Dead / no sell route", trailing = "${dead.size}", collapsible = true, open = false) {
+                    dead.forEach { pos ->
+                        if (pos.live) {
+                            OpenPositionCard(pos, onCloseLive, { mint, _ -> onCloseLive(mint) }, armPct = snap?.trailArmPct ?: 0.0, trailOn = snap?.trailTakeProfit == true, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
+                        } else {
+                            OpenPositionCard(pos, onClose, onSell, armPct = snap?.trailArmPct ?: 0.0, trailOn = snap?.trailTakeProfit == true, oneTap = oneTap, onOpenCoin = onOpenCoin, orders = orders)
+                        }
+                    }
+                }
             }
         }
         // v13.32 the rest folds into sections so the positions get the screen.

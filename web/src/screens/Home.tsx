@@ -10,6 +10,7 @@ import { dayBase } from "../coins";
 import { crashOnHome } from "../../../src/desk/crash-card";
 import { exitLabel } from "../../../src/desk/gap";
 import { LiveTapPair, OneTapBar, TapSellButton } from "./OneTap";
+import { isDeadHolding, splitHoldings } from "../holdings";
 import { WalletCard } from "./Wallet";
 
 
@@ -25,6 +26,8 @@ const STAGES = [
 
 export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; actions: DeskActions; busy: string | null }) {
   const openPnl = snap.positions.reduce((sum, pos) => sum + pos.pnlUsd, 0);
+  const paper = splitHoldings(snap.positions);
+  const liveDead = (snap.liveBook?.positions ?? []).filter(isDeadHolding);
   const [readyBusy, setReadyBusy] = useState(false);
   const [resetting, setResetting] = useState(false);
   const maxKill = Math.max(1, ...Object.values(snap.killReasons));
@@ -66,15 +69,21 @@ export function HomeScreen({ snap, actions, busy }: { snap: DeskSnapshot; action
 
       <OneTapBar snap={snap} actions={actions} />
 
-      {snap.positions.length === 0 ? (
-        <p className="empty">Flat. A name has to clear every hard filter and score at least {snap.rules.analystMinScore.toFixed(2)}. Or add one yourself on Add coin.</p>
+      {paper.open.length === 0 ? (
+        <p className="empty">
+          {paper.dead.length > 0
+            ? "No paper positions with a sell route. Coins with no route are under Dead / no sell route."
+            : `Flat. A name has to clear every hard filter and score at least ${snap.rules.analystMinScore.toFixed(2)}. Or add one yourself on Add coin.`}
+        </p>
       ) : (
         <div className="positions">
-          {snap.positions.map((pos, index) => (
+          {paper.open.map((pos, index) => (
             <PositionCard key={`${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} snap={snap} />
           ))}
         </div>
       )}
+
+      <DeadHoldings rows={[...paper.dead, ...liveDead]} actions={actions} busy={busy} snap={snap} />
 
       <OpenOrdersCard snap={snap} actions={actions} />
 
@@ -316,6 +325,32 @@ function PositionCard({ pos, actions, busy, armPct, trailOn, snap }: { pos: Posi
   );
 }
 
+function DeadHoldings({
+  rows,
+  actions,
+  busy,
+  snap
+}: {
+  rows: PositionView[];
+  actions: DeskActions;
+  busy: string | null;
+  snap: DeskSnapshot;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <details className="dead-book">
+      <summary>
+        Dead / no sell route ({rows.length})
+      </summary>
+      <div className="positions">
+        {rows.map((pos, index) => (
+          <PositionCard key={`dead:${pos.book ?? "paper"}:${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} snap={snap} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function liveBookCash(snap: DeskSnapshot): string {
   const lb = snap.liveBook;
   if (!lb) return "USDC unknown";
@@ -332,6 +367,7 @@ function liveBookCash(snap: DeskSnapshot): string {
 /** v13.7 armed desk: the live book (real money), apart from the AI's paper book. */
 function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions: DeskActions; busy: string | null }) {
   const lb = snap.liveBook!;
+  const live = splitHoldings(lb.positions);
   return (
     <section className="live-book" aria-label="Live positions">
       <div className="section-head">
@@ -346,11 +382,15 @@ function LiveBookSection({ snap, actions, busy }: { snap: DeskSnapshot; actions:
         {lb.scope === "all" ? "Live: manual + AI." : "Live: manual only · AI: paper."} {usd(lb.tradeUsd)} per trade · trail {(lb.trailPct * 100).toFixed(1)}% · hard stop −
         {(snap.rules.stopLossPct * 100).toFixed(0)}% · {lb.dailyCapUsd != null ? `daily cap ${usd(lb.dailyCapUsd)}` : "no daily max"}.
       </p>
-      {lb.positions.length === 0 ? (
-        <p className="empty">No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real {usd(lb.tradeUsd)} buy.</p>
+      {live.open.length === 0 ? (
+        <p className="empty">
+          {live.dead.length > 0
+            ? "No live positions with a sell route. Coins with no route are under Dead / no sell route."
+            : `No live positions. One-tap Buy on the Tape, Add coin or Advisor sends a real ${usd(lb.tradeUsd)} buy.`}
+        </p>
       ) : (
         <div className="positions">
-          {lb.positions.map((pos, index) => (
+          {live.open.map((pos, index) => (
             <PositionCard key={`live:${pos.mint}#${index}`} pos={pos} actions={actions} busy={busy} armPct={snap.rules.trailArmPct} trailOn={snap.prefs.trailTakeProfit === true} snap={snap} />
           ))}
         </div>

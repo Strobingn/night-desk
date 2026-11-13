@@ -239,6 +239,8 @@ export interface ExitOrder {
   reason: Rejection;
   pnlPct: number;
   score: number;
+  /** Manual sell only. Sends this close even when the exit haircut is over the saved cap. */
+  sellAnyway?: boolean;
 }
 
 export interface Position {

@@ -12,8 +12,17 @@ import { HARD_RULES } from "../rules.js";
 import { IntentError, buildIntent, serializeUnsigned } from "../pump/intents.js";
 import { solanaConnection, type PumpConnection } from "../pump/rpc.js";
 import type { LiveSwapResult } from "./live-broker.js";
-import { CONFIRM_TIMEOUT_MS, isAmbiguousSendError, rejectedSend, unconfirmedSend, withTimeout } from "./live-submit.js";
+import { CONFIRM_TIMEOUT_MS, isAmbiguousSendError, isNoSellRouteMessage, noSellRouteError, rejectedSend, sellExitImpactError, unconfirmedSend, withTimeout } from "./live-submit.js";
 import { loadDeskKeypair } from "./wallet-key.js";
+
+/**
+ * How far a sell fill sits under the mark. A fill at or above the mark is not a loss.
+ * Automatic exits use this so a better on-chain price is not refused as slippage.
+ */
+export function pumpSellShortfall(fillPriceUsd: number, markPriceUsd: number): number {
+  if (!(markPriceUsd > 0) || !(fillPriceUsd > 0) || !Number.isFinite(fillPriceUsd) || !Number.isFinite(markPriceUsd)) return 0;
+  return Math.max(0, (markPriceUsd - fillPriceUsd) / markPriceUsd);
+}
 
 export function usesPumpRoute(input: { dex?: string | null; priceFeed?: string | null }): boolean {
   if (input.priceFeed === "chain") return true;
@@ -29,8 +38,12 @@ export interface PumpLiveRequest {
   decimals?: number | null;
   solPriceUsd: number;
   markPriceUsd?: number;
-  /** Fraction, e.g. 0.03. */
+  /** Fraction, e.g. 0.03. Sell anyway widens this send only. */
   slippageFraction?: number;
+  /** Saved exit cap. A sell over this is refused unless sellAnyway is set. */
+  exitCap?: number;
+  /** Manual sell only. Does not apply when the pool has no quote. */
+  sellAnyway?: boolean;
   keypairPath?: string;
   readEnvSecret?: () => string | undefined;
   rpcUrl: string;
@@ -110,6 +123,9 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
     });
   } catch (err) {
     const message = err instanceof IntentError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : String(err);
+    if (req.side === "sell" && (isNoSellRouteMessage(message) || /insufficient liquidity|no liquidity|zero liquidity/i.test(message))) {
+      throw noSellRouteError();
+    }
     throw new Error(`LIVE_SWAP_FAILED: ${message}`);
   }
   const qty = Number(built.tokenAmount) / 10 ** decimals;
@@ -119,6 +135,11 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   if (req.side === "buy") {
     const gate = entryPriceAllowed(req.markPriceUsd ?? 0, fillPriceUsd, slip);
     if (!gate.ok) throw new Error(gate.message);
+  } else {
+    if (!(qty > 0) || !(fillPriceUsd > 0)) throw noSellRouteError();
+    const cap = req.exitCap ?? slip;
+    const shortfall = pumpSellShortfall(fillPriceUsd, req.markPriceUsd ?? 0);
+    if (shortfall > cap + 1e-9 && req.sellAnyway !== true) throw sellExitImpactError(shortfall, cap);
   }
   if (!(qty > 0) || !(fillPriceUsd > 0)) throw new Error("LIVE_SWAP_FAILED: pump quote was not a usable fill. Nothing was sent.");
   const blockhash = await connection.getLatestBlockhash();

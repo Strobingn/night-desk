@@ -353,7 +353,8 @@ describe("v13.3 adjustable slippage (entry up to 50%, exit tolerance)", () => {
       expect(desk.snapshot().positions.find((p) => p.mint === thin)?.stopPrice).toBeCloseTo(stopBasis * 0.94, 10);
 
       // A tight custom exit tolerance blocks the same buy before it opens.
-      await desk.closePosition(thin, 1);
+      const closedThin = await desk.closePosition(thin, 1, undefined, { sellAnyway: true });
+      expect(closedThin.ok).toBe(true);
       expect(desk.updateSettings({ maxExitSlippage: 5 }).ok).toBe(true);
       const exitBlocked = await desk.manualBuy(thin, 50, { ignoreCooldown: true });
       expect(exitBlocked).toMatchObject({ ok: false, code: "EXIT_IMPACT" });

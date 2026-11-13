@@ -94,6 +94,7 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
   const [buyAsk, setBuyAsk] = useState<BuyAsk | null>(null);
+  const [sellAsk, setSellAsk] = useState<{ mint: string; symbol: string; percent: 25 | 50 | 100; book?: "live"; message: string; oneTap?: boolean } | null>(null);
   const [addQuery, setAddQuery] = useState<{ q: string; n: number }>(() => ({ q: new URLSearchParams(location.search).get("add") ?? "", n: 0 }));
   const [busy, setBusy] = useState<string | null>(null);
   // v13.3 one tap. The ref is the double-tap guard (state updates are async); the set mirrors it for rendering.
@@ -245,16 +246,22 @@ export function App() {
     [snap, minutesLeftFor]
   );
 
-  const sell = useCallback(async (mint: string, symbol: string, percent: 25 | 50 | 100, book?: "live") => {
+  const sell = useCallback(async (mint: string, symbol: string, percent: 25 | 50 | 100, book?: "live", sellAnyway = false) => {
     const verb = percent === 100 ? `Close ${symbol} at the mark?` : `Sell ${percent}% of ${symbol} at the mark?`;
     const how =
       book === "live" || (modeRef.current === "live" && !splitRef.current)
         ? "LIVE: a real on-chain sell from the desk wallet."
         : "Paper fill against the same pool model as a stop.";
-    if (!window.confirm(`${verb} ${how} The hard stop still fires on its own.`)) return;
+    if (!sellAnyway && !window.confirm(`${verb} ${how} The hard stop still fires on its own.`)) return;
     setBusy(`${mint}:${percent}`);
-    const res = await api<{ proceedsUsd?: number; error?: string; code?: string }>("/api/positions/sell", { body: { mint, percent, ...(book ? { book } : {}) } });
+    const res = await api<{ proceedsUsd?: number; error?: string; code?: string; allowSellAnyway?: boolean }>("/api/positions/sell", {
+      body: { mint, percent, ...(book ? { book } : {}), ...(sellAnyway ? { sellAnyway: true } : {}) }
+    });
     setBusy(null);
+    if (!res.ok && res.body.allowSellAnyway) {
+      setSellAsk({ mint, symbol, percent, book, message: res.body.error ?? "Exit slippage is over the cap." });
+      return;
+    }
     const refused = res.body.error ? `${res.body.error}${res.body.code ? ` (${res.body.code})` : ""}` : "Sell failed.";
     setNotice(
       res.ok
@@ -323,13 +330,19 @@ export function App() {
   );
 
   const oneTapSell = useCallback(
-    async (mint: string, symbol: string, book?: "live") => {
+    async (mint: string, symbol: string, book?: "live", sellAnyway = false) => {
       const key = `sell:${book ?? "paper"}:${mint}`;
       if (inflight.current.has(key)) return;
       track(key, true);
       const started = performance.now();
-      const res = await api<SellReply>("/api/positions/sell", { body: { mint, percent: 100, idemKey: newIdemKey(), ...(book ? { book } : {}) } });
+      const res = await api<SellReply & { allowSellAnyway?: boolean }>("/api/positions/sell", {
+        body: { mint, percent: 100, idemKey: newIdemKey(), ...(book ? { book } : {}), ...(sellAnyway ? { sellAnyway: true } : {}) }
+      });
       track(key, false);
+      if (!res.ok && res.body.allowSellAnyway) {
+        setSellAsk({ mint, symbol, percent: 100, book, oneTap: true, message: res.body.error ?? "Exit slippage is over the cap." });
+        return;
+      }
       setNotice({ ok: res.ok, toast: true, text: sellToast(symbol, { ...res.body, ok: res.ok }, Math.round(performance.now() - started)) });
     },
     [track]
@@ -498,6 +511,32 @@ export function App() {
         setBuyAsk(null);
         void buy(ask);
       }} /> : null}
+      {sellAsk ? (
+        <div className="modal-back" role="presentation" onClick={() => setSellAsk(null)}>
+          <div className="modal" role="dialog" aria-labelledby="sell-anyway-title" onClick={(event) => event.stopPropagation()}>
+            <h2 id="sell-anyway-title">Sell {sellAsk.symbol} anyway?</h2>
+            <p>{sellAsk.message}</p>
+            <p className="fine">This tap ignores the exit slippage cap. The 6% setting stays. Engine and automatic exits still refuse. If there is no route, nothing is sent.</p>
+            <div className="modal-actions">
+              <button className="ghost" type="button" onClick={() => setSellAsk(null)}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                type="button"
+                onClick={() => {
+                  const ask = sellAsk;
+                  setSellAsk(null);
+                  if (ask.oneTap) void oneTapSell(ask.mint, ask.symbol, ask.book, true);
+                  else void sell(ask.mint, ask.symbol, ask.percent, ask.book, true);
+                }}
+              >
+                Sell anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

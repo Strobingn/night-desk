@@ -120,7 +120,8 @@ describe("v13.39 live sell no-route and drained quote side", () => {
     expect(closed.ok).toBe(false);
     if (closed.ok) throw new Error("expected a refusal");
     expect(closed.error).toBe(NO_SELL_ROUTE_MESSAGE);
-    expect(closed.error).toMatch(/Liquidity gone, no sell route/);
+    expect(closed.error).toMatch(/No sell route, pool drained/);
+    expect(closed.allowSellAnyway).toBeUndefined();
     expect(closed.error).not.toMatch(/timeout/i);
     expect(desk.liveBook?.positions.has(MINT)).toBe(true);
     const view = desk.snapshot().liveBook?.positions.find((p) => p.mint === MINT);

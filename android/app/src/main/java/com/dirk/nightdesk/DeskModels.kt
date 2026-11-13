@@ -133,6 +133,9 @@ data class LiveBookInfo(
 
 data class DeskNotice(val ok: Boolean, val text: String)
 
+/** A manual sell the desk refused for exit slippage. Confirming sends the same sell with sellAnyway. */
+data class SellAnywayAsk(val mint: String, val symbol: String, val live: Boolean, val percent: Int, val message: String)
+
 data class ClosedTradeRow(
     val id: String,
     val symbol: String,
