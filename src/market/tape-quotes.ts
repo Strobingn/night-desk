@@ -37,6 +37,10 @@ export interface DexTapeRow {
   dex?: string;
   buys5m?: number;
   sells5m?: number;
+  /** Market cap (or FDV when that is all the pair prints). Absent when unknown. */
+  marketCapUsd?: number;
+  /** When the pair was created, unix ms. Absent when the pair does not say. */
+  createdAt?: number;
 }
 
 const finite = (v: unknown): number | null => {
@@ -66,6 +70,9 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
     txns?: { m5?: { buys?: number; sells?: number } };
     priceChange?: { h1?: number };
     dexId?: string;
+    marketCap?: number;
+    fdv?: number;
+    pairCreatedAt?: number;
   }>;
   if (!Array.isArray(rows)) return out;
   for (const row of rows) {
@@ -78,6 +85,8 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
       change1hPct: finite(row.priceChange?.h1),
       liquidityUsd: finite(row.liquidity?.usd) ?? 0,
       dex: typeof row.dexId === "string" ? row.dexId : undefined,
+      ...(positive(row.marketCap) ?? positive(row.fdv) ? { marketCapUsd: (positive(row.marketCap) ?? positive(row.fdv))! } : {}),
+      ...(positive(row.pairCreatedAt) ? { createdAt: positive(row.pairCreatedAt)! } : {}),
       ...(finite(row.txns?.m5?.buys) != null && finite(row.txns?.m5?.sells) != null ? { buys5m: finite(row.txns?.m5?.buys)!, sells5m: finite(row.txns?.m5?.sells)! } : {})
     };
     const prev = out.get(mint);
@@ -85,6 +94,9 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
     if (prev) {
       cand.vol1hUsd = Math.max(cand.vol1hUsd ?? 0, prev.vol1hUsd ?? 0);
       cand.vol5mUsd = Math.max(cand.vol5mUsd ?? 0, prev.vol5mUsd ?? 0);
+      // The coin is as old as its oldest pair.
+      const born = Math.min(cand.createdAt ?? Infinity, prev.createdAt ?? Infinity);
+      if (Number.isFinite(born)) cand.createdAt = born;
     }
     const better =
       !prev ||
@@ -94,6 +106,7 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
     else if (prev) {
       prev.vol1hUsd = cand.vol1hUsd;
       prev.vol5mUsd = cand.vol5mUsd;
+      if (cand.createdAt != null) prev.createdAt = cand.createdAt;
     }
   }
   return out;

@@ -37,4 +37,13 @@ class V1334PrefilterTest {
         assertFalse(snap!!.prefilter.present)
         assertEquals(0, snap.prefilter.rpcSaved)
     }
+
+    @Test
+    fun settingsLineShowsTheFastSweep() {
+        val line = prefilterLine(
+            PrefilterStats(present = true, sweep = com.dirk.nightdesk.SweepStats(watching = 42, looks = 310, calls = 12, promoted = 6))
+        )
+        assertTrue(line.contains("sweep 42 parked, 310 looks, 6 passed"))
+        assertTrue(!prefilterLine(PrefilterStats(present = true)).contains("sweep"))
+    }
 }

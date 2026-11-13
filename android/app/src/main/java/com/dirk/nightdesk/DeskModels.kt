@@ -472,8 +472,13 @@ data class PrefilterStats(
     val rpcSaved: Int = 0,
     val heliusQueue: Int = 0,
     val enrichP50: Int = 0,
-    val enrichP90: Int = 0
+    val enrichP90: Int = 0,
+    /** v13.52 fast sweep. Null on a desk older than 13.52. */
+    val sweep: SweepStats? = null
 )
+
+/** v13.52 coins parked for a free DexScreener look, looks taken, and coins that passed to enrich. */
+data class SweepStats(val watching: Int = 0, val looks: Int = 0, val calls: Int = 0, val promoted: Int = 0, val expired: Int = 0)
 
 data class SafetyChip(val mint: String, val safety: String, val bundle: String = "")
 
@@ -917,13 +922,23 @@ private fun parsePrefilter(row: JSONObject?): PrefilterStats {
         }
     }
     val enrich = row.optJSONObject("enrich")
+    val sweep = row.optJSONObject("sweep")
     return PrefilterStats(
         present = true,
         kills = kills,
         rpcSaved = row.optInt("rpcSaved", 0),
         heliusQueue = row.optInt("heliusQueue", 0),
         enrichP50 = enrich?.optInt("p50Ms", 0) ?: 0,
-        enrichP90 = enrich?.optInt("p90Ms", 0) ?: 0
+        enrichP90 = enrich?.optInt("p90Ms", 0) ?: 0,
+        sweep = sweep?.let {
+            SweepStats(
+                watching = it.optInt("watching", 0),
+                looks = it.optInt("looks", 0),
+                calls = it.optInt("calls", 0),
+                promoted = it.optInt("promoted", 0),
+                expired = it.optInt("expired", 0)
+            )
+        }
     )
 }
 
