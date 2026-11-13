@@ -77,7 +77,7 @@ export function replayGrid(): ReplayRules[] {
 export async function replaySaved(
   quotes: RecordedQuote[],
   signals: RecordedSignal[],
-  opts: { targetNetUsd?: number; tradeUsd?: number; grid?: ReplayRules[]; /** Quotes between clock checks. Tests set 1 to force yields. */ yieldEvery?: number } = {}
+  opts: { targetNetUsd?: number; tradeUsd?: number; grid?: ReplayRules[]; /** Quotes between clock checks. Tests set 1 to force yields. */ yieldEvery?: number; /** When the replay was asked for. Timers do not run past it. Absent: the last saved quote. */ until?: number } = {}
 ): Promise<ReplayResult> {
   const targetNetUsd = opts.targetNetUsd ?? STRATEGY.targetNetUsd;
   const tradeUsd = opts.tradeUsd ?? STRATEGY.tradeUsd;
@@ -179,7 +179,9 @@ export async function replaySaved(
     }
   }
   // Positions with no later quote still run out their timers on the last mark.
-  for (const held of holders.values()) for (const { key, entry } of held) advance(key, entry, Number.POSITIVE_INFINITY);
+  // Only up to the cutoff: a deadline after the data ends has not happened, so that position stays open.
+  const cutoff = opts.until ?? (quotes.length ? quotes[quotes.length - 1]!.t : 0);
+  for (const held of holders.values()) for (const { key, entry } of held) advance(key, entry, cutoff + 1);
   // Signals after the last saved quote open and stay open: they are reported, not scored.
   openSignals(Number.POSITIVE_INFINITY);
 

@@ -178,6 +178,17 @@ describe("13.41 replay on saved data", () => {
     expect(fixed.netUsd).toBeLessThan(0);
   });
 
+  it("leaves a position open when its deadline falls after the saved data ends", async () => {
+    const t0 = 1_700_000_000_000;
+    const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000 };
+    const signals = [{ t: t0, mint: "MintR", symbol: "REC", kind: "launch", priceUsd: 1, detail }];
+    const quotes = [q(t0, 1), q(t0 + 590_000, 1)];
+    const fixedOf = (r: Awaited<ReturnType<typeof replaySaved>>) => r.rows.find((row) => row.signal === "launch" && row.label === "3% stop, sell at target")!;
+    expect(fixedOf(await replaySaved(quotes, signals))).toMatchObject({ trades: 0, open: 1 });
+    // Asked 20 s later: the 600 s limit has passed on a still-fresh mark, so it is closed.
+    expect(fixedOf(await replaySaved(quotes, signals, { until: t0 + 610_000 }))).toMatchObject({ trades: 1, open: 0 });
+  });
+
   it("ignores a quote from a feed the position is not marked by", async () => {
     const t0 = 1_700_000_000_000;
     const detail = { liquidityUsd: 200_000, vol5mUsd: 40_000, feed: "dexscreener" };

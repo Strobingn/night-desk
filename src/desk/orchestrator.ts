@@ -4592,7 +4592,7 @@ export class Desk {
       const quotes = await this.recorder.latestQuotes(since);
       const from = quotes.length ? quotes[0]!.t : since;
       const signals = this.recorder.signalsBetween({ since: from, limit: 50_000 });
-      return replaySaved(quotes, signals, { targetNetUsd: this.strategy.settings.targetNetUsd, tradeUsd: this.strategy.settings.tradeUsd });
+      return replaySaved(quotes, signals, { targetNetUsd: this.strategy.settings.targetNetUsd, tradeUsd: this.strategy.settings.tradeUsd, until: Date.now() });
     })().finally(() => {
       this.replayRunning = null;
     });
