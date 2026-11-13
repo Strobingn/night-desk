@@ -322,7 +322,14 @@ export class DeskStore {
     }
     if (point.t - this.livePrunedAt >= 86_400_000) {
       this.livePrunedAt = point.t;
-      this.db.prepare(`DELETE FROM live_equity WHERE ts < ?`).run(point.t - LIVE_EQUITY_KEEP_MS);
+      const cutoff = point.t - LIVE_EQUITY_KEEP_MS;
+      this.db.prepare(`DELETE FROM live_equity WHERE ts < ?`).run(cutoff);
+      // The cached curve drops the same rows, so the chart matches what a restart would load.
+      const live = this.liveCurve;
+      if (live && live.kept.length > 0 && live.kept[0]!.t < cutoff) {
+        live.kept = live.kept.filter((row) => row.t >= cutoff);
+        live.points = null;
+      }
     }
   }
 

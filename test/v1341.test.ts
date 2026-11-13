@@ -377,6 +377,11 @@ describe("13.42 follow-ups", () => {
       desk.store.insertLiveEquity({ t: 1 * day, equity: 10, cash: 10 });
       desk.store.insertLiveEquity({ t: 200 * day, equity: 11, cash: 11 });
       expect(desk.store.liveEquityCurve(0).map((p) => p.equity)).toEqual([11]);
+      // And with the curve already cached: the expired point leaves the cache as well.
+      desk.store.insertLiveEquity({ t: 201 * day, equity: 12, cash: 12 });
+      expect(desk.store.liveEquityCurve(0).map((p) => p.equity)).toEqual([11, 12]);
+      desk.store.insertLiveEquity({ t: 292 * day, equity: 13, cash: 13 });
+      expect(desk.store.liveEquityCurve(0).map((p) => p.equity)).toEqual([13]);
     } finally {
       desk.stop();
     }
