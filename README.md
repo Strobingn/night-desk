@@ -4,6 +4,8 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
+Android `13.57` (versionCode 1357): the engine does not buy with real money unless the pool was measured in the last minute at $5,000 or more and is not draining, and a coin that dies counts toward the $5 live pause, so the engine stops after one instead of buying the next.
+
 Android `13.56` (versionCode 1356): a dead engine live position (no sell route, collapsed mark, or a zero wallet balance) gets no automatic exit attempts. A failed live exit waits 20 seconds before the next automatic try. Manual Sell anyway still sells a dead coin.
 
 Android `13.55` (versionCode 1355): a zero wallet balance does not take an engine live slot. In the first 3 minutes a 35% pool drop sells as a rug exit and may use 50% slippage. The 25% pool-drain sell, the 1% launch stop, and a hard stop stay at 6%, including in those 3 minutes. A holder dump sells only when a chain read the desk already made, after the fill, shows it. A live fill records its real slippage against the mark.

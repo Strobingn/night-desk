@@ -48,7 +48,13 @@ function liveDesk(deps: ConstructorParameters<typeof Desk>[1] = {}): Desk {
     ...deps
   });
   desk.setOperatorReady(true);
+  measuredPool(desk);
   return desk;
+}
+
+/** These tests call strategyLiveBuy with a hand-built signal and no quote behind it. Since 13.57 a live buy needs a measured pool. */
+function measuredPool(desk: Desk): void {
+  (desk as unknown as { engineLiveDepth: () => { ok: true; depthUsd: number } }).engineLiveDepth = () => ({ ok: true, depthUsd: 180_000 });
 }
 
 const young = (over: Parameters<typeof makeToken>[0] = {}) =>
@@ -147,6 +153,7 @@ describe("v13.45 engine safety priority", () => {
   it("keeps ENGINE_LIVE_PAUSED for an actual pause", async () => {
     const secret = base58Encode(Keypair.generate().secretKey);
     const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), { walletBalances: rich });
+    measuredPool(desk);
     try {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
       await signal(desk);

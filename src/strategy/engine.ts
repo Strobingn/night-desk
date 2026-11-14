@@ -81,6 +81,8 @@ export interface FiredSignal {
   /** The watched coin with the price (and liquidity, when known) that fired the signal. */
   token: CandidateToken;
   score: number;
+  /** Pool depth when the coin passed Filter. May be minutes old by the time the signal fires. */
+  filterDepthUsd?: number;
   /** Exit rules for the main paper book's active variant. */
   meta: StrategyMeta;
   /** Exit rules for the live variant, when one is set and it trades this signal. The desk scales the target to the live size. */
@@ -284,6 +286,8 @@ export class StrategyEngine {
       signal,
       token,
       score: coin.score,
+      // token.liquidityUsd above is the quote's depth when it has one, else this older figure.
+      filterDepthUsd: coin.token.liquidityUsd,
       meta: this.metaFor(signal.signal, entry),
       ...(live && live.signal === signal.signal ? { liveMeta: this.metaOf(live.id, entry) } : {})
     };

@@ -151,10 +151,72 @@ describe("engine live variant", () => {
       // The coin is rugged: no sell route. It stays on the book.
       (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
       expect(desk.strategyView().live).toMatchObject({ open: 0, dead: 1 });
+      // The slot is free, but since 13.57 the $5 lost in the dead coin trips the live pause.
       await signal(desk, young({ mint: "EngineLive444444444444444444444444444444444", symbol: "EL4" }));
-      expect(buys()).toHaveLength(2);
-      expect(desk.liveBook!.positions.size).toBe(2);
-      expect(desk.strategyView().live).toMatchObject({ open: 1, dead: 1 });
+      expect(buys()).toHaveLength(1);
+      expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 does not spend real money on a pool it has not measured, a thin one, or one already draining", async () => {
+    const desk = liveDesk();
+    const last = () => desk.strategyView().live?.lastSkip;
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      // The feed printed no depth, so the candidate carries zero. The quotes carry none either.
+      const blind = young({ mint: "EngineLiveNoDepth1111111111111111111111111", symbol: "ND1", liquidityUsd: 0 });
+      await desk.submitCandidate(blind);
+      const t = Date.now();
+      const bare = (at: number, priceUsd: number) => ({ at, priceUsd, vol5mUsd: 40_000, vol1hUsd: 180_000, change1hPct: 15 });
+      await desk.submitStrategyQuote(blind.mint, bare(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(blind.mint, bare(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(last()).toMatchObject({ symbol: "ND1", code: "ENGINE_LIVE_NO_POOL" });
+
+      // Measured, but under the $5,000 floor.
+      const thin = young({ mint: "EngineLiveThin11111111111111111111111111111", symbol: "TH1", liquidityUsd: 3_000 });
+      await desk.submitCandidate(thin);
+      const thinQuote = (at: number, priceUsd: number) => ({ ...bare(at, priceUsd), liquidityUsd: 3_000 });
+      await desk.submitStrategyQuote(thin.mint, thinQuote(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(thin.mint, thinQuote(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(last()).toMatchObject({ symbol: "TH1", code: "ENGINE_LIVE_NO_POOL" });
+      expect(last()!.message).toContain("under the $5,000");
+
+      // Deep at Filter, a third gone by the signal.
+      const draining = young({ mint: "EngineLiveDrain1111111111111111111111111111", symbol: "DR1", liquidityUsd: 180_000 });
+      await desk.submitCandidate(draining);
+      const drainQuote = (at: number, priceUsd: number) => ({ ...bare(at, priceUsd), liquidityUsd: 120_000 });
+      await desk.submitStrategyQuote(draining.mint, drainQuote(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(draining.mint, drainQuote(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(last()!.message).toContain("already draining");
+
+      // A measured, deep, steady pool is bought.
+      await signal(desk);
+      expect(buys()).toHaveLength(1);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 a coin that died today counts toward the $5 live pause, so the engine stops after one", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await signal(desk);
+      expect(buys()).toHaveLength(1);
+      expect(desk.strategyView().live?.blocked).toBeNull();
+      // Rugged: no sell route. The $5 is gone but the trade never closes.
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      const blocked = desk.strategyView().live?.blocked ?? "";
+      expect(blocked).toContain("1 coin bought today that has no pool left");
+      expect(blocked).toContain("live pause");
+      await signal(desk, young({ mint: "EngineLive555555555555555555555555555555555", symbol: "EL5" }));
+      expect(buys()).toHaveLength(1);
+      expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
     } finally {
       desk.stop();
     }
