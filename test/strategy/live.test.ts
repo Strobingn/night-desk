@@ -202,6 +202,42 @@ describe("engine live variant", () => {
     }
   });
 
+  it("v13.57 measures the pool again right before the buy: one that drains during the checks is not bought", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      // The safety read is the wait. While it runs, a new reading shows the pool emptied.
+      (desk as unknown as { tokenSafety: () => Promise<unknown> }).tokenSafety = async () => {
+        const engine = (desk as unknown as { strategy: { flows: Map<string, { at: number; liquidityUsd: number | null }> } }).strategy;
+        engine.flows.set(MINT, { at: Date.now(), liquidityUsd: 900 });
+        return { status: "safe", chip: "Safe", supply: 1_000_000n };
+      };
+      await signal(desk);
+      expect(buys()).toHaveLength(0);
+      const last = desk.strategyView().live?.lastSkip;
+      expect(last).toMatchObject({ code: "ENGINE_LIVE_NO_POOL" });
+      expect(last!.message).toContain("$900");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 a coin bought yesterday evening that dies after UTC midnight still counts", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await signal(desk);
+      const pos = desk.liveBook!.positions.get(MINT)!;
+      pos.openedAt = Date.now() - 20 * 60 * 60_000; // 20 hours ago: a different UTC day for most of the clock
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      expect(desk.strategyView().live?.blocked).toContain("bought in the last 24 hours");
+      pos.openedAt = Date.now() - 25 * 60 * 60_000;
+      expect(desk.strategyView().live?.blocked).toBeNull();
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("v13.57 a coin that died today counts toward the $5 live pause, so the engine stops after one", async () => {
     const desk = liveDesk();
     try {
@@ -212,7 +248,7 @@ describe("engine live variant", () => {
       // Rugged: no sell route. The $5 is gone but the trade never closes.
       (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
       const blocked = desk.strategyView().live?.blocked ?? "";
-      expect(blocked).toContain("1 coin bought today that has no pool left");
+      expect(blocked).toContain("1 coin bought in the last 24 hours that has no pool left");
       expect(blocked).toContain("live pause");
       await signal(desk, young({ mint: "EngineLive555555555555555555555555555555555", symbol: "EL5" }));
       expect(buys()).toHaveLength(1);

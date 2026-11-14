@@ -310,13 +310,14 @@ Gap 1: it bought pools the desk had never measured.
   - a pool depth reading from the last 60 seconds. The figure from when the coin passed Filter can be minutes old and does not count;
   - depth of at least $5,000 (`ENGINE_LIVE_MIN_POOL_USD`), or the saved minimum liquidity when that is higher;
   - depth not down 25% or more from the Filter figure.
+- The pool is measured twice: when the signal fires, and again on the newest reading right before the order is sent, after the safety read, the bundle check and the wait for the one-buy lock.
 - A refusal is logged as `ENGINE_LIVE_NO_POOL` and shown on the Engine tab as the last live attempt. It is checked before any Helius read.
 - If the price feed never carries depth for a coin, that coin is not bought with real money.
 
 Gap 2: the $5 live pause could not see a dead coin.
 
 - The pause counted closed live trades. A coin with no pool left never closes, so its loss was never counted, and after 13.54 and 13.55 freed dead coins' slots nothing stopped the next buy.
-- The cost of every engine live holding bought since the UTC day began that is dead (no sell route, a collapsed mark, or a zero wallet balance) now counts toward the pause. At $5 a trade, one dead coin pauses live engine buys until the next UTC day.
+- The cost of every engine live holding bought in the last 24 hours that is dead (no sell route, a collapsed mark, or a zero wallet balance) now counts toward the pause. It is a rolling 24 hours, so a coin bought before UTC midnight that dies after it is still counted. At $5 a trade, one dead coin pauses live engine buys until 24 hours after that buy.
 - Dead holdings still do not take a slot, still stay on the book, and still get no automatic sell attempts.
 
 ## 13.56 notes

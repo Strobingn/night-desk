@@ -1381,20 +1381,24 @@ export class Desk {
     const dead = this.engineDeadToday();
     const total = net - dead.costUsd;
     if (total <= -STRATEGY.live.dailyMaxLossUsd + 1e-9) {
-      const detail = dead.count > 0 ? `, counting ${money(dead.costUsd)} in ${dead.count} ${dead.count === 1 ? "coin" : "coins"} bought today that ${dead.count === 1 ? "has" : "have"} no pool left to sell into` : "";
-      return `Live is ${money(total)} on the day${detail}. That is past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
+      if (dead.count === 0) return `Live is ${money(total)} on the day, past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
+      const coins = `${dead.count} ${dead.count === 1 ? "coin" : "coins"} bought in the last 24 hours that ${dead.count === 1 ? "has" : "have"} no pool left to sell into`;
+      return `Live is ${money(total)}, counting ${money(dead.costUsd)} in ${coins}. That is past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes 24 hours after the last of those buys.`;
     }
     return null;
   }
 
-  /** Engine live holdings bought since the UTC day began that are dead: no route, a collapsed mark, or a zero balance. */
-  private engineDeadToday(): { count: number; costUsd: number } {
-    const start = new Date();
-    start.setUTCHours(0, 0, 0, 0);
+  /**
+   * Engine live holdings bought in the last 24 hours that are dead: no route, a collapsed mark, or
+   * a zero balance. A rolling day, not the UTC one: a coin bought before UTC midnight that dies
+   * after it would otherwise be counted on neither day.
+   */
+  private engineDeadToday(now = Date.now()): { count: number; costUsd: number } {
+    const since = now - 24 * 60 * 60_000;
     let count = 0;
     let costUsd = 0;
     for (const pos of this.liveBook?.positions.values() ?? []) {
-      if (!pos.strategy || pos.openedAt < start.getTime() || !this.enginePositionDead(pos)) continue;
+      if (!pos.strategy || pos.openedAt < since || !this.enginePositionDead(pos)) continue;
       count += 1;
       costUsd += Math.max(0, pos.costUsd);
     }
@@ -1524,7 +1528,8 @@ export class Desk {
    * quotes come from the Tape quoter's existing batched pass.
    */
   strategyPass(now = Date.now()): void {
-    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints()])];
+    // A coin whose live buy is in flight stays quoted: the buy re-measures its pool before it sends.
+    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints(), ...this.engineLivePending])];
     this.strategy.keepFlows(pinned);
     for (const mint of pinned) {
       const q = this.tape?.get(mint);
@@ -1633,6 +1638,10 @@ export class Desk {
       const again = this.liveEngineBlock();
       if (again) return skip(again, "ENGINE_LIVE_PAUSED");
       await this.withLiveBuyLock(async () => {
+        // The safety read, the bundle check and the wait for this lock can take many seconds.
+        // The pool is measured again here, on the newest reading, right before the money goes.
+        const still = this.engineLiveDepth(fired);
+        if (!still.ok) return skip(still.message, "ENGINE_LIVE_NO_POOL");
         // Entry slippage and the crash guard run inside the buy, against this signal's mark.
         const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
           tag: fired.signal.signal,
