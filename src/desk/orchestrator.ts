@@ -1601,7 +1601,9 @@ export class Desk {
     tally.signals += 1;
     tally.lastSignalAt = now;
     this.harvestRugWallets();
-    const aged: FiredSignal["token"] = { ...token, liquidityUsd: window.liquidityUsd, ageSeconds: window.ageSeconds };
+    // The quote that closed the window is the mark the swap, entry slippage and crash guard use.
+    const priceUsd = quote && quote.priceUsd > 0 && Number.isFinite(quote.priceUsd) ? quote.priceUsd : token.priceUsd;
+    const aged: FiredSignal["token"] = { ...token, priceUsd, liquidityUsd: window.liquidityUsd, ageSeconds: window.ageSeconds };
     const facts = this.liveEntryFacts(aged);
     if (!facts.ok) return skip(facts.reason);
     // Dead holdings, including a zero wallet balance, are not open trades and do not hold a slot.
@@ -1695,7 +1697,9 @@ export class Desk {
   /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
   strategyQuote(mint: string, quote: EngineQuote, now = Date.now()): void {
     // A live signal stays here until the pool has survived. Paper already bought on the signal quote.
+    // The tracker has dropped the mint, so this print cannot fire again. Shadow marks and fade flow still need it.
     if (this.liveWindows.has(mint)) {
+      this.strategy.onQuote(mint, quote, now);
       const fired = this.liveWindows.fired(mint);
       if (fired) this.track(this.strategyLiveBuy(fired, now, quote));
       return;
@@ -4473,9 +4477,11 @@ export class Desk {
   /** Remember the deployer of an engine live coin whose pool died. Later engine live buys of that wallet are refused. */
   private rememberRugWallet(mint: string): void {
     if (this.rugNoted.has(mint)) return;
-    this.rugNoted.add(mint);
     const dev = this.sightings.get(mint)?.devWallet?.trim();
-    if (!dev || this.rugWallets.has(dev)) return;
+    // Wait until a sighting names the deployer. Marking the mint first would skip a later sighting.
+    if (!dev) return;
+    this.rugNoted.add(mint);
+    if (this.rugWallets.has(dev)) return;
     this.rugWallets.add(dev);
     this.store.writeJson("rugWallets", [...this.rugWallets]);
   }
