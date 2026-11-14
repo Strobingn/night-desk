@@ -151,10 +151,125 @@ describe("engine live variant", () => {
       // The coin is rugged: no sell route. It stays on the book.
       (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
       expect(desk.strategyView().live).toMatchObject({ open: 0, dead: 1 });
+      // The slot is free, but since 13.57 the $5 lost in the dead coin trips the live pause.
       await signal(desk, young({ mint: "EngineLive444444444444444444444444444444444", symbol: "EL4" }));
-      expect(buys()).toHaveLength(2);
-      expect(desk.liveBook!.positions.size).toBe(2);
-      expect(desk.strategyView().live).toMatchObject({ open: 1, dead: 1 });
+      expect(buys()).toHaveLength(1);
+      expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 does not spend real money on a pool it has not measured, a thin one, or one already draining", async () => {
+    const desk = liveDesk();
+    const last = () => desk.strategyView().live?.lastSkip;
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      // The feed printed no depth, so the candidate carries zero. The quotes carry none either.
+      const blind = young({ mint: "EngineLiveNoDepth1111111111111111111111111", symbol: "ND1", liquidityUsd: 0 });
+      await desk.submitCandidate(blind);
+      const t = Date.now();
+      const bare = (at: number, priceUsd: number) => ({ at, priceUsd, vol5mUsd: 40_000, vol1hUsd: 180_000, change1hPct: 15 });
+      await desk.submitStrategyQuote(blind.mint, bare(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(blind.mint, bare(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(last()).toMatchObject({ symbol: "ND1", code: "ENGINE_LIVE_NO_POOL" });
+
+      // Measured, but under the $5,000 floor.
+      const thin = young({ mint: "EngineLiveThin11111111111111111111111111111", symbol: "TH1", liquidityUsd: 3_000 });
+      await desk.submitCandidate(thin);
+      const thinQuote = (at: number, priceUsd: number) => ({ ...bare(at, priceUsd), liquidityUsd: 3_000 });
+      await desk.submitStrategyQuote(thin.mint, thinQuote(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(thin.mint, thinQuote(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(last()).toMatchObject({ symbol: "TH1", code: "ENGINE_LIVE_NO_POOL" });
+      expect(last()!.message).toContain("under the $5,000");
+
+      // Deep at Filter, a third gone by the signal.
+      const draining = young({ mint: "EngineLiveDrain1111111111111111111111111111", symbol: "DR1", liquidityUsd: 180_000 });
+      await desk.submitCandidate(draining);
+      const drainQuote = (at: number, priceUsd: number) => ({ ...bare(at, priceUsd), liquidityUsd: 120_000 });
+      await desk.submitStrategyQuote(draining.mint, drainQuote(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(draining.mint, drainQuote(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(last()!.message).toContain("already draining");
+
+      // A measured, deep, steady pool is bought.
+      await signal(desk);
+      expect(buys()).toHaveLength(1);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 measures the pool again right before the buy: one that drains during the checks is not bought", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      // The safety read is the wait. While it runs, a new reading shows the pool emptied.
+      (desk as unknown as { tokenSafety: () => Promise<unknown> }).tokenSafety = async () => {
+        const engine = (desk as unknown as { strategy: { flows: Map<string, { at: number; liquidityUsd: number | null }> } }).strategy;
+        engine.flows.set(MINT, { at: Date.now(), liquidityUsd: 900 });
+        return { status: "safe", chip: "Safe", supply: 1_000_000n };
+      };
+      await signal(desk);
+      expect(buys()).toHaveLength(0);
+      const last = desk.strategyView().live?.lastSkip;
+      expect(last).toMatchObject({ code: "ENGINE_LIVE_NO_POOL" });
+      expect(last!.message).toContain("$900");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 a depth figure kept from minutes ago is not a measurement, however new the quote it rides on", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await desk.submitCandidate(young());
+      const t = Date.now();
+      // New quotes, but the depth on them was read five minutes ago.
+      const stale = (at: number, priceUsd: number) => ({ ...quote(at, priceUsd), liquidityAt: t - 5 * 60_000 });
+      await desk.submitStrategyQuote(MINT, stale(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(MINT, stale(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(desk.strategyView().live?.lastSkip).toMatchObject({ code: "ENGINE_LIVE_NO_POOL" });
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 a coin bought yesterday evening that dies after UTC midnight still counts", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await signal(desk);
+      const pos = desk.liveBook!.positions.get(MINT)!;
+      pos.openedAt = Date.now() - 20 * 60 * 60_000; // 20 hours ago: a different UTC day for most of the clock
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      expect(desk.strategyView().live?.blocked).toContain("bought in the last 24 hours");
+      pos.openedAt = Date.now() - 25 * 60 * 60_000;
+      expect(desk.strategyView().live?.blocked).toBeNull();
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("v13.57 a coin that died today counts toward the $5 live pause, so the engine stops after one", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await signal(desk);
+      expect(buys()).toHaveLength(1);
+      expect(desk.strategyView().live?.blocked).toBeNull();
+      // Rugged: no sell route. The $5 is gone but the trade never closes.
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      const blocked = desk.strategyView().live?.blocked ?? "";
+      expect(blocked).toContain("1 coin bought in the last 24 hours that has no pool left");
+      expect(blocked).toContain("live pause");
+      await signal(desk, young({ mint: "EngineLive555555555555555555555555555555555", symbol: "EL5" }));
+      expect(buys()).toHaveLength(1);
+      expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
     } finally {
       desk.stop();
     }

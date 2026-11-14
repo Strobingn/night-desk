@@ -54,7 +54,7 @@ beforeEach(() => {
 });
 
 describe("v13.54 dead live positions do not fill the cap", () => {
-  it("keeps a collapsed engine position on the book and buys into the freed slot", async () => {
+  it("keeps a collapsed engine position on the book, frees its slot, and (13.57) pauses on the money lost", async () => {
     const desk = liveDesk();
     try {
       const a = "DeadCapA111111111111111111111111111111111";
@@ -72,10 +72,12 @@ describe("v13.54 dead live positions do not fill the cap", () => {
       expect(desk.strategyView().live?.open).toBe(0);
       expect(desk.liveBook!.positions.has(a)).toBe(true);
       expect(desk.liveBook!.positions.has(b)).toBe(true);
+      // The slots are free. Since 13.57 the money in the two dead coins counts toward the $5 live pause.
       await fill(desk, d, "NEW");
-      expect(desk.liveBook!.positions.has(d)).toBe(true);
+      expect(desk.liveBook!.positions.has(d)).toBe(false);
       expect(desk.liveBook!.positions.has(a)).toBe(true);
-      expect(desk.strategyView().live?.open).toBe(1);
+      expect(desk.strategyView().live?.open).toBe(0);
+      expect(desk.strategyView().live?.blocked).toMatch(/2 coins bought in the last 24 hours that have no pool left/);
     } finally {
       desk.stop();
     }
@@ -100,9 +102,11 @@ describe("v13.54 dead live positions do not fill the cap", () => {
       expect(desk.liveBook!.positions.has(a)).toBe(true);
       expect(desk.strategyView().live?.open).toBe(0);
       expect(desk.snapshot().liveBook?.positions.find((row) => row.mint === a)?.liquidityNote ?? null).toBeNull();
+      // Not open, so no slot. Since 13.57 its cost counts toward the $5 live pause, so the next buy waits.
       await fill(desk, b, "NEXT");
-      expect(desk.liveBook!.positions.has(b)).toBe(true);
+      expect(desk.liveBook!.positions.has(b)).toBe(false);
       expect(desk.liveBook!.positions.has(a)).toBe(true);
+      expect(desk.strategyView().live?.blocked).toMatch(/live pause/);
     } finally {
       desk.stop();
     }

@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-14 (13.56). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-14 (13.57). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -279,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.56** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.56, `versionCode` 1356, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.57** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.57, `versionCode` 1357, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -298,6 +298,28 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.57 notes
+
+The engine bought 18 coins with real money that ended with no pool to sell into. Two gaps let that happen. One new constant; no saved setting changed. Paper is unchanged.
+
+Gap 1: it bought pools the desk had never measured.
+
+- Some feeds print no depth for a new curve coin, so the coin's liquidity is recorded as 0. With the saved minimum liquidity at 0, nothing refused it. The pool exits (the 25% drain, the rug exit) compare against the depth at the buy, so with no depth at the buy they had nothing to compare and never fired.
+- A live engine buy now needs all three (`engineLiveDepth`):
+  - a pool depth reading from the last 60 seconds. The figure from when the coin passed Filter can be minutes old and does not count;
+  - depth of at least $5,000 (`ENGINE_LIVE_MIN_POOL_USD`), or the saved minimum liquidity when that is higher;
+  - depth not down 25% or more from the Filter figure.
+- The pool is measured twice: when the signal fires, and again on the newest reading right before the order is sent, after the safety read, the bundle check and the wait for the one-buy lock.
+- The 60 seconds are the depth figure's own age. A quote that carries no depth is filled from the last kept figure for the exits, and that figure keeps the time it was read. A pool the feed prints as empty (zero) is kept as zero on the Tape quote and is not filled from an older figure.
+- A refusal is logged as `ENGINE_LIVE_NO_POOL` and shown on the Engine tab as the last live attempt. It is checked before any Helius read.
+- If the price feed never carries depth for a coin, that coin is not bought with real money.
+
+Gap 2: the $5 live pause could not see a dead coin.
+
+- The pause counted closed live trades. A coin with no pool left never closes, so its loss was never counted, and after 13.54 and 13.55 freed dead coins' slots nothing stopped the next buy.
+- The cost of every engine live holding bought in the last 24 hours that is dead (no sell route, a collapsed mark, or a zero wallet balance) now counts toward the pause. It is a rolling 24 hours, so a coin bought before UTC midnight that dies after it is still counted. At $5 a trade, one dead coin pauses live engine buys until 24 hours after that buy.
+- Dead holdings still do not take a slot, still stay on the book, and still get no automatic sell attempts.
 
 ## 13.56 notes
 

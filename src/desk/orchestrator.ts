@@ -310,6 +310,8 @@ const RECENT_LIVE_FILL_MS = 30_000;
 /** How long that sell waits for a fresh wallet read before it sends the confirmed amount. */
 const RECENT_FILL_BALANCE_MS = 750;
 /** One automatic live exit per position. A failure must not fill the Helius lanes on the next pass. */
+/** v13.57 the least pool depth the engine buys into with real money, whatever the saved minimum says. */
+export const ENGINE_LIVE_MIN_POOL_USD = 5_000;
 const AUTO_EXIT_RETRY_MS = 20_000;
 
 export class Desk {
@@ -1374,8 +1376,60 @@ export class Desk {
     if (!this.liveBook) return "The live wallet is not armed on this desk.";
     if (!this.operatorReady) return "The live checklist (operatorReady) is not marked.";
     const net = this.liveNetTodayUsd();
-    if (net <= -STRATEGY.live.dailyMaxLossUsd + 1e-9) return `Live is ${money(net)} on the day, past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
+    // v13.57 a coin with no pool left never closes, so its loss never reached the line above and
+    // the pause could not fire. Money in a dead holding bought today is lost: it counts here.
+    const dead = this.engineDeadToday();
+    const total = net - dead.costUsd;
+    if (total <= -STRATEGY.live.dailyMaxLossUsd + 1e-9) {
+      if (dead.count === 0) return `Live is ${money(total)} on the day, past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
+      const coins = `${dead.count} ${dead.count === 1 ? "coin" : "coins"} bought in the last 24 hours that ${dead.count === 1 ? "has" : "have"} no pool left to sell into`;
+      return `Live is ${money(total)}, counting ${money(dead.costUsd)} in ${coins}. That is past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes 24 hours after the last of those buys.`;
+    }
     return null;
+  }
+
+  /**
+   * Engine live holdings bought in the last 24 hours that are dead: no route, a collapsed mark, or
+   * a zero balance. A rolling day, not the UTC one: a coin bought before UTC midnight that dies
+   * after it would otherwise be counted on neither day.
+   */
+  private engineDeadToday(now = Date.now()): { count: number; costUsd: number } {
+    const since = now - 24 * 60 * 60_000;
+    let count = 0;
+    let costUsd = 0;
+    for (const pos of this.liveBook?.positions.values() ?? []) {
+      if (!pos.strategy || pos.openedAt < since || !this.enginePositionDead(pos)) continue;
+      count += 1;
+      costUsd += Math.max(0, pos.costUsd);
+    }
+    return { count, costUsd };
+  }
+
+  /**
+   * v13.57 the pool depth the engine may spend real money against, or why it may not.
+   *
+   * The engine was buying coins whose depth the desk had never read: a feed that prints no depth
+   * leaves it at zero, and with the minimum-liquidity setting at zero nothing stopped the buy.
+   * Every exit that watches the pool (the 25% drain, the rug exit) compares against the depth at
+   * the buy, so with no reading there was nothing to compare and nothing to sell on.
+   *
+   * Real money needs a depth reading from the last minute (the figure from when the coin passed
+   * Filter can be minutes old and does not count), at or above ENGINE_LIVE_MIN_POOL_USD or the
+   * saved minimum when that is higher, and not already down a quarter from the Filter figure.
+   */
+  private engineLiveDepth(fired: FiredSignal, now = Date.now()): { ok: true; depthUsd: number } | { ok: false; message: string } {
+    const flow = this.strategy.flowFor(fired.token.mint);
+    // The depth's own age, not the quote's: a quote with no depth is filled from an older figure.
+    const readAt = flow ? flow.liquidityAt ?? flow.at : 0;
+    const depth = flow && now - readAt <= STRATEGY.fade.freshMs && flow.liquidityUsd != null && Number.isFinite(flow.liquidityUsd) ? flow.liquidityUsd : null;
+    if (depth == null) return { ok: false, message: "No pool depth reading from the last minute for this coin. Real money is not spent on a pool the desk has not measured." };
+    const floor = Math.max(ENGINE_LIVE_MIN_POOL_USD, this.minLiquidityUsd);
+    if (depth < floor) return { ok: false, message: `Pool depth is ${money(depth)}, under the ${money(floor)} the engine needs to buy with real money.` };
+    const atFilter = fired.filterDepthUsd != null && fired.filterDepthUsd > 0 && Number.isFinite(fired.filterDepthUsd) ? fired.filterDepthUsd : null;
+    if (atFilter != null && depth <= atFilter * (1 - STRATEGY.fade.liquidityDrop)) {
+      return { ok: false, message: `Pool depth fell to ${money(depth)} from ${money(atFilter)} since the coin passed Filter. It is already draining.` };
+    }
+    return { ok: true, depthUsd: depth };
   }
 
   /**
@@ -1476,7 +1530,8 @@ export class Desk {
    * quotes come from the Tape quoter's existing batched pass.
    */
   strategyPass(now = Date.now()): void {
-    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints()])];
+    // A coin whose live buy is in flight stays quoted: the buy re-measures its pool before it sends.
+    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints(), ...this.engineLivePending])];
     this.strategy.keepFlows(pinned);
     for (const mint of pinned) {
       const q = this.tape?.get(mint);
@@ -1501,7 +1556,12 @@ export class Desk {
       const anchor = this.strategyFeed.get(mint);
       const feed = feedOf(q.source) ?? undefined;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt, ...(feed ? { feed } : {}) }, now);
+      // A quote without depth is filled from the last kept figure. That figure keeps its own age,
+      // so a pool that stopped printing depth is not read as measured just now.
+      const ownDepth = q.liquidityUsd != null;
+      const liquidityUsd = ownDepth ? q.liquidityUsd! : this.markLiquidity.get(mint) ?? null;
+      const liquidityAt = ownDepth ? q.flowAt ?? q.at : this.markLiquidityAt.get(mint) ?? 0;
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd, ...(liquidityUsd != null ? { liquidityAt } : {}), buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt, ...(feed ? { feed } : {}) }, now);
     }
     this.strategy.tick(now);
     this.recorder.flush();
@@ -1551,7 +1611,7 @@ export class Desk {
     const tally = this.liveEngine;
     tally.signals += 1;
     tally.lastSignalAt = Date.now();
-    const skip = (message: string, code: "ENGINE_LIVE_PAUSED" | "ENGINE_LIVE_SKIP" | "LAUNCH_BUNDLE_UNVERIFIED" = "ENGINE_LIVE_SKIP") => {
+    const skip = (message: string, code: "ENGINE_LIVE_PAUSED" | "ENGINE_LIVE_SKIP" | "LAUNCH_BUNDLE_UNVERIFIED" | "ENGINE_LIVE_NO_POOL" = "ENGINE_LIVE_SKIP") => {
       this.pipeline.executorSkips += 1;
       tally.lastSkip = { at: Date.now(), symbol: token.symbol, code, message };
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Engine live buy skipped ${token.symbol}. ${message}` });
@@ -1560,6 +1620,9 @@ export class Desk {
     if (block) return skip(block, "ENGINE_LIVE_PAUSED");
     const live = this.liveBook!;
     if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
+    // Before any Helius read: no measured pool, a thin pool or a draining pool is not bought.
+    const depth = this.engineLiveDepth(fired);
+    if (!depth.ok) return skip(depth.message, "ENGINE_LIVE_NO_POOL");
     // A buy still in flight holds a slot, so two signals in one pass cannot both take the last one.
     // Dead holdings, including a zero wallet balance, are not open trades and do not hold a slot.
     const open = this.engineLiveSlots().open + this.engineLivePending.size;
@@ -1582,6 +1645,10 @@ export class Desk {
       const again = this.liveEngineBlock();
       if (again) return skip(again, "ENGINE_LIVE_PAUSED");
       await this.withLiveBuyLock(async () => {
+        // The safety read, the bundle check and the wait for this lock can take many seconds.
+        // The pool is measured again here, on the newest reading, right before the money goes.
+        const still = this.engineLiveDepth(fired);
+        if (!still.ok) return skip(still.message, "ENGINE_LIVE_NO_POOL");
         // Entry slippage and the crash guard run inside the buy, against this signal's mark.
         const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
           tag: fired.signal.signal,

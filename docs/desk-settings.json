@@ -14,9 +14,9 @@
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.56",
-    "androidVersionName": "13.56",
-    "androidVersionCode": 1356,
+    "appVersion": "13.57",
+    "androidVersionName": "13.57",
+    "androidVersionCode": 1357,
     "applicationId": "com.dirk.nightdesk",
     "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. 13.39 live sells return a clear no-route reason and the card shows liquidity gone, on top of main aa1e16c (PR 40, the 13.39 Home charts and math audit) which includes 13.38 (PR 41). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
@@ -84,6 +84,7 @@
     "13.38: manual paper and live buys use launchBundleSoon (1.5s) instead of an uncapped launchBundle. Unenriched quote and curve fallbacks, and ensureDepth's curve read, are also capped. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 929365c (PR 39).",
     "13.37: DAMM v2 is not a traditional LP lock. Rank traditional pools by real depth. A figure-less pool does not fail a coin that has another pool with data. Holder count is RugCheck totalHolders, not a top-20 sample; unknown stays fail-closed. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 7c00007 (PR 38).",
     "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign).",
+    "13.57: the engine does not buy with real money unless the pool depth was read in the last minute, is at least $5,000 (ENGINE_LIVE_MIN_POOL_USD, or the saved minimum liquidity when higher), and is not down 25% from when the coin passed Filter. The pool is measured again right before the order is sent. Money in an engine holding bought in the last 24 hours that is dead counts toward the $5 live pause. Paper is unchanged.",
     "13.56: a dead engine live position (no sell route, collapsed mark, or a known zero wallet balance) gets no automatic exit attempt. A failed automatic live exit waits 20 seconds before the next try. Manual Sell anyway still sells a dead coin. The rug exit and the 6% cap are unchanged. Caps stay 10 and 8.",
     "13.55: a zero wallet token balance does not take an engine live slot, on the same engineLiveSlots count as a dead or no-route holding. For 3 minutes after an engine live fill, a pool down 35% from a reading after that fill sells as RUG_EXIT and may use 50% slippage (RUG_EXIT_SLIPPAGE). The 25% pool-drain sell routes through RUG_EXIT only when it meets that 35% line; otherwise it stays at 6%, as do STOP_LOSS, the launch stop, and a gap rug. A holder dump counts only from a chain read already made while the coin was open. A stale mark can still stop, and that old print is not the sell's mid. Live fills record slippage against the mark. No numeric trading setting changed. Caps stay 10 and 8.",
     "13.54: a dead live holding (no sell route, or a mark that collapsed and stayed there) no longer takes one of the engine's live slots. It stays on the live book. The engine card shows open and dead apart. maxOpen itself is unchanged. Live engine positions also sell when pool depth is down 25% from the buy on every variant, not only the fade ones.",
@@ -1224,8 +1225,8 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.56",
-      "androidVersionCode": 1356,
+      "version": "13.57",
+      "androidVersionCode": 1357,
       "applicationId": "com.dirk.nightdesk",
       "note": "Code in this branch (13.39 live sells). Not the host at the 1:46 PM ET pull. Based on main aa1e16c (PR 40, Home charts and math audit, including 13.38). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {

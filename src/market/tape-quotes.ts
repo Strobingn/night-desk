@@ -282,7 +282,8 @@ export class TapeQuoter {
           source,
           at,
           why,
-          ...(d?.priceUsd != null && d.liquidityUsd > 0 ? { liquidityUsd: d.liquidityUsd } : {}),
+          // A pool the pair prints as empty is a reading, not a gap: zero is kept so nothing fills it from an older figure.
+          ...(d?.priceUsd != null && (d.liquidityUsd > 0 || d.liquidityKnown) ? { liquidityUsd: d.liquidityUsd } : {}),
           ...(d?.buys5m != null && d.sells5m != null ? { buys5m: d.buys5m, sells5m: d.sells5m } : {}),
           ...(d ? { flowAt: at } : dexFailed && prev?.flowAt != null ? { flowAt: prev.flowAt } : {})
         });

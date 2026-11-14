@@ -68,6 +68,8 @@ export function patchSettings(current: EngineSettings, patch: unknown): { ok: tr
 
 export interface EngineQuote extends TrackedMark {
   liquidityUsd?: number | null;
+  /** When liquidityUsd was actually read. Absent: the quote's own time. */
+  liquidityAt?: number;
   buys5m?: number | null;
   sells5m?: number | null;
   /** When volume and trade counts were actually read. Absent: the quote's own time. */
@@ -81,6 +83,8 @@ export interface FiredSignal {
   /** The watched coin with the price (and liquidity, when known) that fired the signal. */
   token: CandidateToken;
   score: number;
+  /** Pool depth when the coin passed Filter. May be minutes old by the time the signal fires. */
+  filterDepthUsd?: number;
   /** Exit rules for the main paper book's active variant. */
   meta: StrategyMeta;
   /** Exit rules for the live variant, when one is set and it trades this signal. The desk scales the target to the live size. */
@@ -243,7 +247,7 @@ export class StrategyEngine {
 
   /** A price for a coin the engine cares about. Returns a signal for the desk when one fires. */
   onQuote(mint: string, quote: EngineQuote, now: number): FiredSignal | null {
-    this.flows.set(mint, { at: quote.flowAt ?? quote.at, vol5mUsd: quote.vol5mUsd, buys5m: quote.buys5m ?? null, sells5m: quote.sells5m ?? null, liquidityUsd: quote.liquidityUsd ?? null });
+    this.flows.set(mint, { at: quote.flowAt ?? quote.at, vol5mUsd: quote.vol5mUsd, buys5m: quote.buys5m ?? null, sells5m: quote.sells5m ?? null, liquidityUsd: quote.liquidityUsd ?? null, ...(quote.liquidityAt != null ? { liquidityAt: quote.liquidityAt } : {}) });
     this.markShadows(mint, quote.priceUsd, now, quote.liquidityUsd ?? undefined);
     if (!this.settings.enabled || !this.tracker.has(mint)) return null;
     if (!this.tracker.note(mint, quote)) return null;
@@ -284,6 +288,8 @@ export class StrategyEngine {
       signal,
       token,
       score: coin.score,
+      // token.liquidityUsd above is the quote's depth when it has one, else this older figure.
+      filterDepthUsd: coin.token.liquidityUsd,
       meta: this.metaFor(signal.signal, entry),
       ...(live && live.signal === signal.signal ? { liveMeta: this.metaOf(live.id, entry) } : {})
     };
