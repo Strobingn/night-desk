@@ -74,9 +74,9 @@ export function assessRugExit(input: RugExitInput): RugExit | null {
   return null;
 }
 
-/** True when this live engine exit, inside the watch, may use the rug slippage ceiling. */
+/** The 50% ceiling is only for a RUG_EXIT inside the watch. Stops and the 25% pool-drain sell stay at 6%. */
 export function rugSlippageApplies(pos: { strategy?: StrategyMeta | null; openedAt: number }, code: string, now: number): boolean {
-  if (!pos.strategy) return false;
+  if (!pos.strategy || code !== "RUG_EXIT") return false;
   if (now - pos.openedAt > RUG_WATCH_MS || now < pos.openedAt) return false;
-  return code === "RUG_EXIT" || code === "STRATEGY_STOP" || code === "STOP_LOSS" || code === "GAP_RUG" || code === "LIQUIDITY_DROP";
+  return true;
 }

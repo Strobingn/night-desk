@@ -4,7 +4,7 @@ import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
 import { exitQuoteHaircut, realizedFillSlippage, sellImpactRefused } from "../src/market/live-broker.js";
 import { streamSkipFreshMs, STREAM_FRESH_MS } from "../src/market/position-pricer.js";
-import { assessRugExit, RUG_EXIT_SLIPPAGE, RUG_WATCH_MS } from "../src/strategy/rug-exit.js";
+import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_WATCH_MS } from "../src/strategy/rug-exit.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { testConfig } from "./helpers.js";
 
@@ -132,6 +132,27 @@ describe("v13.54 rug exit", () => {
     }
   });
 
+  it("keeps a hard stop at 6% inside the rug window", async () => {
+    const desk = liveDesk();
+    try {
+      const mint = "HardStop11111111111111111111111111111111";
+      await fill(desk, mint, "STOP");
+      const pos = desk.liveBook!.positions.get(mint)!;
+      const feed = pos.priceFeed ?? "test";
+      const mark = (pos.entryMark ?? pos.entryPrice) * 0.93;
+      desk.bus.emit("market.tick", { mint, priceUsd: mark, liquidityUsd: 180_000, at: Date.now(), feed } as never);
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      const sells = liveBroker.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell");
+      expect(sells).toHaveLength(1);
+      expect(sells[0]?.[0].maxExitSlippage).toBeCloseTo(0.06, 5);
+      expect(sells[0]?.[0].rugExit).not.toBe(true);
+      expect(desk.snapshot().events.some((event) => event.code === "STOP_LOSS")).toBe(true);
+      expect(desk.snapshot().events.some((event) => event.code === "RUG_EXIT")).toBe(false);
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("keeps an ordinary engine stop at 6% after the rug window", async () => {
     const desk = liveDesk();
     try {
@@ -249,6 +270,12 @@ describe("v13.54 fill slippage and a quiet stream", () => {
     expect(assessRugExit({ now: 10_000, openedAt: 0, entryLiquidityUsd: 100, liquidityUsd: 90 })).toBeNull();
     expect(assessRugExit({ now: RUG_WATCH_MS + 5, openedAt: 0, entryLiquidityUsd: 100, liquidityUsd: 10 })).toBeNull();
     expect(assessRugExit({ now: 1_000, openedAt: 0, entryDevHoldingPct: 0.2, devHoldingPct: 0.05 })?.code).toBe("RUG_EXIT");
+    const young = { strategy: { variant: "launch-1", signal: "launch" as const, stopPct: 0.01, targetNetUsd: 1, timeLimitMs: 60_000 }, openedAt: 0 };
+    expect(rugSlippageApplies(young, "RUG_EXIT", 1_000)).toBe(true);
+    expect(rugSlippageApplies(young, "STOP_LOSS", 1_000)).toBe(false);
+    expect(rugSlippageApplies(young, "STRATEGY_STOP", 1_000)).toBe(false);
+    expect(rugSlippageApplies(young, "LIQUIDITY_DROP", 1_000)).toBe(false);
+    expect(rugSlippageApplies(young, "GAP_RUG", 1_000)).toBe(false);
   });
 
   it("does not skip the price poll when the stream is connected but silent", () => {

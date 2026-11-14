@@ -1715,20 +1715,24 @@ export class Desk {
     if (retryAt != null && now < retryAt) return;
     const book = this.bk(kind);
     const markAt = book.markedAt(pos.mint) ?? 0;
-    const liquidityUsd = this.liquidityAfterOpen(pos) ?? pos.liquidityUsd;
+    const observed = this.liquidityAfterOpen(pos);
+    const liquidityUsd = observed ?? pos.liquidityUsd;
     if (kind === "live") {
       const holders = this.heldHolders.get(pos.mint);
       const freshHolders = holders != null && holders.at > pos.openedAt ? holders : null;
+      const flow = this.strategy.flowFor(pos.mint);
+      const flowLiq = flow && flow.at >= pos.openedAt && typeof flow.liquidityUsd === "number" && flow.liquidityUsd > 0 ? flow.liquidityUsd : null;
+      const rugLiquidity = observed != null && flowLiq != null ? Math.min(observed, flowLiq) : (observed ?? flowLiq);
       const rug = assessRugExit({
         now,
         openedAt: pos.openedAt,
         entryLiquidityUsd: meta.entryLiquidityUsd,
-        liquidityUsd: this.liquidityAfterOpen(pos),
+        liquidityUsd: rugLiquidity,
         entryDevHoldingPct: meta.entryDevHoldingPct,
         devHoldingPct: freshHolders?.devHoldingPct,
         entryTop10Pct: meta.entryTop10Pct,
         top10Pct: freshHolders?.top10HolderPct,
-        flow: this.strategy.flowFor(pos.mint)
+        flow
       });
       if (rug) {
         this.strategyExitRetryAt.set(key, now + 2_000);
