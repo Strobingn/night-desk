@@ -46,6 +46,8 @@ export interface PumpLiveRequest {
   exitCap?: number;
   /** Manual sell only. Does not apply when the pool has no quote. */
   sellAnyway?: boolean;
+  /** The desk's mark is older than the watch window. The on-chain slippage still caps this send. */
+  markStale?: boolean;
   keypairPath?: string;
   readEnvSecret?: () => string | undefined;
   rpcUrl: string;
@@ -224,7 +226,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   } else {
     if (!(qty > 0) || !(fillPriceUsd > 0)) throw noSellRouteError();
     const cap = req.exitCap ?? slip;
-    const shortfall = pumpSellShortfall(fillPriceUsd, req.markPriceUsd ?? 0);
+    const shortfall = req.markStale === true ? 0 : pumpSellShortfall(fillPriceUsd, req.markPriceUsd ?? 0);
     if (shortfall > cap + 1e-9 && req.sellAnyway !== true) throw sellExitImpactError(shortfall, cap);
   }
   if (!(qty > 0) || !(fillPriceUsd > 0)) throw new Error("LIVE_SWAP_FAILED: pump quote was not a usable fill. Nothing was sent.");
@@ -248,7 +250,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   if (sent.err || sent.state === "rejected") throw rejectedSend(sent.signature || "unknown", req.side);
   const feeLamports = Number(built.quote.feeLamports);
   const feeUsd = Number.isFinite(feeLamports) && feeLamports > 0 ? (feeLamports / 1_000_000_000) * req.solPriceUsd : 0;
-  const mark = req.markPriceUsd ?? fillPriceUsd;
+  const mark = req.markStale === true ? fillPriceUsd : (req.markPriceUsd ?? fillPriceUsd);
   const slippage = mark > 0 ? Math.abs(fillPriceUsd - mark) / mark : 0;
   console.log(`[executor] pump live ${req.side} ${req.mint} venue ${built.venue} owner ${loaded.keypair.publicKey.toBase58()} sig ${sent.signature}`);
   return { signature: sent.signature, fillPriceUsd, qty, notionalUsd, feeUsd, slippage };

@@ -2,7 +2,7 @@ import { Keypair } from "@solana/web3.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeToken } from "../src/demo/tokens.js";
 import { Desk } from "../src/desk/orchestrator.js";
-import { realizedFillSlippage } from "../src/market/live-broker.js";
+import { exitQuoteHaircut, realizedFillSlippage, sellImpactRefused } from "../src/market/live-broker.js";
 import { streamSkipFreshMs, STREAM_FRESH_MS } from "../src/market/position-pricer.js";
 import { assessRugExit, RUG_EXIT_SLIPPAGE, RUG_WATCH_MS } from "../src/strategy/rug-exit.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
@@ -123,6 +123,7 @@ describe("v13.54 rug exit", () => {
       const sells = liveBroker.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell");
       expect(sells).toHaveLength(1);
       expect(sells[0]?.[0].maxExitSlippage).toBe(RUG_EXIT_SLIPPAGE);
+      expect(sells[0]?.[0].markStale).not.toBe(true);
       expect(sells[0]?.[0].sellAnyway).not.toBe(true);
       expect(desk.liveBook!.positions.has(mint)).toBe(false);
       expect(desk.snapshot().events.some((event) => event.code === "RUG_EXIT")).toBe(true);
@@ -145,6 +146,7 @@ describe("v13.54 rug exit", () => {
       const sells = liveBroker.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell");
       expect(sells).toHaveLength(1);
       expect(sells[0]?.[0].maxExitSlippage).toBeCloseTo(0.06, 5);
+      expect(sells[0]?.[0].markStale).not.toBe(true);
       expect(desk.snapshot().events.some((event) => event.code === "STRATEGY_STOP")).toBe(true);
       expect(desk.snapshot().events.some((event) => event.code === "RUG_EXIT")).toBe(false);
     } finally {
@@ -223,6 +225,7 @@ describe("v13.54 rug exit", () => {
       await (desk as unknown as { drain: () => Promise<void> }).drain();
       const sells = liveBroker.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell");
       expect(sells).toHaveLength(1);
+      expect(sells[0]?.[0].markStale).toBe(true);
       expect(desk.snapshot().events.some((event) => event.code === "STRATEGY_STOP")).toBe(true);
     } finally {
       desk.stop();
@@ -236,6 +239,12 @@ describe("v13.54 fill slippage and a quiet stream", () => {
     expect(realizedFillSlippage("sell", 1, 0.97)).toBeCloseTo(0.03, 6);
     expect(realizedFillSlippage("buy", 1, 1)).toBe(0);
     expect(realizedFillSlippage("sell", 1, 1.02)).toBe(0);
+    const stale = exitQuoteHaircut(0.8, 0.02, true);
+    expect(stale).toBeCloseTo(0.02, 6);
+    expect(sellImpactRefused(stale ?? 0, 0.06, false)).toBe(false);
+    expect(sellImpactRefused(exitQuoteHaircut(0.08, 0.02, false) ?? 0, 0.06, false)).toBe(true);
+    expect(sellImpactRefused(exitQuoteHaircut(0.8, 0.6, true) ?? 0, 0.5, false)).toBe(true);
+    expect(sellImpactRefused(exitQuoteHaircut(0, 0.07, false) ?? 0, 0.06, false)).toBe(true);
     expect(assessRugExit({ now: 10_000, openedAt: 0, entryLiquidityUsd: 100, liquidityUsd: 60 })).toMatchObject({ code: "RUG_EXIT" });
     expect(assessRugExit({ now: 10_000, openedAt: 0, entryLiquidityUsd: 100, liquidityUsd: 90 })).toBeNull();
     expect(assessRugExit({ now: RUG_WATCH_MS + 5, openedAt: 0, entryLiquidityUsd: 100, liquidityUsd: 10 })).toBeNull();

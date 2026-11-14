@@ -1783,6 +1783,13 @@ export class Desk {
     });
   }
 
+  /** An engine position whose last mark is older than the watch window. A manual sell keeps its mark. */
+  private engineMarkStale(kind: BookKind, pos: Position): boolean {
+    if (!pos.strategy) return false;
+    const at = this.bk(kind).markedAt(pos.mint);
+    return at == null || Date.now() - at > STRATEGY.watch.markFreshMs;
+  }
+
   /** Pool depth written after this fill. A leftover from the previous hold is not a drain. */
   private liquidityAfterOpen(pos: Position): number | null {
     const at = this.markLiquidityAt.get(pos.mint);
@@ -3890,7 +3897,8 @@ export class Desk {
           exit: true,
           confirmedFill: recent,
           sellAnyway: order.reason.code === "MANUAL_CLOSE" && order.sellAnyway === true,
-          rugExit: order.rugExit === true
+          rugExit: order.rugExit === true,
+          markStale: this.engineMarkStale(kind, pos)
         });
         void this.refreshWallet();
         this.applySell(pos, {
@@ -5719,6 +5727,8 @@ export class Desk {
     sellAnyway?: boolean;
     /** Engine live rug exit. The saved exit cap stays 6%. This send may go up to RUG_EXIT_SLIPPAGE. */
     rugExit?: boolean;
+    /** Engine exit whose mark is older than the watch window. The quote's own impact still has to fit the cap. */
+    markStale?: boolean;
   }): Promise<LiveSwapResult> {
     const savedExit = this.maxExitSlippage ?? this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack;
     const slip = input.exit ? (input.rugExit === true ? RUG_EXIT_SLIPPAGE : savedExit) : this.config.rules.maxEntrySlippage;
@@ -5738,6 +5748,7 @@ export class Desk {
         slippageFraction: input.sellAnyway === true ? 0.5 : slip,
         exitCap: slip,
         sellAnyway: input.sellAnyway === true,
+        markStale: input.markStale === true,
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
         rpcUrl: this.config.walletRpcUrl,
@@ -5763,6 +5774,7 @@ export class Desk {
       maxExitSlippage: input.exit ? slip : undefined,
       confirmedFill: input.confirmedFill === true,
       sellAnyway: input.exit === true && input.sellAnyway === true,
+      markStale: input.markStale === true,
       rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1, { swapLane: true }),
       senderTipLamports: tipLamports(this.senderTipSol),
       idemKey: randomUUID()
