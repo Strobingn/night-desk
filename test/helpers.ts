@@ -32,3 +32,18 @@ export function testConfig(overrides: Partial<DeskConfig> = {}): DeskConfig {
 export function testDesk(overrides: Partial<DeskConfig> = {}, deps: { priceFetch?: typeof fetch } = {}): Desk {
   return new Desk(testConfig(overrides), deps);
 }
+
+/** Injected sell quote so an engine live buy test does not call Jupiter. */
+export function engineSellRouteStub(): Promise<"route"> {
+  return Promise.resolve("route");
+}
+
+/** Lock read that repeats the window's last sample, so a test does not call DexScreener. */
+export function holdLiveEntryRead(desk: Desk): void {
+  desk.liveEntryRead = async (mint) => {
+    const priceUsd = desk.liveWindows.price(mint);
+    const liquidityUsd = desk.liveWindows.track(mint)?.samples.at(-1)?.liquidityUsd;
+    if (!(priceUsd != null && priceUsd > 0) || liquidityUsd == null || !Number.isFinite(liquidityUsd)) return null;
+    return { priceUsd, liquidityUsd };
+  };
+}
