@@ -5,6 +5,7 @@ import { Desk } from "../src/desk/orchestrator.js";
 import { exitQuoteHaircut, realizedFillSlippage, sellImpactRefused } from "../src/market/live-broker.js";
 import { streamSkipFreshMs, STREAM_FRESH_MS } from "../src/market/position-pricer.js";
 import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_WATCH_MS } from "../src/strategy/rug-exit.js";
+import { LIVE_SURVIVAL_MS } from "../src/strategy/live-rug-gate.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { testConfig } from "./helpers.js";
 
@@ -34,11 +35,13 @@ const quote = (at: number, priceUsd: number, liquidityUsd = 180_000) => ({
 });
 
 async function fill(desk: Desk, mint: string, symbol: string, over: Parameters<typeof makeToken>[0] = {}): Promise<void> {
-  const token = makeToken({ mint, symbol, priceUsd: 1, ageSeconds: 600, volume5mUsd: 40_000, liquidityUsd: 180_000, discoveredAt: Date.now(), ...over });
+  const token = makeToken({ mint, symbol, priceUsd: 1, ageSeconds: 600, volume5mUsd: 40_000, liquidityUsd: 180_000, discoveredAt: Date.now(), devWallet: mint, ...over });
   await desk.submitCandidate(token);
   const t = Date.now();
   await desk.submitStrategyQuote(mint, quote(t + 10_000, 1.01), t + 10_000);
   await desk.submitStrategyQuote(mint, quote(t + 22_000, 1.025), t + 22_000);
+  const confirm = t + 22_000 + LIVE_SURVIVAL_MS;
+  await desk.submitStrategyQuote(mint, quote(confirm, 1.025), confirm);
 }
 
 const buyFill = (req: { sizeUsd?: number; markPriceUsd?: number }) => {

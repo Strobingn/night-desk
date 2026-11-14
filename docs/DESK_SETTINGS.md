@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-14 (13.56). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-14 (13.57). Dirk set the live daily cap to $500. Other live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -26,7 +26,7 @@ Machine-readable copy: [`docs/desk-settings.json`](desk-settings.json).
 - 13.37: Meteora DAMM v2 is not a traditional LP. A pool with no LP token (RugCheck's `11111111…` mint, or a `damm v2` market) is not an unlock, same as DLMM. When a traditional pool reports reserve depth (`baseUSD` + `quoteUSD`, or DexScreener `liquidity.usd`), the lock is judged on the deepest of those pools. A pool with no figures does not fail the coin when another pool has depth or a real lock. The 95% line and `allowUnlockedLp` are unchanged. A `getTokenLargestAccounts` page is not a holder total: a short page stays unknown, and RugCheck `totalHolders` is the count when the report has one. A missing count still fails closed when a holder minimum is set. No numeric setting changed. Hard kills are not loosened.
 - 13.36: Search lookup no longer wraps the whole chain read in a 2s wall that RugCheck can eat. Alchemy `getAccountInfo` starts immediately, holder reads and RugCheck run beside it, and the budget is whatever is left inside the phone lookup client's 8s timeout after the price read, leaving room for the response. Safety and the bundle check run during that read. Reusing a sighting does not refresh the age of the fields it copied. Fields that landed are kept. A chain timeout reuses a successful enrich of the same mint from the last 30 minutes. LP lock is judged on the deepest traditional pool; Meteora DLMM and other concentrated-liquidity pools are not an unlock. Lookup and manual-buy lines in `desk.log` include `chainTimedOut`, the providers that answered, and the checks. `/api/health` and `pipeline.unverifiedKills` count fail-closed "could not be verified" kills by code. The hard stop is measured from the entry mark, not the slipped fill, so paying entry slippage is not itself a stop. Stop percent, trail, exit slippage 6%, cooldown 0, Helius 10+8, live $5/$20, bogus-price rejection, the engine paper book, and the 13.32 manual override are unchanged. No new Oracle pull.
 - 13.34: a free-feed pre-filter runs before any Helius or Alchemy read. It uses the existing volume, liquidity, and age settings (no number changed; there is no configured market-cap floor or ceiling). A hard kill is not enriched again. A soft kill such as `VOLUME_TOO_LOW` gets one recheck after 5 minutes, and only if a later free print shows volume above the floor. Search and manual buys still call RPC for a mint the pre-filter killed. Chain marks are kept for held coins and the watchlist. Helius caps stay 10 and 8. Rebased onto main after PR 33 (`08233e1`, which includes `5cca6d92`).
-- Leave live trade size at $5 and the daily cap at $20, exit slippage at 6%, cooldown at 0, and the Helius lane caps (10 read + 8 exec, combined `reqLastMin` never above 18) unless Dirk approves a change.
+- Leave live trade size at $5 and the daily cap at $500, exit slippage at 6%, cooldown at 0, and the Helius lane caps (10 read + 8 exec, combined `reqLastMin` never above 18) unless Dirk approves a change. The cap's allowed band is still $1–$100,000.
 
 ## Pre-filter (13.34)
 
@@ -190,7 +190,7 @@ Stored in SQLite KV key `strategy`, not in `prefs`. Code defaults below; re-pull
 | Setting | Current |
 |---|---|
 | Live trade $ | **$5** |
-| Live daily cap | **$20** |
+| Live daily cap | **$500** |
 | Live trail | 5% |
 | Live scope | manual only · AI paper |
 | Live spent today | $0 (at pull) |
@@ -279,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.56** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.56, `versionCode` 1356, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.57** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.57, `versionCode` 1357, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Dirk set the live daily cap to $500. Other prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -298,6 +298,17 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.57 notes
+
+The engine cannot live-buy a coin that rugs inside a minute. No numeric exit, cap, or pause changed except the live daily cap Dirk set to $500.
+
+- An engine live buy waits `LIVE_SURVIVAL_MS` (90 seconds) after the signal. Liquidity has to stay within 20% of the first sample and at or above the $10,000 live floor the whole time, and the pool's age has to cover that window. The coin is quoted again immediately before the swap.
+- The buy fails closed. Unknown, timed out, or missing safety, bundle, LP lock, liquidity, or sell route means no live buy. LP must be burned or locked (`onBondingCurve` does not pass). Mint and freeze authority must be revoked. The sell check is a quote, and no route means no buy.
+- A live engine coin whose pool dies adds its deployer wallet to `rugWallets`. A later engine live buy from that wallet is skipped. Manual buys do not read the list and do not wait out the window.
+- Live trade size stays $5. `liveDailyCapUsd` of $500 is inside the existing $1–$100,000 band. The phone's draft cap, when none is saved, is $500.
+
+Not changed: ordinary exits at 6%, rug exits at 50% only, Helius 10/8, cooldown 0, the $10 paper-only pause, the $5 closed-live pause, dead coins off the 6 live slots, and no automatic sells on dead coins.
 
 ## 13.56 notes
 

@@ -147,7 +147,7 @@ private fun draftOf(snap: DeskSnapshot?): Draft {
         resetUsd = (snap?.paperResetUsd ?: 100.0).toFloat().coerceIn(100f, 10_000f),
         refresh = ((snap?.positionRefreshMs ?: 1_500L) / 1_000.0).toFloat().coerceIn(1f, 10f),
         liveUsd = (snap?.liveTradeUsd ?: 5.0).toFloat().coerceIn(1f, 100f),
-        liveCap = (snap?.liveDailyCapUsd ?: 50.0).toFloat().coerceIn(5f, 100_000f),
+        liveCap = (snap?.liveDailyCapUsd ?: 500.0).toFloat().coerceIn(5f, 100_000f),
         useLiveCap = snap?.liveDailyCapUsd != null,
         liveTrail = ((snap?.liveTrailPct ?: 0.01) * 100.0).toFloat().coerceIn(0.5f, 20f),
         liveAutoBuy = snap?.liveAutoBuy == true,

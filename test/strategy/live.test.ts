@@ -3,6 +3,7 @@ import { Keypair } from "@solana/web3.js";
 import { makeToken } from "../../src/demo/tokens.js";
 import { Desk } from "../../src/desk/orchestrator.js";
 import { STRATEGY } from "../../src/strategy/config.js";
+import { LIVE_SURVIVAL_MS } from "../../src/strategy/live-rug-gate.js";
 import type { WalletBalances } from "../../src/market/wallet-status.js";
 import { testConfig } from "../helpers.js";
 
@@ -52,6 +53,8 @@ async function signal(desk: Desk, token = young()): Promise<void> {
   const t = Date.now();
   await desk.submitStrategyQuote(token.mint, quote(t + 10_000, token.priceUsd * 1.01), t + 10_000);
   await desk.submitStrategyQuote(token.mint, quote(t + 22_000, token.priceUsd * 1.025), t + 22_000);
+  const confirm = t + 22_000 + LIVE_SURVIVAL_MS;
+  await desk.submitStrategyQuote(token.mint, quote(confirm, token.priceUsd * 1.025), confirm);
 }
 
 const buys = () => liveBroker.executeLiveSwap.mock.calls.filter((c) => c[0].side === "buy");
@@ -151,7 +154,7 @@ describe("engine live variant", () => {
       // The coin is rugged: no sell route. It stays on the book.
       (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
       expect(desk.strategyView().live).toMatchObject({ open: 0, dead: 1 });
-      await signal(desk, young({ mint: "EngineLive444444444444444444444444444444444", symbol: "EL4" }));
+      await signal(desk, young({ mint: "EngineLive444444444444444444444444444444444", symbol: "EL4", devWallet: "OtherDev1111111111111111111111111111111" }));
       expect(buys()).toHaveLength(2);
       expect(desk.liveBook!.positions.size).toBe(2);
       expect(desk.strategyView().live).toMatchObject({ open: 1, dead: 1 });
@@ -171,6 +174,8 @@ describe("engine live variant", () => {
       for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 10_000, 1.01), t + 10_000);
       // Both signals fire before either buy has finished.
       for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 22_000, 1.025), t + 22_000);
+      const confirm = t + 22_000 + LIVE_SURVIVAL_MS;
+      for (const m of [MINT, other]) desk.strategyQuote(m, quote(confirm, 1.025), confirm);
       await (desk as unknown as { drain: () => Promise<void> }).drain();
       expect(buys()).toHaveLength(1);
       expect(desk.liveBook!.positions.size).toBe(1);
@@ -211,6 +216,8 @@ describe("engine live variant", () => {
       const t = Date.now();
       for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 10_000, 1.01), t + 10_000);
       for (const m of [MINT, other]) desk.strategyQuote(m, quote(t + 22_000, 1.025), t + 22_000);
+      const confirm = t + 22_000 + LIVE_SURVIVAL_MS;
+      for (const m of [MINT, other]) desk.strategyQuote(m, quote(confirm, 1.025), confirm);
       await (desk as unknown as { drain: () => Promise<void> }).drain();
       expect(buys()).toHaveLength(1);
       expect(desk.liveSpentTodayUsd()).toBe(5);
@@ -253,8 +260,10 @@ describe("engine live variant", () => {
       await desk.submitCandidate(young());
       const t = Date.now();
       desk.strategyQuote(MINT, quote(t + 10_000, 1.01), t + 10_000);
-      slow = true;
       desk.strategyQuote(MINT, quote(t + 22_000, 1.025), t + 22_000);
+      slow = true;
+      const confirm = t + 22_000 + LIVE_SURVIVAL_MS;
+      desk.strategyQuote(MINT, quote(confirm, 1.025), confirm);
       await new Promise((resolve) => setTimeout(resolve, 50));
       desk.updateStrategy({ liveVariant: null });
       release();

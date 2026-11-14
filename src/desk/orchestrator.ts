@@ -13,6 +13,7 @@ import { STRATEGY } from "../strategy/config.js";
 import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
 import { assessStrategyExit, strategyLinePrice, strategyStopPrice, type StrategyMeta } from "../strategy/exits.js";
 import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_LIQUIDITY_DROP, RUG_WATCH_MS } from "../strategy/rug-exit.js";
+import { LIVE_LIQUIDITY_FLOOR_USD, SurvivalWindow } from "../strategy/live-rug-gate.js";
 import { BoundedMap, LatencyStats } from "../strategy/latency.js";
 import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
@@ -62,7 +63,7 @@ import { buildRecap, recapReport, resetAtFromEquity, resolveRecapSince, type Rec
 import { PositionPricer, type LiveOrigin } from "../market/position-pricer.js";
 import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from "../market/chain-marks.js";
 import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
-import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
+import { MIN_FEE_SOL, USDC_MINT, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { APP_VERSION, type ClientCrash } from "./crash-card.js";
 import { protocolWarmDue, rememberMintAccount, usesPumpRoute, warmProtocolAccounts } from "../market/pump-live.js";
 import { bundleShare, isPumpCoin, pumpExcluded, slotActivity, type BundleResult, type SlotTransaction } from "../market/bundle.js";
@@ -409,6 +410,11 @@ export class Desk {
   private autoExitRetryAt = new Map<string, number>();
   /** Live engine buys in flight. They count against the engine's open limit before they fill. */
   private engineLivePending = new Set<string>();
+  /** Engine live signals waiting out the survival window. Manual buys do not use this. */
+  readonly liveWindows = new SurvivalWindow<FiredSignal>();
+  /** Deployer wallets from engine live positions that lost their pool. */
+  private readonly rugWallets = new Set<string>();
+  private readonly rugNoted = new Set<string>();
   /** v13.44 what the live engine has done since the desk started, so the phone can say why it is not buying. */
   private liveEngine = {
     signals: 0,
@@ -620,6 +626,10 @@ export class Desk {
     this.lookupFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(-1);
     this.watchFetch = deps.lookupFetch ?? deps.priceFetch ?? this.net.fetchAt(1);
     this.store = new DeskStore(config.dbPath, config.jsonlPath, config.logPath);
+    const savedRugs = this.store.readJson("rugWallets");
+    if (Array.isArray(savedRugs)) {
+      for (const wallet of savedRugs) if (typeof wallet === "string" && wallet.trim()) this.rugWallets.add(wallet.trim());
+    }
     this.recorder = new MarketRecorder(this.store.db, config.marketRecordDays);
     const savedSol = this.store.readJson("solUsd") as { value?: unknown; at?: unknown } | null;
     if (savedSol && typeof savedSol.value === "number" && savedSol.value > 0 && Number.isFinite(savedSol.value) && typeof savedSol.at === "number") {
@@ -1476,7 +1486,7 @@ export class Desk {
    * quotes come from the Tape quoter's existing batched pass.
    */
   strategyPass(now = Date.now()): void {
-    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints()])];
+    const pinned = [...new Set([...this.strategy.pinned(), ...this.engineHeldMints(), ...this.liveWindows.holding()])];
     this.strategy.keepFlows(pinned);
     for (const mint of pinned) {
       const q = this.tape?.get(mint);
@@ -1534,56 +1544,89 @@ export class Desk {
       if (!this.freshMark("live", pos.mint, at)) continue;
       this.review(pos.mint, mark, "live");
     }
+    for (const expired of this.liveWindows.expire(now)) {
+      this.liveEngine.lastSkip = { at: now, symbol: expired.fired.token.symbol, code: "ENGINE_LIVE_SKIP", message: expired.reason };
+      this.log({
+        stage: "executor",
+        kind: "reject",
+        mint: expired.mint,
+        symbol: expired.fired.token.symbol,
+        code: "ENGINE_LIVE_SKIP",
+        message: `Engine live buy skipped ${expired.fired.token.symbol}. ${expired.reason}`
+      });
+    }
     // Keep the Tape quoter's pins in step with what the engine is watching or holding now.
-    if (pinned.length || this.strategy.pinned().length) this.pinOrderMints();
+    if (pinned.length || this.strategy.pinned().length || this.liveWindows.holding().length) this.pinOrderMints();
   }
 
   /**
    * The engine's live buy: only for the one variant the operator set live, only on a signal that
-   * variant trades. It goes through every live check a manual live buy does (checklist, live size,
-   * daily cap, wallet, slippage), and stops for the day once live is past its loss pause.
+   * variant trades. It does not buy on the signal. The pool has to stay alive and liquid for the
+   * survival window, and every safety, bundle, LP and sell-route check has to be verified again
+   * immediately before the swap. A manual live buy does not come through here.
    */
-  private async strategyLiveBuy(fired: FiredSignal): Promise<void> {
+  private async strategyLiveBuy(fired: FiredSignal, now = Date.now(), quote?: EngineQuote): Promise<void> {
     const meta = fired.liveMeta;
     if (!meta) return;
     const { token, score } = fired;
-    // Results are written to the counters this attempt started under. A change of live variant swaps in new ones.
     const tally = this.liveEngine;
-    tally.signals += 1;
-    tally.lastSignalAt = Date.now();
     const skip = (message: string, code: "ENGINE_LIVE_PAUSED" | "ENGINE_LIVE_SKIP" | "LAUNCH_BUNDLE_UNVERIFIED" = "ENGINE_LIVE_SKIP") => {
+      this.liveWindows.release(token.mint);
       this.pipeline.executorSkips += 1;
-      tally.lastSkip = { at: Date.now(), symbol: token.symbol, code, message };
+      tally.lastSkip = { at: now, symbol: token.symbol, code, message };
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Engine live buy skipped ${token.symbol}. ${message}` });
     };
     const block = this.liveEngineBlock();
     if (block) return skip(block, "ENGINE_LIVE_PAUSED");
     const live = this.liveBook!;
     if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
-    // A buy still in flight holds a slot, so two signals in one pass cannot both take the last one.
+    const watching = this.liveWindows.has(token.mint);
+    if (!watching) {
+      const reserved = this.engineLiveSlots().open + this.engineLivePending.size + this.liveWindows.holding().length;
+      if (reserved >= this.strategy.settings.maxOpen) return skip(`The engine already has ${reserved} live. It holds ${this.strategy.settings.maxOpen} at most.`);
+    }
+    const sampleAt = quote?.at ?? now;
+    const liquidity = quote?.liquidityUsd !== undefined ? quote.liquidityUsd : token.liquidityUsd;
+    const window = this.liveWindows.note(token.mint, { at: sampleAt, liquidityUsd: liquidity ?? null, ageSeconds: token.ageSeconds }, now, fired);
+    if (window.status === "waiting") {
+      if (!watching) tally.lastSignalAt = now;
+      this.pinOrderMints();
+      return;
+    }
+    if (window.status === "fail") {
+      tally.signals += 1;
+      tally.lastSignalAt = now;
+      return skip(window.reason);
+    }
+    tally.signals += 1;
+    tally.lastSignalAt = now;
+    this.harvestRugWallets();
+    const aged: FiredSignal["token"] = { ...token, liquidityUsd: window.liquidityUsd, ageSeconds: window.ageSeconds };
+    const facts = this.liveEntryFacts(aged);
+    if (!facts.ok) return skip(facts.reason);
     // Dead holdings, including a zero wallet balance, are not open trades and do not hold a slot.
-    const open = this.engineLiveSlots().open + this.engineLivePending.size;
+    this.liveWindows.release(token.mint);
+    const open = this.engineLiveSlots().open + this.engineLivePending.size + this.liveWindows.holding().length;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     this.engineLivePending.add(token.mint);
     try {
       // The read-lane waits sit outside the one-buy lock. The next live buy can run its own checks
       // while this one is waiting on Helius. The lock below covers only the buy itself.
-      const safety = await this.tokenSafety(token.mint, -1, true);
+      const safety = await this.tokenSafety(aged.mint, -1, true);
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
-      if (isPumpCoin(token)) {
-        const bundle = await this.engineLiveBundle(token.mint, safety.supply);
-        if (bundle == null) return skip("Launch bundle could not be verified.", "LAUNCH_BUNDLE_UNVERIFIED");
-        if ("reason" in bundle) {
-          const message = bundle.reason === "timeout" ? "Launch bundle timed out." : "Launch bundle RPC error.";
-          return skip(message, "LAUNCH_BUNDLE_UNVERIFIED");
-        }
-        if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
+      const bundle = await this.engineLiveBundle(aged.mint, safety.supply);
+      if (bundle == null) return skip("Launch bundle could not be verified.", "LAUNCH_BUNDLE_UNVERIFIED");
+      if ("reason" in bundle) {
+        const message = bundle.reason === "timeout" ? "Launch bundle timed out." : "Launch bundle RPC error.";
+        return skip(message, "LAUNCH_BUNDLE_UNVERIFIED");
       }
+      if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
+      const route = await this.engineSellRoute(aged);
+      if (route !== "route") return skip(route === "no_route" ? "No sell route." : "Sell route unverified.");
       const again = this.liveEngineBlock();
       if (again) return skip(again, "ENGINE_LIVE_PAUSED");
       await this.withLiveBuyLock(async () => {
-        // Entry slippage and the crash guard run inside the buy, against this signal's mark.
-        const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
+        const result = await this.executeBuy(aged, score, this.liveTradeUsd, "analyst", false, {
           tag: fired.signal.signal,
           book: "live",
           engineLive: true,
@@ -1593,7 +1636,6 @@ export class Desk {
           tally.buys += 1;
           tally.lastBuyAt = Date.now();
         } else {
-          // The buy path refused (wallet, daily cap, slippage, route...). Keep its own words for the phone.
           tally.lastSkip = { at: Date.now(), symbol: token.symbol, code: result.code ?? "REFUSED", message: result.error };
         }
       });
@@ -1602,7 +1644,39 @@ export class Desk {
       throw err;
     } finally {
       this.engineLivePending.delete(token.mint);
+      this.pinOrderMints();
     }
+  }
+
+  /** LP, an explicit authority, and the rug-wallet list. Null authorities are decided by the chain read that follows. */
+  private liveEntryFacts(token: CandidateToken): { ok: true } | { ok: false; reason: string } {
+    if (token.lpLockedOrBurned !== true) return { ok: false, reason: "LP lock unverified." };
+    if (token.mintAuthorityRevoked === false) return { ok: false, reason: "Mint authority is active." };
+    if (token.freezeAuthorityRevoked === false) return { ok: false, reason: "Freeze authority is active." };
+    if (!(token.liquidityUsd >= LIVE_LIQUIDITY_FLOOR_USD)) return { ok: false, reason: "Liquidity is under the live floor." };
+    const dev = token.devWallet?.trim();
+    if (dev && this.rugWallets.has(dev)) return { ok: false, reason: "Deployer is on the rug list." };
+    return { ok: true };
+  }
+
+  /** A sell quote for the coins this buy would receive. Unknown and no-route both refuse. Tests do not call Jupiter. */
+  sellRouteOverride: ((token: CandidateToken) => Promise<"route" | "no_route" | "unknown">) | null = null;
+
+  private async engineSellRoute(token: CandidateToken): Promise<"route" | "no_route" | "unknown"> {
+    if (this.sellRouteOverride) return this.sellRouteOverride(token);
+    if (process.env.VITEST) return "route";
+    const price = token.priceUsd;
+    const decimals = token.decimals ?? 6;
+    if (!(price > 0) || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) return "unknown";
+    const raw = Math.floor((this.liveTradeUsd / price) * 10 ** decimals);
+    if (!(raw > 0)) return "unknown";
+    return readSellRoute({
+      quoteUrl: this.config.jupiterQuoteUrl,
+      inputMint: token.mint,
+      outputMint: USDC_MINT,
+      amount: String(raw),
+      fetchImpl: this.net.fetchAt(0)
+    });
   }
 
   /** One live engine buy at a time, so the next one sees this buy's spend. Held only for the buy, not the reads before it. */
@@ -1620,6 +1694,12 @@ export class Desk {
 
   /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
   strategyQuote(mint: string, quote: EngineQuote, now = Date.now()): void {
+    // A live signal stays here until the pool has survived. Paper already bought on the signal quote.
+    if (this.liveWindows.has(mint)) {
+      const fired = this.liveWindows.fired(mint);
+      if (fired) this.track(this.strategyLiveBuy(fired, now, quote));
+      return;
+    }
     const fired = this.strategy.onQuote(mint, quote, now);
     if (!fired) return;
     const watchedAt = this.watchAt.get(mint);
@@ -1658,7 +1738,7 @@ export class Desk {
       message: `Engine signal on ${fired.token.symbol}. ${fired.signal.reason}`,
       detail: fired.signal.signal
     });
-    this.track(this.strategyBuys(fired));
+    this.track(this.strategyBuys(fired, quote, now));
   }
 
   /** Tests and tools: one engine quote, then wait for any buy it caused. */
@@ -1691,10 +1771,10 @@ export class Desk {
   }
 
   /** The paper buy and, when a live variant is set for this signal, the live buy. Neither waits on the other's outcome. */
-  private async strategyBuys(fired: FiredSignal): Promise<void> {
+  private async strategyBuys(fired: FiredSignal, quote: EngineQuote, now: number): Promise<void> {
     // A signal of the kind the live variant does not trade: counted, so "no live buys" can be told from "no signals".
     if (!fired.liveMeta && this.strategy.settings.liveVariant) this.liveEngine.otherSignals += 1;
-    const live = fired.liveMeta ? this.strategyLiveBuy(fired).catch((err) => console.error("[strategy] live buy", err)) : null;
+    const live = fired.liveMeta ? this.strategyLiveBuy(fired, now, quote).catch((err) => console.error("[strategy] live buy", err)) : null;
     await this.strategyBuy(fired);
     if (live) await live;
   }
@@ -1839,7 +1919,7 @@ export class Desk {
    * A pin is a quote slot. It does not disable Buy or hide Live, and a manual buy does not read it.
    */
   private pinOrderMints(): void {
-    this.tape?.pin([...this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint), ...this.strategy.pinned(), ...this.engineHeldMints()]);
+    this.tape?.pin([...this.orders.open().filter((o) => o.side === "limit_buy").map((o) => o.mint), ...this.strategy.pinned(), ...this.engineHeldMints(), ...this.liveWindows.holding()]);
   }
 
   /**
@@ -4382,6 +4462,24 @@ export class Desk {
   }
 
   /** v13.7 one feed print marks the paper book and, when held there, the live book. */
+  /** Deployers of engine live coins that can no longer be sold. Checked again before the next live buy. */
+  private harvestRugWallets(): void {
+    for (const pos of this.liveBook?.positions.values() ?? []) {
+      if (!pos.strategy || !this.enginePositionDead(pos)) continue;
+      this.rememberRugWallet(pos.mint);
+    }
+  }
+
+  /** Remember the deployer of an engine live coin whose pool died. Later engine live buys of that wallet are refused. */
+  private rememberRugWallet(mint: string): void {
+    if (this.rugNoted.has(mint)) return;
+    this.rugNoted.add(mint);
+    const dev = this.sightings.get(mint)?.devWallet?.trim();
+    if (!dev || this.rugWallets.has(dev)) return;
+    this.rugWallets.add(dev);
+    this.store.writeJson("rugWallets", [...this.rugWallets]);
+  }
+
   /**
    * v13.39: the mid is no longer sellable value. Write the residual into the book so
    * equity and P&L see it. The position stays open for a later retry, so this does
@@ -4406,6 +4504,7 @@ export class Desk {
             ? pos.entryMark
             : pos.entryPrice;
     this.liquidityGone.set(key, { at: now, residualUsd: residual, reason, anchorPrice });
+    if (kind === "live" && pos.strategy) this.rememberRugWallet(mint);
     if (prev) {
       const last = book.price(mint, pos.entryPrice);
       if (last > 0 && Math.abs(last - px) / Math.max(last, px, 1e-18) < 0.05) return;

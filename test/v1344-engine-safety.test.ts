@@ -5,6 +5,7 @@ import { Desk } from "../src/desk/orchestrator.js";
 import { NetLimiter } from "../src/market/net.js";
 import { safeMintAccount } from "../src/market/mint-safety.js";
 import { STRATEGY } from "../src/strategy/config.js";
+import { LIVE_SURVIVAL_MS } from "../src/strategy/live-rug-gate.js";
 import type { FiredSignal } from "../src/strategy/engine.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
 import { testConfig } from "./helpers.js";
@@ -60,6 +61,18 @@ async function signal(desk: Desk, token = young()): Promise<void> {
   const t = Date.now();
   await desk.submitStrategyQuote(token.mint, quote(t + 10_000, token.priceUsd * 1.01), t + 10_000);
   await desk.submitStrategyQuote(token.mint, quote(t + 22_000, token.priceUsd * 1.025), t + 22_000);
+  const confirm = t + 22_000 + LIVE_SURVIVAL_MS;
+  await desk.submitStrategyQuote(token.mint, quote(confirm, token.priceUsd * 1.025), confirm);
+}
+
+function survived(desk: Desk, fired: FiredSignal): void {
+  const now = Date.now();
+  desk.liveWindows.note(
+    fired.token.mint,
+    { at: now - LIVE_SURVIVAL_MS, liquidityUsd: fired.token.liquidityUsd, ageSeconds: fired.token.ageSeconds },
+    now - LIVE_SURVIVAL_MS,
+    fired
+  );
 }
 
 const codes = (desk: Desk) => desk.snapshot().events.map((e) => e.code).filter(Boolean);
@@ -164,6 +177,7 @@ describe("v13.45 engine safety priority", () => {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
       const started = Date.now();
       const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young({ source: "pumpfun" }), score: 0.8, meta: meta(), liveMeta: meta() };
+      survived(desk, fired);
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       const elapsed = Date.now() - started;
       expect(elapsed).toBeGreaterThanOrEqual(14_000);
@@ -183,6 +197,7 @@ describe("v13.45 engine safety priority", () => {
     try {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
       const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young({ source: "pumpfun" }), score: 0.8, meta: meta(), liveMeta: meta() };
+      survived(desk, fired);
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
       expect(codes(desk)).toContain("LAUNCH_BUNDLE_UNVERIFIED");
@@ -307,6 +322,7 @@ describe("v13.45 engine safety priority", () => {
         result: { flagged: false, pct: 0, label: null, acquired: 0n }
       });
       const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token, score: 0.8, meta: meta(), liveMeta: meta() };
+      survived(desk, fired);
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       expect(calls).toBe(1);
       expect(liveBroker.executeLiveSwap).not.toHaveBeenCalled();
@@ -347,6 +363,7 @@ describe("v13.46 engine check timeouts", () => {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
       const started = Date.now();
       const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young(), score: 0.8, meta: meta(), liveMeta: meta() };
+      survived(desk, fired);
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       const elapsed = Date.now() - started;
       expect(elapsed).toBeGreaterThanOrEqual(5_500);
@@ -365,6 +382,7 @@ describe("v13.46 engine check timeouts", () => {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });
       const started = Date.now();
       const fired: FiredSignal = { signal: { signal: "launch", priceUsd: 1, risePct: 0.02, reason: "test" }, token: young(), score: 0.8, meta: meta(), liveMeta: meta() };
+      survived(desk, fired);
       await (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       const elapsed = Date.now() - started;
       expect(elapsed).toBeGreaterThanOrEqual(7_500);
@@ -443,6 +461,7 @@ describe("v13.46 engine check timeouts", () => {
           meta: meta(),
           liveMeta: meta()
         };
+        survived(desk, fired);
         return (desk as unknown as { strategyLiveBuy: (fired: FiredSignal) => Promise<void> }).strategyLiveBuy(fired);
       };
       const first = buy(MINT, "ELV");
