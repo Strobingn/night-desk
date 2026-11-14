@@ -19,6 +19,8 @@ export const LIVE_SURVIVAL_GIVE_UP_MS = 180_000;
 export interface LiquiditySample {
   at: number;
   liquidityUsd: number | null;
+  /** Wall clock when this sample was recorded. The buy recheck uses this, not the quote's own time. */
+  wallAt?: number;
 }
 
 export interface SurvivalTrack {
@@ -37,12 +39,13 @@ export function noteSurvival(
   sample: { at: number; liquidityUsd: number | null; ageSeconds: number | null },
   now: number
 ): { track: SurvivalTrack; result: SurvivalStatus } {
+  const stamped = { at: sample.at, liquidityUsd: sample.liquidityUsd, wallAt: Date.now() };
   const next: SurvivalTrack = track
-    ? { ...track, samples: [...track.samples, { at: sample.at, liquidityUsd: sample.liquidityUsd }] }
+    ? { ...track, samples: [...track.samples, stamped] }
     : {
         startedAt: sample.at,
         ageAtStart: sample.ageSeconds != null && Number.isFinite(sample.ageSeconds) ? sample.ageSeconds : null,
-        samples: [{ at: sample.at, liquidityUsd: sample.liquidityUsd }]
+        samples: [stamped]
       };
   return { track: next, result: survivalStatus(next, now) };
 }
@@ -56,8 +59,8 @@ export function survivalStatus(track: SurvivalTrack, now: number): SurvivalStatu
   }
   const first = track.samples[0]!;
   const start = first.liquidityUsd!;
-  if (start < LIVE_LIQUIDITY_FLOOR_USD) return { status: "fail", reason: "Liquidity is under the live floor." };
   for (const sample of track.samples) {
+    if (sample.liquidityUsd! < LIVE_LIQUIDITY_FLOOR_USD) return { status: "fail", reason: "Liquidity is under the live floor." };
     if (sample.liquidityUsd! < start * (1 - LIVE_SURVIVAL_MAX_DROP)) {
       return { status: "fail", reason: "Liquidity dropped during the survival window." };
     }
@@ -67,7 +70,6 @@ export function survivalStatus(track: SurvivalTrack, now: number): SurvivalStatu
   if (track.ageAtStart == null) return { status: "fail", reason: "Pool age unverified." };
   const ageSeconds = track.ageAtStart + (now - track.startedAt) / 1000;
   if (!(ageSeconds * 1000 >= LIVE_SURVIVAL_MS)) return { status: "fail", reason: "Pool is younger than the survival window." };
-  if (last.liquidityUsd! < LIVE_LIQUIDITY_FLOOR_USD) return { status: "fail", reason: "Liquidity is under the live floor." };
   return { status: "ready", ageSeconds, liquidityUsd: last.liquidityUsd! };
 }
 
@@ -99,7 +101,8 @@ export function liveEntryAllowed(facts: LiveEntryFacts, blacklist: ReadonlySet<s
 }
 
 export class SurvivalWindow<T> {
-  private readonly rows = new Map<string, { track: SurvivalTrack; fired: T }>();
+  private readonly rows = new Map<string, { track: SurvivalTrack; fired: T; priceUsd?: number }>();
+  private readonly failures = new Map<string, string>();
 
   has(mint: string): boolean {
     return this.rows.has(mint);
@@ -107,6 +110,19 @@ export class SurvivalWindow<T> {
 
   fired(mint: string): T | undefined {
     return this.rows.get(mint)?.fired;
+  }
+
+  track(mint: string): SurvivalTrack | undefined {
+    return this.rows.get(mint)?.track;
+  }
+
+  /** Last positive price seen while this mint was in the window. */
+  price(mint: string): number | undefined {
+    return this.rows.get(mint)?.priceUsd;
+  }
+
+  failure(mint: string): string | undefined {
+    return this.failures.get(mint);
   }
 
   holding(): string[] {
@@ -117,20 +133,25 @@ export class SurvivalWindow<T> {
     mint: string,
     sample: { at: number; liquidityUsd: number | null; ageSeconds: number | null },
     now: number,
-    fired: T
+    fired: T,
+    priceUsd?: number
   ): SurvivalStatus {
     const prev = this.rows.get(mint);
     const noted = noteSurvival(prev?.track, sample, now);
+    const price = priceUsd != null && priceUsd > 0 && Number.isFinite(priceUsd) ? priceUsd : prev?.priceUsd;
     if (noted.result.status === "fail") {
+      this.failures.set(mint, noted.result.reason);
       this.rows.delete(mint);
       return noted.result;
     }
-    this.rows.set(mint, { track: noted.track, fired });
+    this.failures.delete(mint);
+    this.rows.set(mint, { track: noted.track, fired, ...(price != null ? { priceUsd: price } : {}) });
     return noted.result;
   }
 
   release(mint: string): void {
     this.rows.delete(mint);
+    this.failures.delete(mint);
   }
 
   /** Watches that never got a fresh quote. The caller logs the skip and frees the slot. */

@@ -6,6 +6,7 @@ import type { WalletBalances } from "../src/market/wallet-status.js";
 import { clampLiveDailyCapUsd } from "../src/rules.js";
 import {
   LIVE_SURVIVAL_MS,
+  noteSurvival,
   OVERNIGHT_RUGS,
   OVERNIGHT_SURVIVORS,
   overnightBlocked,
@@ -78,8 +79,9 @@ describe("v13.57 engine live rug gate", () => {
       expect(buys()).toHaveLength(0);
       expect(desk.book.positions.has(mint)).toBe(true);
       const confirm = signalAt + LIVE_SURVIVAL_MS;
-      await desk.submitStrategyQuote(mint, quote(confirm, 1.03), confirm);
+      await desk.submitStrategyQuote(mint, quote(confirm, 1.1), confirm);
       expect(buys()).toHaveLength(1);
+      expect(buys()[0]?.[0].markPriceUsd).toBe(1.1);
       expect(desk.liveBook!.positions.has(mint)).toBe(true);
     } finally {
       desk.stop();
@@ -143,6 +145,7 @@ describe("v13.57 engine live rug gate", () => {
       const confirm = signalAt + LIVE_SURVIVAL_MS;
       await desk.submitStrategyQuote(first, quote(confirm, 1.03), confirm);
       expect(buys()).toHaveLength(1);
+      (desk as unknown as { sightings: Map<string, unknown> }).sightings.delete(first);
       desk.liveBook!.mark(first, 1e-18, Date.now());
       const next = "NextDev11111111111111111111111111111111";
       const at = await arm(desk, next, "NEXT", { devWallet: dev });
@@ -167,6 +170,9 @@ describe("v13.57 engine live rug gate", () => {
     const stillOnTheCurve = overnightSurvivor("CRED");
     stillOnTheCurve.facts.lpLockedOrBurned = null;
     expect(overnightBlocked(stillOnTheCurve).blocked).toBe(true);
+    let dipped = noteSurvival(undefined, { at: 0, liquidityUsd: 11_000, ageSeconds: 30 }, 0);
+    dipped = noteSurvival(dipped.track, { at: 30_000, liquidityUsd: 9_500, ageSeconds: 30 }, 30_000);
+    expect(dipped.result).toMatchObject({ status: "fail", reason: "Liquidity is under the live floor." });
     expect(clampLiveDailyCapUsd(500)).toBe(500);
     expect(clampLiveDailyCapUsd(100_000)).toBe(100_000);
   });

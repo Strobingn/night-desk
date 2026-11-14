@@ -13,7 +13,7 @@ import { STRATEGY } from "../strategy/config.js";
 import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
 import { assessStrategyExit, strategyLinePrice, strategyStopPrice, type StrategyMeta } from "../strategy/exits.js";
 import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_LIQUIDITY_DROP, RUG_WATCH_MS } from "../strategy/rug-exit.js";
-import { LIVE_LIQUIDITY_FLOOR_USD, SurvivalWindow } from "../strategy/live-rug-gate.js";
+import { LIVE_LIQUIDITY_FLOOR_USD, LIVE_RECHECK_FRESH_MS, survivalStatus, SurvivalWindow } from "../strategy/live-rug-gate.js";
 import { BoundedMap, LatencyStats } from "../strategy/latency.js";
 import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
@@ -415,6 +415,8 @@ export class Desk {
   /** Deployer wallets from engine live positions that lost their pool. */
   private readonly rugWallets = new Set<string>();
   private readonly rugNoted = new Set<string>();
+  /** Mint to deployer, kept across a restart so a restored holding can still fill the rug list. */
+  private readonly engineDeployers = new Map<string, string>();
   /** v13.44 what the live engine has done since the desk started, so the phone can say why it is not buying. */
   private liveEngine = {
     signals: 0,
@@ -629,6 +631,12 @@ export class Desk {
     const savedRugs = this.store.readJson("rugWallets");
     if (Array.isArray(savedRugs)) {
       for (const wallet of savedRugs) if (typeof wallet === "string" && wallet.trim()) this.rugWallets.add(wallet.trim());
+    }
+    const savedDeployers = this.store.readJson("engineDeployers");
+    if (savedDeployers && typeof savedDeployers === "object" && !Array.isArray(savedDeployers)) {
+      for (const [mint, wallet] of Object.entries(savedDeployers)) {
+        if (typeof wallet === "string" && wallet.trim()) this.engineDeployers.set(mint, wallet.trim());
+      }
     }
     this.recorder = new MarketRecorder(this.store.db, config.marketRecordDays);
     const savedSol = this.store.readJson("solUsd") as { value?: unknown; at?: unknown } | null;
@@ -1576,18 +1584,26 @@ export class Desk {
       tally.lastSkip = { at: now, symbol: token.symbol, code, message };
       this.log({ stage: "executor", kind: "reject", mint: token.mint, symbol: token.symbol, code, message: `Engine live buy skipped ${token.symbol}. ${message}` });
     };
+    this.rememberDeployer(token.mint, token.devWallet);
     const block = this.liveEngineBlock();
     if (block) return skip(block, "ENGINE_LIVE_PAUSED");
     const live = this.liveBook!;
-    if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
+    const sampleAt = quote?.at ?? now;
+    const liquidity = quote?.liquidityUsd !== undefined ? quote.liquidityUsd : token.liquidityUsd;
+    const priceUsd = quote?.priceUsd != null && quote.priceUsd > 0 && Number.isFinite(quote.priceUsd) ? quote.priceUsd : token.priceUsd;
+    // A quote that arrives while the checks are in flight keeps the window current. It does not start a second buy.
+    if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) {
+      if (this.liveWindows.has(token.mint)) {
+        this.liveWindows.note(token.mint, { at: sampleAt, liquidityUsd: liquidity ?? null, ageSeconds: token.ageSeconds }, now, fired, priceUsd);
+      }
+      return;
+    }
     const watching = this.liveWindows.has(token.mint);
     if (!watching) {
       const reserved = this.engineLiveSlots().open + this.engineLivePending.size + this.liveWindows.holding().length;
       if (reserved >= this.strategy.settings.maxOpen) return skip(`The engine already has ${reserved} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     }
-    const sampleAt = quote?.at ?? now;
-    const liquidity = quote?.liquidityUsd !== undefined ? quote.liquidityUsd : token.liquidityUsd;
-    const window = this.liveWindows.note(token.mint, { at: sampleAt, liquidityUsd: liquidity ?? null, ageSeconds: token.ageSeconds }, now, fired);
+    const window = this.liveWindows.note(token.mint, { at: sampleAt, liquidityUsd: liquidity ?? null, ageSeconds: token.ageSeconds }, now, fired, priceUsd);
     if (window.status === "waiting") {
       if (!watching) tally.lastSignalAt = now;
       this.pinOrderMints();
@@ -1601,17 +1617,18 @@ export class Desk {
     tally.signals += 1;
     tally.lastSignalAt = now;
     this.harvestRugWallets();
-    const aged: FiredSignal["token"] = { ...token, liquidityUsd: window.liquidityUsd, ageSeconds: window.ageSeconds };
+    const aged: FiredSignal["token"] = { ...token, liquidityUsd: window.liquidityUsd, ageSeconds: window.ageSeconds, priceUsd };
     const facts = this.liveEntryFacts(aged);
     if (!facts.ok) return skip(facts.reason);
-    // Dead holdings, including a zero wallet balance, are not open trades and do not hold a slot.
-    this.liveWindows.release(token.mint);
-    const open = this.engineLiveSlots().open + this.engineLivePending.size + this.liveWindows.holding().length;
+    // The window stays open so a quote during the safety and bundle reads can refresh liquidity.
+    // This mint is pending, so it is not counted again as a watch.
+    const open = this.engineLiveSlots().open + this.engineLivePending.size + this.liveWindows.holding().filter((mint) => mint !== token.mint && !this.engineLivePending.has(mint)).length;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     this.engineLivePending.add(token.mint);
     try {
       // The read-lane waits sit outside the one-buy lock. The next live buy can run its own checks
-      // while this one is waiting on Helius. The lock below covers only the buy itself.
+      // while this one is waiting on Helius. The lock below covers the last liquidity read, the sell
+      // quote, and the buy itself.
       const safety = await this.tokenSafety(aged.mint, -1, true);
       if (safety.status !== "safe") return skip(`${safety.chip}.`);
       const bundle = await this.engineLiveBundle(aged.mint, safety.supply);
@@ -1621,12 +1638,14 @@ export class Desk {
         return skip(message, "LAUNCH_BUNDLE_UNVERIFIED");
       }
       if (bundle.flagged) return skip(`${bundle.label ?? "Bundled"}.`);
-      const route = await this.engineSellRoute(aged);
-      if (route !== "route") return skip(route === "no_route" ? "No sell route." : "Sell route unverified.");
-      const again = this.liveEngineBlock();
-      if (again) return skip(again, "ENGINE_LIVE_PAUSED");
+      const paused = this.liveEngineBlock();
+      if (paused) return skip(paused, "ENGINE_LIVE_PAUSED");
       await this.withLiveBuyLock(async () => {
-        const result = await this.executeBuy(aged, score, this.liveTradeUsd, "analyst", false, {
+        const fresh = this.freshLiveEntry(aged);
+        if (!fresh.ok) return skip(fresh.reason);
+        const route = await this.engineSellRoute(fresh.token);
+        if (route !== "route") return skip(route === "no_route" ? "No sell route." : "Sell route unverified.");
+        const result = await this.executeBuy(fresh.token, score, this.liveTradeUsd, "analyst", false, {
           tag: fired.signal.signal,
           book: "live",
           engineLive: true,
@@ -1644,8 +1663,33 @@ export class Desk {
       throw err;
     } finally {
       this.engineLivePending.delete(token.mint);
+      this.liveWindows.release(token.mint);
       this.pinOrderMints();
     }
+  }
+
+  /**
+   * The sample that authorizes the swap, read inside the buy lock. A quote that arrived during
+   * the safety or bundle wait is included. A stale or drained pool is not bought.
+   */
+  private freshLiveEntry(token: CandidateToken): { ok: true; token: CandidateToken } | { ok: false; reason: string } {
+    const failed = this.liveWindows.failure(token.mint);
+    if (failed) return { ok: false, reason: failed };
+    const track = this.liveWindows.track(token.mint);
+    const last = track?.samples[track.samples.length - 1];
+    if (!track || !last?.wallAt || Date.now() - last.wallAt > LIVE_RECHECK_FRESH_MS) return { ok: false, reason: "Liquidity was not rechecked." };
+    const verdict = survivalStatus(track, last.at);
+    if (verdict.status !== "ready") return { ok: false, reason: verdict.status === "fail" ? verdict.reason : "Liquidity was not rechecked." };
+    const price = this.liveWindows.price(token.mint);
+    return {
+      ok: true,
+      token: {
+        ...token,
+        liquidityUsd: verdict.liquidityUsd,
+        ageSeconds: verdict.ageSeconds,
+        ...(price != null ? { priceUsd: price } : {})
+      }
+    };
   }
 
   /** LP, an explicit authority, and the rug-wallet list. Null authorities are decided by the chain read that follows. */
@@ -1694,13 +1738,13 @@ export class Desk {
 
   /** One quote for a coin the engine is watching or a shadow book holds. A fired signal becomes a paper buy. */
   strategyQuote(mint: string, quote: EngineQuote, now = Date.now()): void {
-    // A live signal stays here until the pool has survived. Paper already bought on the signal quote.
+    // Shadow books and the flow cache still see this quote while a live buy is waiting on the window.
+    const fired = this.strategy.onQuote(mint, quote, now);
     if (this.liveWindows.has(mint)) {
-      const fired = this.liveWindows.fired(mint);
-      if (fired) this.track(this.strategyLiveBuy(fired, now, quote));
+      const held = this.liveWindows.fired(mint);
+      if (held) this.track(this.strategyLiveBuy(held, now, quote));
       return;
     }
-    const fired = this.strategy.onQuote(mint, quote, now);
     if (!fired) return;
     const watchedAt = this.watchAt.get(mint);
     if (watchedAt != null) this.latency.record("watchToSignal", now - watchedAt);
@@ -4470,12 +4514,22 @@ export class Desk {
     }
   }
 
+  /** Keep the deployer even after the in-memory sighting is gone, so a restored holding can still be blacklisted. */
+  private rememberDeployer(mint: string, dev: string | null | undefined): void {
+    const wallet = dev?.trim();
+    if (!wallet || this.engineDeployers.get(mint) === wallet) return;
+    this.engineDeployers.set(mint, wallet);
+    this.store.writeJson("engineDeployers", Object.fromEntries(this.engineDeployers));
+  }
+
   /** Remember the deployer of an engine live coin whose pool died. Later engine live buys of that wallet are refused. */
   private rememberRugWallet(mint: string): void {
+    const dev = this.sightings.get(mint)?.devWallet?.trim() || this.engineDeployers.get(mint);
+    if (!dev) return;
+    this.rememberDeployer(mint, dev);
     if (this.rugNoted.has(mint)) return;
     this.rugNoted.add(mint);
-    const dev = this.sightings.get(mint)?.devWallet?.trim();
-    if (!dev || this.rugWallets.has(dev)) return;
+    if (this.rugWallets.has(dev)) return;
     this.rugWallets.add(dev);
     this.store.writeJson("rugWallets", [...this.rugWallets]);
   }
