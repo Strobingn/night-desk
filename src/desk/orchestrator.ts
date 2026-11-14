@@ -63,7 +63,7 @@ import { ChainMarkReader, WSOL_MINT as SOL_MINT_ADDR, pumpCurveAddress } from ".
 import { ChainStream, wsUrlFor } from "../market/chain-stream.js";
 import { MIN_FEE_SOL, fetchWalletBalances, inspectDeskWallet, isPublicRpc, type DeskWalletStatus, type WalletBalances } from "../market/wallet-status.js";
 import { APP_VERSION, type ClientCrash } from "./crash-card.js";
-import { usesPumpRoute } from "../market/pump-live.js";
+import { protocolWarmDue, rememberMintAccount, usesPumpRoute, warmProtocolAccounts } from "../market/pump-live.js";
 import { bundleShare, isPumpCoin, pumpExcluded, slotActivity, type BundleResult, type SlotTransaction } from "../market/bundle.js";
 import { decodeMintSafety, SAFETY_UNKNOWN, safeMintAccount, type MintAccountBytes, type MintSafety } from "../market/mint-safety.js";
 import { tipLamports } from "../market/helius-sender.js";
@@ -474,6 +474,9 @@ export class Desk {
   /** Display-only count of collapsed marks. The chart series drops identical prints inside 2s. */
   private collapseStreak = new Map<string, CollapseStreak>();
   private routeProbeTimer: NodeJS.Timeout | null = null;
+  private swapWarmTimer: NodeJS.Timeout | null = null;
+  private swapWarmBusy = false;
+  private swapMintWarmed = new Set<string>();
   private routeProbeBusy = false;
   private readonly walletReader: () => Promise<WalletBalances>;
   private readonly signatureStatus?: (signature: string) => Promise<"confirmed" | "failed" | "unknown">;
@@ -924,6 +927,12 @@ export class Desk {
     }
     this.commentTimer = setInterval(() => void this.commentOnce(), 60_000);
     setTimeout(() => void this.commentOnce(), 8_000);
+    // Live swaps: keep the fixed Pump accounts and held mints read, off the swap lane.
+    if (this.config.feedMode !== "replay" && !this.config.demoFeed && this.liveBook && this.config.walletRpcUrl?.trim()) {
+      this.swapWarmTimer = setInterval(() => void this.warmSwapAccounts(), 60_000);
+      this.swapWarmTimer.unref?.();
+      setTimeout(() => void this.warmSwapAccounts(true), 3_000).unref?.();
+    }
     // Read-only sell quotes for the Dead section. One pass a minute. No swap is built or sent.
     if (this.config.feedMode !== "replay" && !this.config.demoFeed && this.config.jupiterQuoteUrl) {
       this.routeProbeTimer = setInterval(() => void this.probeSellRoutes(), 60_000);
@@ -957,6 +966,7 @@ export class Desk {
     if (this.strategyTimer) clearInterval(this.strategyTimer);
     if (this.walletTimer) clearInterval(this.walletTimer);
     if (this.routeProbeTimer) clearInterval(this.routeProbeTimer);
+    if (this.swapWarmTimer) clearInterval(this.swapWarmTimer);
     if (this.solTimer) clearInterval(this.solTimer);
     if (this.recheckTimer) clearTimeout(this.recheckTimer);
     this.recheckTimer = null;
@@ -5622,7 +5632,7 @@ export class Desk {
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
         rpcUrl: this.config.walletRpcUrl,
-        rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1),
+        rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1, { swapLane: true }),
         senderTipLamports: tipLamports(this.senderTipSol),
         idemKey: randomUUID()
       });
@@ -5644,7 +5654,7 @@ export class Desk {
       maxExitSlippage: input.exit ? slip : undefined,
       confirmedFill: input.confirmedFill === true,
       sellAnyway: input.exit === true && input.sellAnyway === true,
-      rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1),
+      rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1, { swapLane: true }),
       senderTipLamports: tipLamports(this.senderTipSol),
       idemKey: randomUUID()
     });
@@ -5847,7 +5857,33 @@ export class Desk {
     const json = (await res.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
     const value = json.result?.value;
     if (!value?.owner || !value.data?.[0]) return null;
-    return { owner: value.owner, data: Buffer.from(value.data[0], "base64") };
+    const account = { owner: value.owner, data: Buffer.from(value.data[0], "base64") };
+    // The safety check runs before every buy. A swap on this coin reuses this read.
+    rememberMintAccount(mint, account);
+    return account;
+  }
+
+  /**
+   * v13.53 keep the accounts a Pump swap needs ready, off the swap lane (priority 2, read lane):
+   * the four fixed program accounts, and the mint of every live Pump holding after a restart.
+   * A swap then spends its sends on the price, the blockhash and the simulation.
+   */
+  private async warmSwapAccounts(force = false): Promise<void> {
+    const rpc = this.config.walletRpcUrl?.trim();
+    if (!rpc || !this.liveBook || this.swapWarmBusy) return;
+    this.swapWarmBusy = true;
+    try {
+      if (force || protocolWarmDue()) await warmProtocolAccounts(solanaConnection(rpc, this.net.fetchAt(2)));
+      for (const pos of [...this.liveBook.positions.values()]) {
+        if (this.swapMintWarmed.has(pos.mint) || !usesPumpRoute({ dex: pos.dex, priceFeed: pos.priceFeed })) continue;
+        this.swapMintWarmed.add(pos.mint);
+        await this.rpcMintAccount(pos.mint, 2).catch(() => null);
+      }
+    } catch {
+      // Best effort. A swap reads whatever is missing itself.
+    } finally {
+      this.swapWarmBusy = false;
+    }
   }
 
   private async launchBundleSoon(mint: string, supply: bigint | null): Promise<BundleResult | null> {

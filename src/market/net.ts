@@ -180,11 +180,14 @@ function execLaneId(id: string): string | null {
   return null;
 }
 
-export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown, readLane = false): BucketSpec | null {
+export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown, readLane = false, swapLane = false): BucketSpec | null {
   if (!spec) return null;
   const pri = priority ?? 1;
   const execId = execLaneId(spec.id);
   if (!execId) return spec;
+  // A live swap's own sends stay on the swap lane whatever their method or priority, so a sell at
+  // priority -1 that reads a token account is not moved onto the read lane.
+  if (swapLane) return BY_ID.get(execId)!;
   // Priority 2, and an engine read that asked to stay here at priority -1, share the read budget.
   // A plain priority -1 getAccountInfo (manual buy) still uses the exec lane below.
   if ((pri === 2 || (readLane && pri === -1)) && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
@@ -696,12 +699,12 @@ export class NetLimiter {
    * Never throws on 429 itself: the 429 Response is returned after the bucket is paused,
    * so callers keep their own error handling. GETs retry once after the pause when asked.
    */
-  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number; ndReadLane?: boolean }): Promise<Response> => {
+  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number; ndReadLane?: boolean; ndSwapLane?: boolean }): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const spec = this.specFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
-    const { ndPriority: priority, retry429, timeoutMs, ndReadLane, ...rest } = init ?? {};
-    const lane = rpcLane(spec, priority, rest.body, ndReadLane === true);
+    const { ndPriority: priority, retry429, timeoutMs, ndReadLane, ndSwapLane, ...rest } = init ?? {};
+    const lane = rpcLane(spec, priority, rest.body, ndReadLane === true, ndSwapLane === true);
     if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
     const rpcRead = method === "POST" && typeof rest.body === "string" && (lane.id === "solana:public" || lane.id === "helius") && rpcReadMethod(rest.body) != null;
@@ -743,8 +746,9 @@ export class NetLimiter {
   };
 
   /** A plain fetch-compatible function bound to one priority, for callers that take `typeof fetch`. */
-  fetchAt(priority: Priority): typeof fetch {
-    return ((input: string | URL | Request, init?: RequestInit) => this.fetch(input, { ...(init ?? {}), ndPriority: priority })) as typeof fetch;
+  fetchAt(priority: Priority, opts: { swapLane?: boolean } = {}): typeof fetch {
+    return ((input: string | URL | Request, init?: RequestInit) =>
+      this.fetch(input, { ...(init ?? {}), ndPriority: priority, ...(opts.swapLane ? { ndSwapLane: true } : {}) })) as typeof fetch;
   }
 
   private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number, callerSignal?: AbortSignal): Promise<CachedResponse> {

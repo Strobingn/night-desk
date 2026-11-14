@@ -308,7 +308,9 @@ What was wrong. Building one Pump curve swap read six accounts (the mint, the cu
 What changed:
 
 - Each address is read once per swap (`swapConnection`). Global was read twice.
-- The four Pump program accounts (Global, curve fee config, AMM global config, AMM fee config) are kept 10 minutes. A coin's mint account is kept 60 minutes: its token program cannot change. A swap that fails to build or simulate drops the kept accounts, so the next attempt reads them fresh.
+- The four Pump program accounts (Global, curve fee config, AMM global config, AMM fee config) are kept 10 minutes. A coin's mint account is kept 60 minutes: its token program cannot change. A failed swap does not empty them, so its retry is just as short; it asks the desk to re-read the four program accounts in the background, at most once in 2 minutes.
+- The desk reads those four accounts itself every 8 minutes on the read lane at priority 2, and after a restart reads the mint of every live Pump holding. The safety check that runs before every buy hands its mint read to the swap. So a swap does not spend swap-lane sends on them: a first buy is 4 sends, inside the 5 a minute buys may use.
+- A swap's own sends always use the swap lane (`swapLane`), whatever the RPC method. A Jupiter-route sell's token-account read is not moved to the read lane by its priority.
 - A curve sell does not read the wallet's token account. Only a buy may need to create it.
 - A curve sell is now 3 sends after the first: the curve, the blockhash, the simulation. A buy is 4.
 - A live sell runs at priority -1 on the swap lane. It goes ahead of buys, does not wait for a token, and every other send on that lane stops at 5 a minute (`HELIUS_EXIT_RESERVE` = 3), so a sell's three sends are free when a stop or target fires. A sell still cannot pass 8 a minute.

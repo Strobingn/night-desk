@@ -98,9 +98,46 @@ const PROTOCOL_TTL_MS = 10 * 60_000;
 const MINT_TTL_MS = 60 * 60_000;
 const fixedAccounts = new Map<string, { at: number; value: AccountBytes }>();
 
-/** Drop the cached fixed accounts. A swap that failed to build or simulate reads them again next time. */
+/** Drop every kept account. Tests only: the desk never empties the cache on a failed swap. */
 export function forgetFixedAccounts(): void {
   fixedAccounts.clear();
+  protocolSuspect = false;
+  protocolWarmedAt = 0;
+}
+
+let protocolSuspect = false;
+let protocolWarmedAt = 0;
+/** The desk re-reads the fixed Pump accounts this often, off the swap lane, so a swap never has to. */
+export const PROTOCOL_WARM_MS = 8 * 60_000;
+/** After a failed swap they are re-read sooner, but not more than once in this long. */
+const PROTOCOL_REWARM_MIN_MS = 2 * 60_000;
+
+/** A mint account the desk already read for its safety check. The swap does not read it again. */
+export function rememberMintAccount(mint: string, value: AccountBytes, now = Date.now()): void {
+  if (mint && value?.owner && value.data?.length) fixedAccounts.set(mint, { at: now, value });
+}
+
+/** True when the fixed Pump accounts should be read again: on schedule, or after a swap failed. */
+export function protocolWarmDue(now = Date.now()): boolean {
+  const age = now - protocolWarmedAt;
+  return age >= PROTOCOL_WARM_MS || (protocolSuspect && age >= PROTOCOL_REWARM_MIN_MS);
+}
+
+/**
+ * Read the four fixed Pump accounts and keep them. The desk calls this on the read lane, in the
+ * background. A read that fails leaves the kept copy in place.
+ */
+export async function warmProtocolAccounts(base: PumpConnection, now: () => number = Date.now): Promise<number> {
+  protocolWarmedAt = now();
+  protocolSuspect = false;
+  const rows = await Promise.allSettled([...PROTOCOL_ACCOUNTS].map(async (address) => [address, await base.getAccountInfo(address)] as const));
+  let kept = 0;
+  for (const row of rows) {
+    if (row.status !== "fulfilled" || !row.value[1]) continue;
+    fixedAccounts.set(row.value[0], { at: now(), value: row.value[1] });
+    kept += 1;
+  }
+  return kept;
 }
 
 /**
@@ -110,6 +147,7 @@ export function forgetFixedAccounts(): void {
  * budget of 8 sends a minute that put about 40 seconds between reading the price and sending the
  * order, and a falling coin moves past the 6% exit cap in less. Here each address is read once per
  * swap, and the fixed ones are kept between swaps, so the price read is the last one before the send.
+ * A failed swap does not empty the cache: its retry has to be just as short.
  */
 export function swapConnection(base: PumpConnection, mint: string, now: () => number = Date.now): PumpConnection {
   const seen = new Map<string, Promise<AccountBytes | null>>();
@@ -167,7 +205,9 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
       slippageBps: Math.round(slip * 10_000)
     });
   } catch (err) {
-    forgetFixedAccounts();
+    // The usual cause is the price moving. The kept accounts stay, so the retry is still three
+    // sends. The desk re-reads the fixed ones in the background in case Pump changed its fees.
+    protocolSuspect = true;
     const message = err instanceof IntentError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : String(err);
     if (req.side === "sell" && (isNoSellRouteMessage(message) || /insufficient liquidity|no liquidity|zero liquidity/i.test(message))) {
       throw noSellRouteError();
@@ -192,7 +232,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   const unsigned = serializeUnsigned(loaded.keypair.publicKey.toBase58(), blockhash, built.instructions);
   const sim = await connection.simulateTransaction(unsigned.tx);
   if (sim.err) {
-    forgetFixedAccounts();
+    protocolSuspect = true;
     throw new Error(`LIVE_SWAP_FAILED: simulation ${sim.err}. Nothing was sent.`);
   }
   const tx = Transaction.from(Buffer.from(unsigned.base64, "base64"));

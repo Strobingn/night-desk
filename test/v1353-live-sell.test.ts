@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BUCKETS, HELIUS_EXIT_RESERVE, NetLimiter } from "../src/market/net.js";
-import { forgetFixedAccounts, swapConnection } from "../src/market/pump-live.js";
+import { BUCKETS, HELIUS_EXIT_RESERVE, NetLimiter, rpcLane } from "../src/market/net.js";
+import { PROTOCOL_WARM_MS, forgetFixedAccounts, protocolWarmDue, rememberMintAccount, swapConnection, warmProtocolAccounts } from "../src/market/pump-live.js";
 import { CURVE_FEE_CONFIG } from "../src/pump/constants.js";
 import { GLOBAL_PDA } from "../src/pump/sdk.js";
 import type { PumpConnection } from "../src/pump/rpc.js";
@@ -62,6 +62,30 @@ describe("v13.53 a swap reads each account once and keeps the fixed ones", () =>
     forgetFixedAccounts();
     await swapConnection(base, MINT, () => now).getAccountInfo(GLOBAL);
     expect(reads).toHaveLength(3);
+  });
+
+  it("a mint the safety check already read is not read again by the swap", async () => {
+    forgetFixedAccounts();
+    const { base, reads } = counting();
+    rememberMintAccount(MINT, { data: Buffer.from([9]), owner: "TokenProgram" });
+    const got = await swapConnection(base, MINT).getAccountInfo(MINT);
+    expect(got?.owner).toBe("TokenProgram");
+    expect(reads).toEqual([]);
+  });
+
+  it("the background warm reads the four fixed accounts, so a swap reads none of them", async () => {
+    forgetFixedAccounts();
+    const { base, reads } = counting();
+    expect(protocolWarmDue(1_000_000)).toBe(true);
+    expect(await warmProtocolAccounts(base, () => 1_000_000)).toBe(4);
+    expect(reads).toHaveLength(4);
+    expect(protocolWarmDue(1_000_000 + PROTOCOL_WARM_MS - 1)).toBe(false);
+    expect(protocolWarmDue(1_000_000 + PROTOCOL_WARM_MS)).toBe(true);
+    reads.length = 0;
+    const conn = swapConnection(base, MINT, () => 1_000_000);
+    await conn.getAccountInfo(GLOBAL);
+    await conn.getAccountInfo(FEES);
+    expect(reads).toEqual([]);
   });
 
   it("never keeps a missing account", async () => {
@@ -127,6 +151,23 @@ describe("v13.53 a live sell goes first on the Helius swap lane", () => {
   });
 });
 
+describe("v13.53 swap sends stay on the swap lane", () => {
+  it("routes a sell's token-account read to the swap lane, not the read lane", () => {
+    const helius = BUCKETS.find((b) => b.id === "helius")!;
+    const body = rpc(1, "getTokenAccountsByOwner");
+    expect(rpcLane(helius, -1, body)?.id).toBe("helius"); // a wallet poll
+    expect(rpcLane(helius, -1, body, false, true)?.id).toBe("helius:exec"); // a sell
+    expect(rpcLane(helius, 1, rpc(2, "getAccountInfo"), false, true)?.id).toBe("helius:exec");
+  });
+
+  it("fetchAt with swapLane sends on the swap lane", async () => {
+    const net = new NetLimiter({ fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch });
+    await net.fetchAt(-1, { swapLane: true })(HELIUS, { method: "POST", body: rpc(1, "getTokenAccountsByOwner") });
+    expect(net.stats().find((row) => row.id === "helius:exec")?.reqLastMin).toBe(1);
+    expect(net.stats().find((row) => row.id === "helius")?.reqLastMin ?? 0).toBe(0);
+  });
+});
+
 describe("v13.53 a real curve sell", () => {
   it("reads four accounts the first time and only the curve and the unset fee account after that", async () => {
     const { readFileSync } = await import("node:fs");
@@ -169,6 +210,17 @@ describe("v13.53 a real curve sell", () => {
         connection,
         broadcast: async () => ({ signature: "sig", err: null })
       });
+    let simErr: string | null = "slippage";
+    connection.simulateTransaction = async () => ({ err: simErr, units: 20, logs: [] });
+    await expect(sell()).rejects.toThrow(/simulation/);
+    expect(reads).toHaveLength(4);
+    reads.length = 0;
+    simErr = null;
+    // The retry after a failed simulation is as short as any other sell: nothing was dropped.
+    await sell();
+    expect(reads).toHaveLength(2);
+    reads.length = 0;
+    forgetFixedAccounts();
     await sell();
     const curve = bondingCurvePda(mint).toBase58();
     // Mint, curve, Global, fee config. No token-account read on a sell, and Global once, not twice.
