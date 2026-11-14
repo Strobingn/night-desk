@@ -328,6 +328,55 @@ describe("v13.52 fast sweep in the scout", () => {
   });
 });
 
+describe("v13.52 sweep follow-ups", () => {
+  it("anchors the price from a quiet look, so a later print a thousand times higher is a hard kill", async () => {
+    const mint = mintOf();
+    const book = new Map<string, DexRow>([[mint, { vol: 300, liq: 9_000, price: 0.00002 }]]);
+    const h = harness(book);
+    h.scout.ingest(create(mint), "pump");
+    await h.scout.sweepTick(Date.now() + 11_000);
+    book.set(mint, { vol: 60_000, liq: 9_000, price: 0.02 });
+    await h.scout.sweepTick(Date.now() + 26_000);
+    expect(h.sweep().promoted).toBe(0);
+    expect(h.kills.at(-1)!.codes).toContain("PRICE_UNUSABLE");
+    expect(h.otherCalls()).toBe(0);
+    h.scout.stop();
+  });
+
+  it("stamps a promoted coin with the promotion time, not the time it was first seen", async () => {
+    const mint = mintOf();
+    const seen: number[] = [];
+    const bus = new EventBus<DeskEvents>();
+    bus.on("scout.candidate", (token) => {
+      seen.push(token.discoveredAt);
+    });
+    const scout = new Scout({
+      bus,
+      feedMode: "live",
+      demo: false,
+      pumpWsUrl: "ws://unused",
+      fetchImpl: (async (input: unknown) => {
+        const url = String(input);
+        const row = { baseToken: { address: mint, symbol: "NEW", name: "New Coin" }, dexId: "pumpfun", priceUsd: "0.00002", volume: { h1: 50_000 }, liquidity: { usd: 9_000 }, pairCreatedAt: Date.now() - 60_000 };
+        if (url.startsWith(DEX)) return Response.json([row]);
+        return Response.json({ pairs: [row] });
+      }) as typeof fetch,
+      prefilter: () => thresholds,
+      killMemory: new KillMemory(),
+      onStatus: () => {}
+    });
+    const firstSeen = Date.now() - 8 * 60_000;
+    scout.ingest(create(mint, { observedAt: firstSeen }), "pump");
+    const before = Date.now();
+    await scout.sweepTick(Date.now() + 11_000);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(scout.prefilterView().sweep.promoted).toBe(1);
+    expect(seen.length).toBe(1);
+    expect(seen[0]!).toBeGreaterThanOrEqual(before);
+    scout.stop();
+  });
+});
+
 describe("v13.52 DexScreener row depth flag", () => {
   it("says depth is unknown when the priced pair prints none, whatever another pair prints", async () => {
     const { fetchDexTape } = await import("../src/market/tape-quotes.js");

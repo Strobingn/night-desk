@@ -535,6 +535,7 @@ export class Scout {
         return;
       }
       if (last) this.sweepExpire(fresh, slot, decision.reasons);
+      else this.anchorPrice(slot, fresh);
       return;
     }
     // Pass, or depth is the one number missing: DexScreener prints none for some curve pairs.
@@ -548,11 +549,20 @@ export class Scout {
       this.promote(fresh, slot);
       return;
     }
+    this.anchorPrice(slot, fresh);
     if (last) {
       this.sweepExpire(fresh, slot, [
         { code: "VOLUME_TOO_LOW", message: row ? "Still no one-hour volume on the free feeds. Not spending an RPC read." : "No trades showed up on the free feeds. Not spending an RPC read." }
       ]);
     }
+  }
+
+  /**
+   * A price that got through the gate is the anchor for the next look, so a later print
+   * off by a decimals or SOL/USD factor is caught and not promoted.
+   */
+  private anchorPrice(slot: { price: number }, raw: RawSighting): void {
+    if (!(slot.price > 0) && (raw.priceUsd ?? 0) > 0) slot.price = raw.priceUsd!;
   }
 
   private sweepExpire(raw: RawSighting, slot: { state: string }, reasons: PrefilterReason[]): void {
@@ -571,7 +581,9 @@ export class Scout {
     if ((raw.priceUsd ?? 0) > slot.price) slot.price = raw.priceUsd ?? slot.price;
     // Spends the coin's one soft recheck, so a list feed does not enrich it a second time.
     this.opts.killMemory?.commit(raw.mint);
-    this.enqueue(raw, "dexscreener");
+    // Enrich reads the coin's age fresh, and the engine adds the time since discoveredAt to it.
+    // Stamping the promotion time keeps the minutes spent parked from being counted twice.
+    this.enqueue({ ...raw, observedAt: Date.now() }, "dexscreener");
   }
 
   private enqueue(raw: RawSighting, origin?: SourceId): void {
