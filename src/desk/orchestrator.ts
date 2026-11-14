@@ -1739,6 +1739,7 @@ export class Desk {
         flow
       });
       if (rug) {
+        if (kind === "live" && this.liveExitCooling(pos.mint, now)) return;
         this.strategyExitRetryAt.set(key, now + 2_000);
         if (kind === "live") this.noteLiveExitAttempt(pos.mint, now);
         pos.closing = true;
@@ -1776,6 +1777,7 @@ export class Desk {
       this.persist();
     }
     if (verdict.action !== "exit" || !verdict.code) return;
+    if (kind === "live" && this.liveExitCooling(pos.mint, now)) return;
     // A refused exit (thin pool, unverified mark) is retried, but not on every tick.
     this.strategyExitRetryAt.set(key, now + (verdict.code === "STRATEGY_STOP" || verdict.code === "ENGINE_TRAIL" || verdict.code === "LIQUIDITY_DROP" ? 15_000 : 60_000));
     if (kind === "live") this.noteLiveExitAttempt(pos.mint, now);
@@ -4091,7 +4093,7 @@ export class Desk {
     const pos = kind === "live" ? this.liveBook?.positions.get(mint) : this.book.positions.get(mint);
     if (!pos || pos.closing) return;
     // Dead engine positions are not sold on their own. A manual Sell anyway does not come through here.
-    if (kind === "live" && (this.enginePositionDead(pos) || this.liveExitCooling(pos.mint))) return;
+    if (kind === "live" && this.enginePositionDead(pos)) return;
     // A spike that no other feed confirms is not a trail or a stop. A drop still is.
     if (this.sellUnverified(pos, mark)) return;
     // The first absurd post-fill mark is not a rug. A second agreeing print still stops.
@@ -4108,6 +4110,11 @@ export class Desk {
       if (peakRose || armChanged) this.persist();
       // The hard stop above always goes first. The engine's exits only apply to positions it opened.
       if (pos.strategy) this.strategyExit(pos, mark, kind);
+      return;
+    }
+    // The retry gap blocks another send. The peak still moves, so a trail is not measured from a stale high.
+    if (kind === "live" && this.liveExitCooling(mint)) {
+      if (peakRose || armChanged) this.persist();
       return;
     }
     if (kind === "live") this.noteLiveExitAttempt(mint);

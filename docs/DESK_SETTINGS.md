@@ -305,7 +305,7 @@ Dead engine positions are not sold on a loop. No numeric setting changed.
 
 - The live review was sending a dead engine position (no sell route, a collapsed mark, or a known zero wallet balance) to exit on every pass, because its old mark stays under the stop. That filled the Helius lanes and starved safety checks, new buys, and manual trades.
 - Those positions, the same ones `engineLiveSlots` does not count, get no automatic exit attempt. They stay on the book and in Dead / no sell route. Manual Sell anyway still sells them.
-- Any other automatic live exit waits 20 seconds (`AUTO_EXIT_RETRY_MS`) after an attempt before the next one. The rug rule and the 6% exit cap are unchanged.
+- Any other automatic live exit waits 20 seconds (`AUTO_EXIT_RETRY_MS`) after an attempt before the next one. During that wait the trail peak still updates. The rug rule and the 6% exit cap are unchanged.
 
 Not changed: live size $5, the daily cap, Helius 10/8, cooldown 0, bogus-price rejection, the $5 closed-live pause, the $10 paper-only pause, the manual-buy override, the rug exit, and the 6% exit cap.
 

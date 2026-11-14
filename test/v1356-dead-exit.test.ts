@@ -100,4 +100,28 @@ describe("v13.56 dead live positions are not exited automatically", () => {
       desk.stop();
     }
   });
+
+  it("keeps the live trail peak moving while a failed exit is waiting", async () => {
+    const desk = liveDesk();
+    liveBroker.executeLiveSwap.mockImplementation(async (req: { side: string; sizeUsd?: number; markPriceUsd?: number; qty?: number }) => {
+      if (req.side === "sell") throw new Error("LIVE_SWAP_FAILED: quote timed out");
+      return buyFill(req);
+    });
+    try {
+      const mint = "TrailPeak11111111111111111111111111111111";
+      await desk.submitCandidate(makeToken({ mint, symbol: "TRL", priceUsd: 1, liquidityUsd: 180_000, ageSeconds: 600, volume5mUsd: 40_000, discoveredAt: Date.now() }));
+      expect((await desk.manualBuy(mint, undefined, { book: "live" })).ok).toBe(true);
+      await desk.markPrice(mint, 0.989);
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(sells()).toHaveLength(1);
+      expect(desk.liveBook!.positions.has(mint)).toBe(true);
+      await desk.markPrice(mint, 1.1);
+      await desk.markPrice(mint, 1.05);
+      const pos = desk.liveBook!.positions.get(mint);
+      expect(pos?.markPeak).toBe(1.1);
+      expect(sells()).toHaveLength(1);
+    } finally {
+      desk.stop();
+    }
+  });
 });
