@@ -1,5 +1,5 @@
 /** Installed desk release. A crash card shows only when the report was recorded on this version. */
-export const APP_VERSION = "13.55";
+export const APP_VERSION = "13.56";
 
 export interface ClientCrash {
   at: number;
