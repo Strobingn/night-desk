@@ -26,6 +26,8 @@ import {
   parsePumpApiCoins
 } from "../market/listings.js";
 import { draftFromRaw, type RawTapeRow } from "../desk/raw-tape.js";
+import { fetchDexTape, type DexTapeRow } from "../market/tape-quotes.js";
+import { SWEEP_BATCH, SWEEP_BATCHES_PER_TICK, SWEEP_COOLOFF_MS, SWEEP_TICK_MS, SweepSchedule, type SweepDue } from "../market/sweep.js";
 import type { DeskEvents, FeedStatus, RawSighting } from "../types.js";
 
 /**
@@ -131,6 +133,11 @@ export interface ScoutOptions {
    */
   prefilter?: () => PrefilterThresholds;
   killMemory?: KillMemory;
+  /**
+   * v13.52 fast sweep: look parked coins up on DexScreener in batches and promote the ones whose
+   * volume clears the floor. Default on whenever the pre-filter is on. No RPC read.
+   */
+  sweep?: boolean;
   /** True when the Helius lane is already queued or at its cap. Best free-feed scores go first. */
   laneBusy?: () => boolean;
   onPrefilterKill?: (raw: RawSighting, reasons: PrefilterReason[]) => void;
@@ -140,6 +147,14 @@ export interface ScoutOptions {
    */
   onPumpFrame?: (text: string) => void;
 }
+
+/** The create frame of the Pump stream is the one sighting whose time is the coin's birth. */
+function pumpBirth(raw: RawSighting, origin: SourceId | undefined): number | undefined {
+  return origin === "pump" && raw.source === "pumpfun" && raw.devWallet ? raw.observedAt : undefined;
+}
+
+/** Kills a coin can grow out of. Everything else is a hard kill. */
+const SOFT_KILL_CODES = new Set(["VOLUME_TOO_LOW", "LIQUIDITY_TOO_THIN", "TOKEN_TOO_NEW"]);
 
 /**
  * Scout is the only publisher of `scout.candidate`.
@@ -175,6 +190,10 @@ export class Scout {
   private readonly meter = new EnrichMeter();
   private holdUntil = 0;
   private holdTimer: NodeJS.Timeout | null = null;
+  private readonly sweep = new SweepSchedule();
+  private readonly sweepFetch: typeof fetch;
+  private sweepBusy = false;
+  private sweepPausedUntil = 0;
 
   constructor(private readonly opts: ScoutOptions) {
     this.concurrency = clampInt(opts.enrichConcurrency, 8, 1, 16);
@@ -182,6 +201,8 @@ export class Scout {
     this.listFetch = opts.net ? opts.net.fetchAt(2) : opts.fetchImpl ?? fetch;
     this.enrichFetch = opts.net ? opts.net.fetchAt(1) : opts.fetchImpl;
     this.batcher = opts.net ? new DexTokenBatcher(opts.net.fetchAt(1)) : null;
+    // Priority 2: behind enrich and the Tape on the same DexScreener budget.
+    this.sweepFetch = opts.net ? opts.net.fetchAt(2) : opts.fetchImpl ?? fetch;
     this.status = {
       mode: opts.feedMode,
       demo: opts.demo,
@@ -214,6 +235,7 @@ export class Scout {
     }
     this.every(7_000, SCOUT_POLL_MS.dexPaprikaNew, () => this.pollDexPaprika(DEXPAPRIKA_NEW_URL));
     this.every(37_000, SCOUT_POLL_MS.dexPaprikaTop, () => this.pollDexPaprika(DEXPAPRIKA_TOP_URL));
+    if (this.opts.prefilter && this.opts.sweep !== false) this.every(SWEEP_TICK_MS, SWEEP_TICK_MS, () => this.sweepTick().then(() => undefined));
   }
 
   /** Pump stays on. The other polls read these flags on each tick, so a save takes effect without a restart. */
@@ -231,12 +253,14 @@ export class Scout {
     kills: Record<string, number>;
     rpcSaved: number;
     enrich: { count: number; p50Ms: number; p90Ms: number; maxMs: number };
+    sweep: ReturnType<SweepSchedule["view"]>;
   } {
     const row = this.enrichLatency.view().enrich;
     return {
       kills: { ...this.prefilterKills },
       rpcSaved: this.rpcSaved,
-      enrich: row ?? { count: 0, p50Ms: 0, p90Ms: 0, maxMs: 0 }
+      enrich: row ?? { count: 0, p50Ms: 0, p90Ms: 0, maxMs: 0 },
+      sweep: this.sweep.view()
     };
   }
 
@@ -312,6 +336,7 @@ export class Scout {
         prior.refreshes = Math.max(prior.refreshes, 1);
         if ((raw.priceUsd ?? 0) > prior.price) prior.price = raw.priceUsd ?? prior.price;
         if (hint > prior.volume) prior.volume = hint;
+        this.park(raw, pumpBirth(raw, origin));
         return;
       }
       prior.state = "queued";
@@ -336,6 +361,7 @@ export class Scout {
       if (gate === "wait") {
         slot.state = "waiting";
         slot.refreshes = 1;
+        this.park(raw, pumpBirth(raw, origin));
         return;
       }
     }
@@ -412,9 +438,12 @@ export class Scout {
     return "queue";
   }
 
-  private finishPrefilterKill(raw: RawSighting, reasons: PrefilterReason[], _hard: boolean): void {
+  private finishPrefilterKill(raw: RawSighting, reasons: PrefilterReason[], hard: boolean, fromSweep = false): void {
     const slot = this.seen.get(raw.mint);
     if (slot) slot.state = "killed";
+    // A coin killed only for being quiet or thin so far is still worth a look as it trades.
+    if (hard) this.sweep.finish(raw.mint);
+    else if (!fromSweep) this.park(raw);
     // A cooldown ban expires. Remembering it as a hard kill would hide the mint after the slider clears.
     const remembered = reasons.filter((reason) => reason.code !== "BANNED");
     if (remembered.length) {
@@ -426,7 +455,139 @@ export class Scout {
     this.opts.onPrefilterKill?.(raw, reasons);
   }
 
+  /** Hand a parked coin to the sweep. It asks DexScreener about it; nothing is read from the RPC. */
+  private park(raw: RawSighting, bornAt?: number): void {
+    if (!this.opts.prefilter || this.opts.sweep === false) return;
+    this.sweep.watch(raw, Date.now(), bornAt);
+  }
+
+  /**
+   * One sweep pass: up to SWEEP_BATCHES_PER_TICK DexScreener requests of SWEEP_BATCH coins.
+   * A coin whose fresh numbers pass the free gates goes to enrich at once. One that is still
+   * quiet stays parked for its next look. Only the last look kills it.
+   */
+  async sweepTick(now = Date.now()): Promise<number> {
+    if (this.sweepBusy || this.stopped || now < this.sweepPausedUntil) return 0;
+    const thresholds = this.opts.prefilter?.();
+    if (!thresholds) return 0;
+    const due = this.sweep.due(now, SWEEP_BATCH * SWEEP_BATCHES_PER_TICK);
+    if (!due.length) return 0;
+    this.sweepBusy = true;
+    try {
+      const chunks: SweepDue[][] = [];
+      for (let i = 0; i < due.length; i += SWEEP_BATCH) chunks.push(due.slice(i, i + SWEEP_BATCH));
+      await Promise.all(
+        chunks.map(async (chunk) => {
+          let rows: Map<string, DexTapeRow>;
+          try {
+            this.sweep.stats.calls += 1;
+            rows = await fetchDexTape(chunk.map((entry) => entry.item.raw.mint), this.sweepFetch);
+          } catch {
+            // Refused or timed out. Nothing is decided on a missing answer: the looks go back.
+            for (const entry of chunk) this.sweep.giveBack(entry.item.raw.mint);
+            this.sweepPausedUntil = Date.now() + SWEEP_COOLOFF_MS;
+            return;
+          }
+          for (const entry of chunk) this.sweepOne(entry, rows.get(entry.item.raw.mint), thresholds);
+        })
+      );
+      return due.length;
+    } finally {
+      this.sweepBusy = false;
+    }
+  }
+
+  private sweepOne(entry: SweepDue, row: DexTapeRow | undefined, thresholds: PrefilterThresholds): void {
+    const { item, last } = entry;
+    const mint = item.raw.mint;
+    const slot = this.seen.get(mint);
+    // Enriched or queued by another feed while it was parked.
+    if (!slot || slot.state === "queued" || slot.state === "done" || this.opts.killMemory?.isHard(mint)) {
+      this.sweep.finish(mint);
+      return;
+    }
+    // A Pump stream create is the coin's birth: the desk saw it happen. A listing with no
+    // creation time gets no age made up for it.
+    // The earliest time known wins: a second, newer pool does not make the coin young again.
+    const births = [row?.createdAt, item.raw.createdAt, item.bornAt].filter((at): at is number => typeof at === "number" && at > 0);
+    const born = births.length ? Math.min(...births) : undefined;
+    const fresh: RawSighting = {
+      ...item.raw,
+      ...(row?.priceUsd != null ? { priceUsd: row.priceUsd } : {}),
+      ...(row?.vol1hUsd != null ? { volume1hUsd: row.vol1hUsd } : {}),
+      // DexScreener prints no depth for some curve pairs. Unknown is not zero, and a printed zero is zero.
+      ...(row?.liquidityKnown ? { liquidityUsd: row.liquidityUsd } : {}),
+      ...(row?.marketCapUsd != null ? { marketCapUsd: row.marketCapUsd } : {}),
+      ...(born != null ? { createdAt: born } : {})
+    };
+    item.raw = fresh;
+    if (row) this.opts.onTape?.(draftFromRaw(fresh, "pending"));
+    const decision = prefilterFree(fresh, thresholds, Date.now(), slot.price);
+    if (decision.action === "kill") {
+      if (decision.hard) {
+        if (slot.state !== "killed") this.finishPrefilterKill(fresh, decision.reasons, true, true);
+        // Already counted as a soft kill. The memory still has to learn it is now a hard one,
+        // or a later list print could bring the coin back. A ban expires and is not remembered.
+        else if (decision.reasons.some((reason) => reason.code !== "BANNED" && !SOFT_KILL_CODES.has(reason.code))) {
+          this.opts.killMemory?.note(mint, true, Date.now(), fresh.volume1hUsd ?? 0);
+        }
+        this.sweep.finish(mint);
+        return;
+      }
+      if (last) this.sweepExpire(fresh, slot, decision.reasons);
+      else this.anchorPrice(slot, fresh);
+      return;
+    }
+    // Pass, or depth is the one number missing: DexScreener prints none for some curve pairs.
+    // Enrich reads it from the chain and Filter still gates on it. A missing age or market cap
+    // is not waved through; that coin waits for a look that has it.
+    const depthOnly =
+      decision.action === "wait" &&
+      decision.missing === "liquidityUsd" &&
+      prefilterFree({ ...fresh, liquidityUsd: thresholds.minLiquidityUsd }, thresholds, Date.now(), slot.price).action === "pass";
+    if (decision.action === "pass" || depthOnly) {
+      this.promote(fresh, slot);
+      return;
+    }
+    this.anchorPrice(slot, fresh);
+    if (last) {
+      this.sweepExpire(fresh, slot, [
+        { code: "VOLUME_TOO_LOW", message: row ? "Still no one-hour volume on the free feeds. Not spending an RPC read." : "No trades showed up on the free feeds. Not spending an RPC read." }
+      ]);
+    }
+  }
+
+  /**
+   * A price that got through the gate is the anchor for the next look, so a later print
+   * off by a decimals or SOL/USD factor is caught and not promoted.
+   */
+  private anchorPrice(slot: { price: number }, raw: RawSighting): void {
+    if (!(slot.price > 0) && (raw.priceUsd ?? 0) > 0) slot.price = raw.priceUsd!;
+  }
+
+  private sweepExpire(raw: RawSighting, slot: { state: string }, reasons: PrefilterReason[]): void {
+    this.sweep.stats.expired += 1;
+    this.sweep.finish(raw.mint);
+    // Already killed by a list feed for the same reason: counted then, not twice.
+    if (slot.state !== "killed") this.finishPrefilterKill(raw, reasons, false, true);
+  }
+
+  /** A parked coin's fresh numbers pass. It takes an enrich slot now, whatever backoff it was under. */
+  private promote(raw: RawSighting, slot: { state: "queued" | "waiting" | "done" | "killed"; volume: number; refreshes: number; price: number }): void {
+    this.sweep.stats.promoted += 1;
+    this.sweep.finish(raw.mint);
+    slot.state = "queued";
+    slot.volume = Math.max(slot.volume, raw.volume1hUsd ?? 0);
+    if ((raw.priceUsd ?? 0) > slot.price) slot.price = raw.priceUsd ?? slot.price;
+    // Spends the coin's one soft recheck, so a list feed does not enrich it a second time.
+    this.opts.killMemory?.commit(raw.mint);
+    // Enrich reads the coin's age fresh, and the engine adds the time since discoveredAt to it.
+    // Stamping the promotion time keeps the minutes spent parked from being counted twice.
+    this.enqueue({ ...raw, observedAt: Date.now() }, "dexscreener");
+  }
+
   private enqueue(raw: RawSighting, origin?: SourceId): void {
+    this.sweep.finish(raw.mint);
     this.status.sightings += 1;
     if (origin) this.health.sighting(origin);
     if (this.queue.length >= this.queueCap) {

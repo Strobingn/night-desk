@@ -206,6 +206,11 @@ export class KillMemory {
     return "enrich";
   }
 
+  /** A hard kill. Nothing brings this coin back to enrich. */
+  isHard(mint: string): boolean {
+    return this.hard.has(mint);
+  }
+
   /** The one soft recheck is spent only once the free gates pass and enrich is queued. */
   commit(mint: string): void {
     const row = this.soft.get(mint);

@@ -2251,13 +2251,16 @@ export class Desk {
     rpcSaved: number;
     heliusQueue: number;
     enrich: { count: number; p50Ms: number; p90Ms: number; maxMs: number };
+    /** v13.52 fast sweep: coins parked, DexScreener requests sent, coins promoted to enrich. */
+    sweep: { watching: number; watched: number; looks: number; calls: number; promoted: number; expired: number; evicted: number };
   } {
     const view = this.scout.prefilterView();
     return {
       kills: view.kills,
       rpcSaved: view.rpcSaved + this.chainRpcSaved,
       heliusQueue: this.net.heliusQueue().priority0,
-      enrich: view.enrich
+      enrich: view.enrich,
+      sweep: view.sweep
     };
   }
 

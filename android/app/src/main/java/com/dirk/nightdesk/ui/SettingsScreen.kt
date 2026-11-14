@@ -532,7 +532,8 @@ private fun AppearanceGroup() {
 internal fun prefilterLine(stats: com.dirk.nightdesk.PrefilterStats): String {
     val top = stats.kills.entries.sortedByDescending { it.value }.take(2).joinToString(" ") { "${it.key} ${it.value}" }
     val reasons = if (top.isBlank()) "idle" else top
-    return "Prefilter $reasons · RPC saved ${stats.rpcSaved} · Helius q ${stats.heliusQueue} · enrich p50 ${stats.enrichP50}ms p90 ${stats.enrichP90}ms"
+    val sweep = stats.sweep?.let { " · sweep ${it.watching} parked, ${it.looks} looks, ${it.promoted} passed" } ?: ""
+    return "Prefilter $reasons · RPC saved ${stats.rpcSaved} · Helius q ${stats.heliusQueue} · enrich p50 ${stats.enrichP50}ms p90 ${stats.enrichP90}ms$sweep"
 }
 
 internal data class HolderSliderSpec(val label: String, val max: Float, val step: Float)
