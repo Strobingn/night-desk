@@ -4,6 +4,8 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
+Android `13.54` (versionCode 1354): a dead live holding (no sell route) no longer takes one of the engine's live slots, so rugged coins cannot stop the engine from buying. The Engine tab shows open and dead positions apart.
+
 Android `13.53` (versionCode 1353): live sells. A Pump curve sell took 8 Helius sends on a lane that allows 8 a minute, so about 40 seconds passed between reading the price and sending the order and a falling coin failed the 6% exit cap. It now takes 3 sends, goes ahead of buys, and does not wait for a token.
 
 Android `13.52` (versionCode 1352): fast sweep. New coins the pre-filter parks for having no volume yet are looked up on DexScreener 30 at a time, starting 10 s after they appear, and go to enrich as soon as volume clears the existing floor. Up to 1,800 coin looks a minute, no RPC read.

@@ -120,6 +120,14 @@ class V1344LiveWhyTest {
     )!!
 
     @Test
+    fun deadHoldingsAreShownApartFromOpenOnes() {
+        val live = { JSONObject().put("blocked", JSONObject.NULL).put("since", now).put("signals", 0).put("otherSignals", 0).put("buys", 0) }
+        assertEquals("0 open now.", Strategy.liveOpenLine(view(live())))
+        // view() sets open after the caller's fields, so put dead only.
+        assertEquals("0 open now. 6 dead (no sell route), not counted against the engine's limit.", Strategy.liveOpenLine(view(live().put("dead", 6))))
+    }
+
+    @Test
     fun saysWhyLiveHasNotBought() {
         val base = { JSONObject().put("blocked", JSONObject.NULL).put("since", now - 3 * 3_600_000L).put("signals", 0).put("otherSignals", 0).put("buys", 0) }
         assertEquals("No signal has fired since 3 h ago. Live buys only happen on a signal.", Strategy.liveStatus(view(base()), now))
