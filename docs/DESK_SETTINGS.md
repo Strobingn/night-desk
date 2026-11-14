@@ -1,6 +1,6 @@
 # Night Desk settings
 
-Last updated: 2026-11-13 (13.52). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
+Last updated: 2026-11-13 (13.53). Live prefs and rules are still the 1:46 PM ET pull. No new Oracle pull.
 
 These files (`docs/DESK_SETTINGS.md` and `docs/desk-settings.json`) are the canonical, repo-readable snapshot of how the production desk is wired and what it is set to. Prefs and rules were pulled from the live Oracle host (`/api/state`, `/api/health`, `/api/wallet`, `/api/live/ready`, `/api/orders`) at 1:46 PM ET, while that host was still **13.29** (`02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`). **13.30** added the trading engine, its code settings, `/api/strategy/*`, and the phone's Oracle fallback (`https://night-desk.157-151-200-171.sslip.io`, ahead of the old trycloudflare default). **13.32** adds a manual override: an explicit paper or live buy (Home, Tape, Search, Details, Pump Watch) fills even when the engine is only watching (`SIGNAL_WATCH`), the analyst score is under the line, a soft filter killed the coin, or a hard-stop ban is still counting. A hard kill still shows Buy anyway, then fills, including live. The engine and AI stay paper-only. No new Oracle pull; prefs stay the 1:46 PM ET numbers. **13.33** keeps those limits and stops the desk from going quiet when the equity table or the Helius lane is busy. `/api/state` equity is at most 240 points, bucketed in SQL (first and last of the range, and the minimum and maximum equity in each time bucket) and cached until the next insert. `equity(ts)` stays indexed. `GET /api/orders` returns the order list without building that snapshot. `GET /api/settings` returns the settings object instead of the SPA HTML. `GET /api/wallet` returns the cached SOL/USDC balance, `balanceAgeMs`, and `balanceStale`, and refreshes in the background. A live buy still checks the wallet, waits at most 4 seconds, then uses a successful cache from the last 60 seconds or refuses. The $5 and $20 checks still run on those figures. The Helius priority-0 queue drops a stale duplicate mint and drops the oldest mark past 24 waiting. Caps stay 10 read + 8 exec. `/api/health` adds `eventLoopLag` (p50, p99, max milliseconds). The phone still polls `/api/state` every 3 seconds. A slow `/api/wallet` poll does not set the Home "Desk is slow" banner when state is answering. **13.31** brings Claude's tip `8b3fe9484c12e41efded821e223891907c3051d6` onto that release. The engine code matches the patches already in 13.30 (through `9f6bd0d`); the new commit is his desk-settings note. Those engine numbers are the code in `src/strategy/config.ts`, not a second live pull. The author of `8b3fe94` had no desk token, so `/api/strategy/*` was not re-pulled and must be pulled after deploy. Oracle does not serve the engine until this release is deployed.
 
@@ -279,7 +279,7 @@ Wallet public address (ok to publish): `3oyFtbPpWRL1DoMnMe7SojPuYbDyjhdfa1fnDwhs
 
 | | |
 |---|---|
-| Code version | **13.52** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.52, `versionCode` 1352, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
+| Code version | **13.53** (`APP_VERSION` in `src/desk/crash-card.ts`). Android `versionName` 13.53, `versionCode` 1353, `applicationId` `com.dirk.nightdesk`. Not deployed at the 1:46 PM ET pull. Prefs are still the 1:46 PM ET pull. |
 | Claude tip in this release | `8b3fe9484c12e41efded821e223891907c3051d6` on `claude/trading-engine` (docs only beyond the engine already merged as 13.30). 13.30 on main is `2bc4475`. |
 | Live Oracle at that pull | **13.29**, merge `02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, tree `1d1d654968ec787335cdcc5a6afde49447fc3462`, path `/opt/night-desk-releases/02ba1c0f0adc21460a20801854e1c9fe79fcf1fd`, release https://github.com/Strobingn/night-desk/releases/tag/v13.29, CI https://github.com/Strobingn/night-desk/actions/runs/42946132006 |
 | Env file | `/etc/night-desk/night-desk.env` — left unchanged on deploy. `STRATEGY_ENGINE` stays unset, so 13.31 boots the engine on. |
@@ -298,6 +298,24 @@ Standing release pipeline:
 ### Snapshot at pull (2026-11-11 1:43 PM ET)
 
 Not settings, but useful context: paper cash $549.86, paper equity $682.87 (marks move), live positions 0, open orders 0, live spent today $0, `operatorReady` true, `lastClientCrash` null, health ok.
+
+## 13.53 notes
+
+Live sells. No setting changed: exit slippage stays 6%, ceilings stay 10 and 8, 18 together.
+
+What was wrong. Building one Pump curve swap read six accounts (the mint, the curve, Global twice, the fee config, the wallet's token account), then asked for a blockhash and ran the simulation: 8 Helius sends. The swap lane allows 8 a minute with a burst of 2, so sends three to eight went out about 7.5 seconds apart. The price was read on the second send and the order was simulated on the eighth, about 40 seconds later. A coin that is falling, which is when a stop fires, moves more than the 6% exit cap in that time, so the simulation failed and nothing was sent. The attempt also used the lane's whole minute, so the retry 15 seconds later started behind it.
+
+What changed:
+
+- Each address is read once per swap (`swapConnection`). Global was read twice.
+- The four Pump program accounts (Global, curve fee config, AMM global config, AMM fee config) are kept 10 minutes. A coin's mint account is kept 60 minutes: its token program cannot change. A failed swap does not empty them, so its retry is just as short; it asks the desk to re-read the four program accounts in the background, at most once in 2 minutes.
+- The desk reads those four accounts itself every 8 minutes on the read lane at priority 2, and after a restart reads the mint of every live Pump holding. The safety check that runs before every buy hands its mint read to the swap. So a swap does not spend swap-lane sends on them: a first buy is 4 sends, inside the 5 a minute buys may use.
+- A swap's own sends always use the swap lane (`swapLane`), whatever the RPC method. A Jupiter-route sell's token-account read is not moved to the read lane by its priority.
+- A curve sell does not read the wallet's token account. Only a buy may need to create it.
+- A curve sell is now 3 sends after the first: the curve, the blockhash, the simulation. A buy is 4.
+- A live sell runs at priority -1 on the swap lane. It goes ahead of buys, does not wait for a token, and every other send on that lane stops at 5 a minute (`HELIUS_EXIT_RESERVE` = 3), so a sell's three sends are free when a stop or target fires. A sell still cannot pass 8 a minute.
+
+Not changed: the Jupiter route for coins that are not on Pump, the 6% exit cap, the wallet-balance check before a sell.
 
 ## 13.52 notes
 

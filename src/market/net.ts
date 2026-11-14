@@ -180,11 +180,14 @@ function execLaneId(id: string): string | null {
   return null;
 }
 
-export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown, readLane = false): BucketSpec | null {
+export function rpcLane(spec: BucketSpec | null, priority: Priority | undefined, body: unknown, readLane = false, swapLane = false): BucketSpec | null {
   if (!spec) return null;
   const pri = priority ?? 1;
   const execId = execLaneId(spec.id);
   if (!execId) return spec;
+  // A live swap's own sends stay on the swap lane whatever their method or priority, so a sell at
+  // priority -1 that reads a token account is not moved onto the read lane.
+  if (swapLane) return BY_ID.get(execId)!;
   // Priority 2, and an engine read that asked to stay here at priority -1, share the read budget.
   // A plain priority -1 getAccountInfo (manual buy) still uses the exec lane below.
   if ((pri === 2 || (readLane && pri === -1)) && typeof body === "string" && LOW_PRIORITY_READ.has(rpcMethod(body) ?? "")) return spec;
@@ -205,6 +208,12 @@ const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "g
  * of waiting behind marks or chips for one to age out. The lane ceilings do not move.
  */
 export const HELIUS_FRONT_RESERVE = 3;
+/**
+ * Helius swap lane. A curve sell is three sends once the fixed accounts are cached: the curve,
+ * a blockhash and the simulation. Buys and every other send stop at budget minus this many a
+ * minute, so those three are free the moment a stop or a target fires. The ceiling does not move.
+ */
+export const HELIUS_EXIT_RESERVE = 3;
 const LOW_PRIORITY_READ = new Set(["getAccountInfo", "getMultipleAccounts", "getSignaturesForAddress", "getTransaction", "getBlock"]);
 
 export function rpcMethod(body: string): string | null {
@@ -530,6 +539,11 @@ export class NetLimiter {
    */
   private headNeeds(b: Bucket): { tokens: number; reserve: number } {
     const priority = b.queue[0]?.priority ?? 1;
+    // v13.53 swap lane: a live sell runs at priority -1. It does not wait for a token, and every
+    // other send leaves HELIUS_EXIT_RESERVE of the minute free so a sell is never behind a buy.
+    if (b.spec.id === "helius:exec") {
+      return priority === -1 ? { tokens: Number.NEGATIVE_INFINITY, reserve: 0 } : { tokens: 1, reserve: HELIUS_EXIT_RESERVE };
+    }
     if (b.spec.id !== "helius") return { tokens: 1, reserve: 0 };
     if (priority === -1) return { tokens: Number.NEGATIVE_INFINITY, reserve: 0 };
     return { tokens: 1, reserve: HELIUS_FRONT_RESERVE };
@@ -685,12 +699,12 @@ export class NetLimiter {
    * Never throws on 429 itself: the 429 Response is returned after the bucket is paused,
    * so callers keep their own error handling. GETs retry once after the pause when asked.
    */
-  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number; ndReadLane?: boolean }): Promise<Response> => {
+  fetch = async (input: string | URL | Request, init?: RequestInit & { ndPriority?: Priority; retry429?: boolean; timeoutMs?: number; ndReadLane?: boolean; ndSwapLane?: boolean }): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const spec = this.specFor(url);
     const method = (init?.method ?? (typeof input === "object" && "method" in input ? (input as Request).method : "GET")).toUpperCase();
-    const { ndPriority: priority, retry429, timeoutMs, ndReadLane, ...rest } = init ?? {};
-    const lane = rpcLane(spec, priority, rest.body, ndReadLane === true);
+    const { ndPriority: priority, retry429, timeoutMs, ndReadLane, ndSwapLane, ...rest } = init ?? {};
+    const lane = rpcLane(spec, priority, rest.body, ndReadLane === true, ndSwapLane === true);
     if (!lane) return this.baseFetch(input, rest);
     const isGet = method === "GET" && rest.body == null;
     const rpcRead = method === "POST" && typeof rest.body === "string" && (lane.id === "solana:public" || lane.id === "helius") && rpcReadMethod(rest.body) != null;
@@ -732,8 +746,9 @@ export class NetLimiter {
   };
 
   /** A plain fetch-compatible function bound to one priority, for callers that take `typeof fetch`. */
-  fetchAt(priority: Priority): typeof fetch {
-    return ((input: string | URL | Request, init?: RequestInit) => this.fetch(input, { ...(init ?? {}), ndPriority: priority })) as typeof fetch;
+  fetchAt(priority: Priority, opts: { swapLane?: boolean } = {}): typeof fetch {
+    return ((input: string | URL | Request, init?: RequestInit) =>
+      this.fetch(input, { ...(init ?? {}), ndPriority: priority, ...(opts.swapLane ? { ndSwapLane: true } : {}) })) as typeof fetch;
   }
 
   private async send(spec: BucketSpec, url: string, init: RequestInit, priority: Priority, retry: boolean, timeoutMs: number, callerSignal?: AbortSignal): Promise<CachedResponse> {

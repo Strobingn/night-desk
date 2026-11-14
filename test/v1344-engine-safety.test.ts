@@ -205,11 +205,12 @@ describe("v13.45 engine safety priority", () => {
     const url = HELIUS;
     const body = (n: number) =>
       JSON.stringify({ jsonrpc: "2.0", id: n, method: "getAccountInfo", params: [`Mint${n}11111111111111111111111111111111111`, { encoding: "base64" }] });
-    const hang = (n: number) => net.fetch(url, { method: "POST", body: body(n), ndPriority: -1 });
+    // Priority 1: since 13.53 a priority -1 send on the swap lane (a live sell) does not queue for a token.
+    const hang = (n: number) => net.fetch(url, { method: "POST", body: body(n), ndPriority: 1 });
     const first = hang(1);
     const second = hang(2);
     const ac = new AbortController();
-    const queued = net.fetch(url, { method: "POST", body: body(3), ndPriority: -1, signal: ac.signal });
+    const queued = net.fetch(url, { method: "POST", body: body(3), ndPriority: 1, signal: ac.signal });
     expect(net.stats().find((row) => row.id === "helius:exec")?.queued).toBe(1);
     ac.abort();
     await expect(queued).rejects.toMatchObject({ name: "AbortError" });
