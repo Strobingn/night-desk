@@ -40,6 +40,11 @@ export interface LiveSwapRequest {
    * The saved maxExitSlippage is not changed. No route is still a refusal.
    */
   sellAnyway?: boolean;
+  /**
+   * The desk's mark is older than the watch window. The gap from that print is price movement,
+   * not this quote's slippage, so the exit cap is applied to the quote's own impact only.
+   */
+  markStale?: boolean;
 }
 
 /** Quote tolerance for one sell. Sell anyway widens this send only, up to 50%. */
@@ -51,6 +56,16 @@ export function sellQuoteTolerance(exitCap: number, sellAnyway: boolean): number
 /** True when this sell's quoted haircut is over the saved exit cap and the operator did not confirm it. */
 export function sellImpactRefused(worst: number, exitCap: number, sellAnyway: boolean): boolean {
   return worst > exitCap + 1e-9 && !sellAnyway;
+}
+
+/**
+ * Haircut the exit cap sees. A stale mark is left out: the coin moving since that print is not
+ * the quote's slippage. Jupiter's own price impact still counts. No figure at all means no refusal.
+ */
+export function exitQuoteHaircut(vsMark: number | null, impact: number | null, markStale: boolean): number | null {
+  const move = markStale ? null : vsMark;
+  if (move == null && impact == null) return null;
+  return Math.max(move ?? 0, impact ?? 0);
 }
 
 /**
@@ -215,8 +230,8 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     const vsMark = midValue > 0 && Number.isFinite(outUsd) ? 1 - outUsd / midValue : null;
     const impactRaw = Number(quote.priceImpactPct);
     const impact = Number.isFinite(impactRaw) ? (impactRaw > 1 ? impactRaw / 100 : impactRaw) : null;
-    const worst = Math.max(vsMark ?? 0, impact ?? 0);
-    if ((vsMark != null || impact != null) && sellImpactRefused(worst, exitCap, req.sellAnyway === true)) throw sellExitImpactError(worst, exitCap);
+    const worst = exitQuoteHaircut(vsMark, impact, req.markStale === true);
+    if (worst != null && sellImpactRefused(worst, exitCap, req.sellAnyway === true)) throw sellExitImpactError(worst, exitCap);
   }
 
   let swapRes: Response;
@@ -270,7 +285,6 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   }
   if (confirmed?.value?.err) throw rejectedSend(signature, req.side);
 
-  const inAmount = Number(quote.inAmount ?? amount);
   const outAmount = Number(quote.outAmount);
   let qty: number;
   let notionalUsd: number;
@@ -292,6 +306,14 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     qty,
     notionalUsd,
     feeUsd,
-    slippage: Math.abs(inAmount - amount) / amount || 0.01
+    slippage: realizedFillSlippage(req.side, req.markStale === true ? undefined : req.markPriceUsd, fillPriceUsd)
   };
+}
+
+/** Fill versus the mark the order was priced at. A quote whose in-amount matches the request is not 1%. */
+export function realizedFillSlippage(side: "buy" | "sell", markPriceUsd: number | undefined, fillPriceUsd: number): number {
+  const mark = markPriceUsd ?? 0;
+  if (!(mark > 0) || !(fillPriceUsd > 0) || !Number.isFinite(mark) || !Number.isFinite(fillPriceUsd)) return 0;
+  const raw = side === "buy" ? (fillPriceUsd - mark) / mark : (mark - fillPriceUsd) / mark;
+  return raw > 0 && Number.isFinite(raw) ? raw : 0;
 }

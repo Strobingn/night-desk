@@ -278,7 +278,7 @@ export class StrategyEngine {
         this.fail(`open ${book.variant.id}`, err);
       }
     }
-    const entry = { liquidityUsd, vol5mUsd: quote.vol5mUsd };
+    const entry = { liquidityUsd, vol5mUsd: quote.vol5mUsd, devHoldingPct: coin.token.devHoldingPct, top10HolderPct: coin.token.top10HolderPct };
     const live = this.settings.liveVariant ? variantById(this.settings.liveVariant) : undefined;
     return {
       signal,
@@ -336,15 +336,16 @@ export class StrategyEngine {
   }
 
   /** Exit rules for a main-book position opened on this signal. */
-  metaFor(signal: SignalKind, entry?: { liquidityUsd?: number | null; vol5mUsd?: number | null }): StrategyMeta {
+  metaFor(signal: SignalKind, entry?: { liquidityUsd?: number | null; vol5mUsd?: number | null; devHoldingPct?: number | null; top10HolderPct?: number | null }): StrategyMeta {
     const variant = variantById(this.settings.active[signal]) ?? variantById(DEFAULT_ACTIVE[signal])!;
     return this.metaOf(variant.id, entry);
   }
 
   /** Exit rules for one variant, with the volume and depth at the buy for its fade exits. */
-  metaOf(id: string, entry?: { liquidityUsd?: number | null; vol5mUsd?: number | null }): StrategyMeta {
+  metaOf(id: string, entry?: { liquidityUsd?: number | null; vol5mUsd?: number | null; devHoldingPct?: number | null; top10HolderPct?: number | null }): StrategyMeta {
     const variant = variantById(id)!;
     const ok = (n: number | null | undefined): n is number => n != null && n > 0 && Number.isFinite(n);
+    const share = (n: number | null | undefined): n is number => n != null && n >= 0 && n <= 1 && Number.isFinite(n);
     return {
       variant: variant.id,
       signal: variant.signal,
@@ -354,7 +355,9 @@ export class StrategyEngine {
       ...(variant.trailPct ? { trailPct: variant.trailPct } : {}),
       ...(variant.fade ? { fade: true } : {}),
       ...(ok(entry?.liquidityUsd) ? { entryLiquidityUsd: entry!.liquidityUsd! } : {}),
-      ...(ok(entry?.vol5mUsd) ? { entryVol5mUsd: entry!.vol5mUsd! } : {})
+      ...(ok(entry?.vol5mUsd) ? { entryVol5mUsd: entry!.vol5mUsd! } : {}),
+      ...(share(entry?.devHoldingPct) ? { entryDevHoldingPct: entry!.devHoldingPct! } : {}),
+      ...(share(entry?.top10HolderPct) ? { entryTop10Pct: entry!.top10HolderPct! } : {})
     };
   }
 

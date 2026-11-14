@@ -80,6 +80,8 @@ export function exitLabel(code: string): string {
       return "fade exit";
     case "LIQUIDITY_DROP":
       return "pool draining";
+    case "RUG_EXIT":
+      return "rug exit";
     default:
       return code.toLowerCase().replace(/_/g, " ");
   }

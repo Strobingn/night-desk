@@ -4,6 +4,8 @@ Overnight Solana memecoin desk. Six agents, hard handoffs, paper ledger by defau
 
 `npm install && npm run paper` boots the pipeline and the live terminal. The desk listens on `PORT` from `.env` (default 4721). Austin's machine uses `PORT=4788`.
 
+Android `13.55` (versionCode 1355): a zero wallet balance does not take an engine live slot. In the first 3 minutes a 35% pool drop sells as a rug exit and may use 50% slippage. The 25% pool-drain sell, the 1% launch stop, and a hard stop stay at 6%, including in those 3 minutes. A holder dump sells only when a chain read the desk already made, after the fill, shows it. A live fill records its real slippage against the mark.
+
 Android `13.54` (versionCode 1354): a dead live holding (no sell route) no longer takes one of the engine's live slots, so rugged coins cannot stop the engine from buying. The Engine tab shows open and dead positions apart.
 
 Android `13.53` (versionCode 1353): live sells. A Pump curve sell took 8 Helius sends on a lane that allows 8 a minute, so about 40 seconds passed between reading the price and sending the order and a falling coin failed the 6% exit cap. It now takes 3 sends, goes ahead of buys, and does not wait for a token.

@@ -56,11 +56,22 @@ export interface PositionPricerOptions {
   fetchImpl?: FetchLike;
   chain?: ChainMarkReader;
   /** v13.8 websocket account stream on held pools (the poll stays as fallback). */
-  stream?: { setKeys(keys: Iterable<string>): void; connected(): boolean };
+  stream?: { setKeys(keys: Iterable<string>): void; connected(): boolean; stats?: () => { lastUpdateAt: number | null; updates: number } };
 }
 
 /** v13.8 a websocket copy this fresh replaces the poll's RPC read for that pool. */
 export const STREAM_FRESH_MS = 3_000;
+
+/** A connected socket with no recent account update does not replace the poll. */
+export function streamSkipFreshMs(
+  stream: { connected(): boolean; stats?: () => { lastUpdateAt: number | null; updates: number } } | undefined,
+  now: number
+): number {
+  if (!stream?.connected()) return 0;
+  const stats = stream.stats?.();
+  if (!stats || stats.updates <= 0 || stats.lastUpdateAt == null || now - stats.lastUpdateAt > STREAM_FRESH_MS) return 0;
+  return STREAM_FRESH_MS;
+}
 /** v13.8 at most one streamed mark per mint this often (pump coins can change many times a second). */
 export const STREAM_EMIT_MS = 150;
 
@@ -208,7 +219,7 @@ export class PositionPricer {
     this.heldNow = new Set(held);
     const chainDue = chain && wanted.length > 0 && chain.gate.due(now, force) && !this.chainBusy;
     if (chainDue) chain!.gate.started(now);
-    const skipFresh = this.opts.stream?.connected() ? STREAM_FRESH_MS : 0;
+    const skipFresh = streamSkipFreshMs(this.opts.stream, now);
 
     // Quotes and the pool read start together. The read is applied when it returns.
     // A public Solana read can wait in the 9/min queue while Dex itself is healthy

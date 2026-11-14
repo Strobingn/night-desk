@@ -68,6 +68,8 @@ export type ReasonCode =
   | "PROFIT_LOCK"
   | "FADE_EXIT"
   | "LIQUIDITY_DROP"
+  /** Engine live rug exit in the first minutes: pool, holders, or the stop, with the wider slippage ceiling. */
+  | "RUG_EXIT"
   /** Engine live buy skipped because the engine, the wallet, the checklist, or the live-loss pause blocked it. */
   | "ENGINE_LIVE_PAUSED"
   /** Engine live buy skipped for a reason other than a pause: safety, a flagged bundle, already held, or the open limit. */
@@ -241,6 +243,8 @@ export interface ExitOrder {
   score: number;
   /** Manual sell only. Sends this close even when the exit haircut is over the saved cap. */
   sellAnyway?: boolean;
+  /** Engine live rug exit. Uses RUG_EXIT_SLIPPAGE. Does not change the saved 6% cap. */
+  rugExit?: boolean;
 }
 
 export interface Position {

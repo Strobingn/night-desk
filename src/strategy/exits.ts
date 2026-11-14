@@ -21,6 +21,9 @@ export interface StrategyMeta {
   /** 5-minute volume and pool depth at the buy, for the fade exits. */
   entryVol5mUsd?: number;
   entryLiquidityUsd?: number;
+  /** Holder shares at the buy, so a later dump can sell before the pool is gone. */
+  entryDevHoldingPct?: number;
+  entryTop10Pct?: number;
 }
 
 export type StrategyExitCode =
