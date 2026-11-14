@@ -310,13 +310,13 @@ Gap 1: it bought pools the desk had never measured.
   - a pool depth reading from the last 60 seconds. The figure from when the coin passed Filter can be minutes old and does not count;
   - depth of at least $5,000 (`ENGINE_LIVE_MIN_POOL_USD`), or the saved minimum liquidity when that is higher;
   - depth not down 25% or more from the Filter figure.
-- A refusal is logged as `ENGINE_LIVE_NO_POOL` and shown on the Engine tab as the last live attempt. It is checked before any Helius read.
+- A refusal is logged as `ENGINE_LIVE_NO_POOL` and shown on the Engine tab as the last live attempt. It is checked before any Helius read, and again after the token-safety and launch-bundle waits, before the buy is sent.
 - If the price feed never carries depth for a coin, that coin is not bought with real money.
 
 Gap 2: the $5 live pause could not see a dead coin.
 
 - The pause counted closed live trades. A coin with no pool left never closes, so its loss was never counted, and after 13.54 and 13.55 freed dead coins' slots nothing stopped the next buy.
-- The cost of every engine live holding bought since the UTC day began that is dead (no sell route, a collapsed mark, or a zero wallet balance) now counts toward the pause. At $5 a trade, one dead coin pauses live engine buys until the next UTC day.
+- The cost of an engine live holding that dies today (no sell route, a collapsed mark, or a zero wallet balance) counts toward the pause, including a coin bought before UTC midnight that dies after it. A coin already dead before today does not, so the pause still resumes the next UTC day. At $5 a trade, one dead coin pauses live engine buys until the next UTC day.
 - Dead holdings still do not take a slot, still stay on the book, and still get no automatic sell attempts.
 
 ## 13.56 notes
@@ -492,7 +492,7 @@ Shadow books: 18 (was 6). The six fixed-target books keep their ids and rules. T
 
 Live variant: `POST /api/strategy/settings` takes `liveVariant` (a variant id, or `null`). Default `null`. Saved with the other engine settings.
 
-- When a signal fires for the live variant's own signal kind, the desk sends a live buy as well as the paper buy. It needs the engine on, the wallet armed, `operatorReady`, the token-safety and launch-bundle checks, fewer than `maxOpen` live engine positions, and the live day not past the $5 loss pause (`STRATEGY.live.dailyMaxLossUsd`, closed live trades, UTC day). Then the normal live path: `liveTradeUsd`, `liveDailyCapUsd`, wallet balance, entry slippage. A refusal logs `ENGINE_LIVE_PAUSED` or the live path's own code.
+- When a signal fires for the live variant's own signal kind, the desk sends a live buy as well as the paper buy. It needs the engine on, the wallet armed, `operatorReady`, the token-safety and launch-bundle checks, fewer than `maxOpen` live engine positions, and the live day not past the $5 loss pause (`STRATEGY.live.dailyMaxLossUsd`, closed live trades plus engine holdings that died today, UTC day). Then the normal live path: `liveTradeUsd`, `liveDailyCapUsd`, wallet balance, entry slippage. A refusal logs `ENGINE_LIVE_PAUSED` or the live path's own code.
 - The live take-profit is the paper target scaled to the live size: `targetNetUsd * liveTradeUsd / tradeUsd` ($0.30 at $3 / $50 / $5).
 - A live engine position carries the variant's rules and is sold by the same engine exits, as a live sell. The hard stop still goes first.
 - Turning the live variant off stops new live buys. Open live positions keep their exits.

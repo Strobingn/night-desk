@@ -411,6 +411,13 @@ export class Desk {
   private autoExitRetryAt = new Map<string, number>();
   /** Live engine buys in flight. They count against the engine's open limit before they fill. */
   private engineLivePending = new Set<string>();
+  /**
+   * When a live engine holding was first seen dead in this process.
+   * The $5 pause attributes that loss to this time, the way a close is attributed to its close time.
+   */
+  private engineDeadAt = new Map<string, number>();
+  /** Live engine mints seen still tradable in this process. A later death is stamped now, not at the open. */
+  private engineSeenAlive = new Set<string>();
   /** v13.44 what the live engine has done since the desk started, so the phone can say why it is not buying. */
   private liveEngine = {
     signals: 0,
@@ -1377,24 +1384,27 @@ export class Desk {
     if (!this.operatorReady) return "The live checklist (operatorReady) is not marked.";
     const net = this.liveNetTodayUsd();
     // v13.57 a coin with no pool left never closes, so its loss never reached the line above and
-    // the pause could not fire. Money in a dead holding bought today is lost: it counts here.
+    // the pause could not fire. The loss counts on the UTC day the holding dies, same as a close.
+    // A buy from before midnight that dies after it still counts. A coin already dead yesterday does not.
     const dead = this.engineDeadToday();
     const total = net - dead.costUsd;
     if (total <= -STRATEGY.live.dailyMaxLossUsd + 1e-9) {
-      const detail = dead.count > 0 ? `, counting ${money(dead.costUsd)} in ${dead.count} ${dead.count === 1 ? "coin" : "coins"} bought today that ${dead.count === 1 ? "has" : "have"} no pool left to sell into` : "";
+      const detail = dead.count > 0 ? `, counting ${money(dead.costUsd)} in ${dead.count} ${dead.count === 1 ? "coin" : "coins"} that died today and ${dead.count === 1 ? "has" : "have"} no pool left to sell into` : "";
       return `Live is ${money(total)} on the day${detail}. That is past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
     }
     return null;
   }
 
-  /** Engine live holdings bought since the UTC day began that are dead: no route, a collapsed mark, or a zero balance. */
-  private engineDeadToday(): { count: number; costUsd: number } {
-    const start = new Date();
+  /** Engine live holdings that died on this UTC day: no route, a collapsed mark, or a zero balance. */
+  private engineDeadToday(now = Date.now()): { count: number; costUsd: number } {
+    const start = new Date(now);
     start.setUTCHours(0, 0, 0, 0);
     let count = 0;
     let costUsd = 0;
     for (const pos of this.liveBook?.positions.values() ?? []) {
-      if (!pos.strategy || pos.openedAt < start.getTime() || !this.enginePositionDead(pos)) continue;
+      if (!pos.strategy || !this.enginePositionDead(pos, now)) continue;
+      const deadAt = this.engineDeadAt.get(pos.mint) ?? pos.openedAt;
+      if (deadAt < start.getTime()) continue;
       count += 1;
       costUsd += Math.max(0, pos.costUsd);
     }
@@ -1632,6 +1642,9 @@ export class Desk {
       }
       const again = this.liveEngineBlock();
       if (again) return skip(again, "ENGINE_LIVE_PAUSED");
+      // The pool can drain or go stale during the safety and bundle waits. Depth is local; read it again.
+      const depthNow = this.engineLiveDepth(fired);
+      if (!depthNow.ok) return skip(depthNow.message, "ENGINE_LIVE_NO_POOL");
       await this.withLiveBuyLock(async () => {
         // Entry slippage and the crash guard run inside the buy, against this signal's mark.
         const result = await this.executeBuy(token, score, this.liveTradeUsd, "analyst", false, {
@@ -3887,7 +3900,11 @@ export class Desk {
     book.positions.set(token.mint, position);
     this.noRoute.delete(bookKey(kind, token.mint));
     this.collapseStreak.delete(bookKey(kind, token.mint));
-    if (kind === "live") this.liveTokenAtoms.delete(token.mint);
+    if (kind === "live") {
+      this.liveTokenAtoms.delete(token.mint);
+      this.engineDeadAt.delete(token.mint);
+      this.engineSeenAlive.delete(token.mint);
+    }
     this.markLiquidity.delete(token.mint);
     this.markLiquidityAt.delete(token.mint);
     this.heldHolders.delete(token.mint);
@@ -4049,6 +4066,10 @@ export class Desk {
     this.clearLiquidityGone(order.book === "live" ? "live" : "paper", pos.mint);
     this.noRoute.delete(bookKey(order.book === "live" ? "live" : "paper", pos.mint));
     this.collapseStreak.delete(bookKey(order.book === "live" ? "live" : "paper", pos.mint));
+    if (order.book === "live") {
+      this.engineDeadAt.delete(pos.mint);
+      this.engineSeenAlive.delete(pos.mint);
+    }
     const rawProceeds = proceeds ?? roundUsd(fill.notionalUsd - fill.feeUsd);
     const proceedsUsd = typeof rawProceeds === "number" && Number.isFinite(rawProceeds) && rawProceeds > 0 ? roundUsd(rawProceeds) : 0;
     if (fill.mode === "paper" && this.paperProceedsUnverified(pos, proceedsUsd, fill.priceUsd, pos.costUsd)) {
@@ -4205,10 +4226,21 @@ export class Desk {
    * Same dead set as engineLiveSlots: no sell route, a collapsed mark, or a known zero token balance.
    * These stay on the book. Automatic exits do not try them.
    */
-  private enginePositionDead(pos: Position): boolean {
+  private enginePositionDead(pos: Position, now = Date.now()): boolean {
     if (!pos.strategy) return false;
     const key = bookKey("live", pos.mint);
-    return this.liquidityGone.has(key) || this.deadHolding(pos, "live") || this.liveTokenAtoms.get(pos.mint) === 0;
+    const dead = this.liquidityGone.has(key) || this.deadHolding(pos, "live") || this.liveTokenAtoms.get(pos.mint) === 0;
+    if (!dead) {
+      this.engineSeenAlive.add(pos.mint);
+      this.engineDeadAt.delete(pos.mint);
+      return false;
+    }
+    if (!this.engineDeadAt.has(pos.mint)) {
+      // Seen alive earlier: the loss is now, including after UTC midnight.
+      // Already dead on the first look: keep the open time so yesterday's coin does not pause today.
+      this.engineDeadAt.set(pos.mint, this.engineSeenAlive.has(pos.mint) ? now : pos.openedAt);
+    }
+    return true;
   }
 
   /** True while this live position is inside the automatic-exit gap. */

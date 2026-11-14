@@ -212,11 +212,69 @@ describe("engine live variant", () => {
       // Rugged: no sell route. The $5 is gone but the trade never closes.
       (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
       const blocked = desk.strategyView().live?.blocked ?? "";
-      expect(blocked).toContain("1 coin bought today that has no pool left");
+      expect(blocked).toContain("1 coin that died today and has no pool left");
       expect(blocked).toContain("live pause");
       await signal(desk, young({ mint: "EngineLive555555555555555555555555555555555", symbol: "EL5" }));
       expect(buys()).toHaveLength(1);
       expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("a coin bought before UTC midnight that dies after it still trips the $5 pause", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await signal(desk);
+      const pos = desk.liveBook!.positions.get(MINT)!;
+      pos.openedAt = Date.now() - 24 * 60 * 60 * 1000;
+      // Still tradable after the open day, so the later death belongs to today.
+      expect(desk.strategyView().live?.blocked).toBeNull();
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      expect(desk.strategyView().live?.blocked ?? "").toContain("1 coin that died today and has no pool left");
+      await signal(desk, young({ mint: "EngineLive666666666666666666666666666666666", symbol: "EL6" }));
+      expect(buys()).toHaveLength(1);
+      expect(codes(desk)).toContain("ENGINE_LIVE_PAUSED");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("a coin already dead before today does not keep the pause on", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await signal(desk);
+      const pos = desk.liveBook!.positions.get(MINT)!;
+      pos.openedAt = Date.now() - 24 * 60 * 60 * 1000;
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      // The pass may already have seen it alive. This is a process that first found it dead.
+      const raw = desk as unknown as { engineDeadAt: Map<string, number>; engineSeenAlive: Set<string> };
+      raw.engineSeenAlive.delete(MINT);
+      raw.engineDeadAt.delete(MINT);
+      expect(desk.strategyView().live?.blocked).toBeNull();
+      await signal(desk, young({ mint: "EngineLive777777777777777777777777777777777", symbol: "EL7" }));
+      expect(buys()).toHaveLength(2);
+      expect(codes(desk)).not.toContain("ENGINE_LIVE_PAUSED");
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("does not spend after the safety wait if the pool has drained", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      (desk as unknown as { tokenSafety: (mint: string, priority: number, readLane?: boolean) => Promise<{ status: string; chip: string; supply: null }> }).tokenSafety = async (mint: string) => {
+        // The live buy already accepted the deep reading. The pool drains during this wait.
+        desk.strategy.onQuote(mint, { at: Date.now(), priceUsd: 1.02, vol5mUsd: 40_000, vol1hUsd: 180_000, change1hPct: 15, liquidityUsd: 1_000 }, Date.now());
+        return { status: "safe", chip: "Safe", supply: null };
+      };
+      await signal(desk);
+      expect(buys()).toHaveLength(0);
+      expect(desk.strategyView().live?.lastSkip).toMatchObject({ symbol: "ELV", code: "ENGINE_LIVE_NO_POOL" });
+      expect(desk.strategyView().live?.lastSkip?.message).toContain("under the $5,000");
     } finally {
       desk.stop();
     }

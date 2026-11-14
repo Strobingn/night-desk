@@ -77,7 +77,7 @@ describe("v13.54 dead live positions do not fill the cap", () => {
       expect(desk.liveBook!.positions.has(d)).toBe(false);
       expect(desk.liveBook!.positions.has(a)).toBe(true);
       expect(desk.strategyView().live?.open).toBe(0);
-      expect(desk.strategyView().live?.blocked).toMatch(/2 coins bought today that have no pool left/);
+      expect(desk.strategyView().live?.blocked).toMatch(/2 coins that died today and have no pool left/);
     } finally {
       desk.stop();
     }
