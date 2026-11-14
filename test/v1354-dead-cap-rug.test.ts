@@ -33,8 +33,8 @@ const quote = (at: number, priceUsd: number, liquidityUsd = 180_000) => ({
   liquidityUsd
 });
 
-async function fill(desk: Desk, mint: string, symbol: string): Promise<void> {
-  const token = makeToken({ mint, symbol, priceUsd: 1, ageSeconds: 600, volume5mUsd: 40_000, liquidityUsd: 180_000, discoveredAt: Date.now() });
+async function fill(desk: Desk, mint: string, symbol: string, over: Parameters<typeof makeToken>[0] = {}): Promise<void> {
+  const token = makeToken({ mint, symbol, priceUsd: 1, ageSeconds: 600, volume5mUsd: 40_000, liquidityUsd: 180_000, discoveredAt: Date.now(), ...over });
   await desk.submitCandidate(token);
   const t = Date.now();
   await desk.submitStrategyQuote(mint, quote(t + 10_000, 1.01), t + 10_000);
@@ -147,6 +147,65 @@ describe("v13.54 rug exit", () => {
       expect(sells[0]?.[0].maxExitSlippage).toBeCloseTo(0.06, 5);
       expect(desk.snapshot().events.some((event) => event.code === "STRATEGY_STOP")).toBe(true);
       expect(desk.snapshot().events.some((event) => event.code === "RUG_EXIT")).toBe(false);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("does not treat the previous hold's pool depth as a drain on the next fill", async () => {
+    const desk = liveDesk();
+    try {
+      const mint = "Reopen1111111111111111111111111111111111";
+      await fill(desk, mint, "AGAIN");
+      const first = desk.liveBook!.positions.get(mint)!;
+      const feed = first.priceFeed ?? "test";
+      const price = desk.liveBook!.price(mint, first.entryPrice);
+      desk.bus.emit("market.tick", { mint, priceUsd: price * 0.98, liquidityUsd: 50_000, at: Date.now(), feed } as never);
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(desk.liveBook!.positions.has(mint)).toBe(false);
+      const sells = () => liveBroker.executeLiveSwap.mock.calls.filter((call) => call[0].side === "sell").length;
+      const closed = sells();
+      (desk as unknown as { strategy: { signalled: Map<string, number> } }).strategy.signalled.delete(mint);
+      await fill(desk, mint, "AGAIN");
+      expect(desk.liveBook!.positions.has(mint)).toBe(true);
+      desk.strategyPass();
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(sells()).toBe(closed);
+      const again = desk.liveBook!.positions.get(mint)!;
+      desk.bus.emit("market.tick", { mint, priceUsd: desk.liveBook!.price(mint, again.entryPrice), liquidityUsd: 50_000, at: Date.now(), feed: again.priceFeed ?? feed } as never);
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(sells()).toBe(closed + 1);
+      expect(desk.snapshot().events.some((event) => event.code === "RUG_EXIT")).toBe(true);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  it("sells when a holder read after the fill shows a dev dump", async () => {
+    const desk = liveDesk();
+    try {
+      const mint = "DevDump111111111111111111111111111111111";
+      await fill(desk, mint, "DUMP", { devHoldingPct: 0.3, top10HolderPct: 0.2 });
+      const pos = desk.liveBook!.positions.get(mint)!;
+      expect(pos.strategy?.entryDevHoldingPct).toBe(0.3);
+      desk.strategyPass();
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(desk.liveBook!.positions.has(mint)).toBe(true);
+      desk.bus.emit(
+        "scout.candidate",
+        makeToken({
+          mint,
+          symbol: "DUMP",
+          priceUsd: desk.liveBook!.price(mint, pos.entryPrice),
+          liquidityUsd: 180_000,
+          devHoldingPct: 0.05,
+          top10HolderPct: 0.2,
+          discoveredAt: Date.now()
+        })
+      );
+      await (desk as unknown as { drain: () => Promise<void> }).drain();
+      expect(desk.liveBook!.positions.has(mint)).toBe(false);
+      expect(desk.snapshot().events.some((event) => event.code === "RUG_EXIT")).toBe(true);
     } finally {
       desk.stop();
     }

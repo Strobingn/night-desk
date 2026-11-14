@@ -474,6 +474,10 @@ export class Desk {
   private noRoute = new Set<string>();
   /** Last token-account raw amount seen for a live mint. 0 means the wallet holds none. Not a ledger write. */
   private liveTokenAtoms = new Map<string, number>();
+  /** When markLiquidity was last written. A value from before this fill is not a drain. */
+  private markLiquidityAt = new Map<string, number>();
+  /** Holder shares observed while the mint was already held, with the time of that read. */
+  private heldHolders = new Map<string, { at: number; devHoldingPct?: number | null; top10HolderPct?: number | null }>();
   /** Display-only count of collapsed marks. The chart series drops identical prints inside 2s. */
   private collapseStreak = new Map<string, CollapseStreak>();
   private routeProbeTimer: NodeJS.Timeout | null = null;
@@ -1051,6 +1055,7 @@ export class Desk {
     this.cooldowns.clear();
     this.shocks.clear();
     this.markLiquidity.clear();
+    this.markLiquidityAt.clear();
     this.startedAt = Date.now();
     this.resetAt = this.startedAt;
     this.store.writeJson("resetAt", this.resetAt);
@@ -1517,7 +1522,7 @@ export class Desk {
       if (at == null || mark == null) continue;
       const fresh = now - at <= STRATEGY.watch.markFreshMs;
       const throughStop = mark <= strategyStopPrice(pos.entryPrice, pos.entryMark, pos.strategy.stopPct);
-      const liq = this.markLiquidity.get(pos.mint);
+      const liq = this.liquidityAfterOpen(pos);
       const entryLiq = pos.strategy.entryLiquidityUsd;
       const poolLeaving = now - pos.openedAt <= RUG_WATCH_MS && entryLiq != null && entryLiq > 0 && liq != null && liq <= entryLiq * (1 - RUG_LIQUIDITY_DROP);
       // A stale mark still stops a live engine position. A quiet price stream must not hold the 1% stop.
@@ -1710,18 +1715,19 @@ export class Desk {
     if (retryAt != null && now < retryAt) return;
     const book = this.bk(kind);
     const markAt = book.markedAt(pos.mint) ?? 0;
-    const liquidityUsd = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
+    const liquidityUsd = this.liquidityAfterOpen(pos) ?? pos.liquidityUsd;
     if (kind === "live") {
-      const seen = this.sightings.get(pos.mint);
+      const holders = this.heldHolders.get(pos.mint);
+      const freshHolders = holders != null && holders.at > pos.openedAt ? holders : null;
       const rug = assessRugExit({
         now,
         openedAt: pos.openedAt,
         entryLiquidityUsd: meta.entryLiquidityUsd,
-        liquidityUsd,
+        liquidityUsd: this.liquidityAfterOpen(pos),
         entryDevHoldingPct: meta.entryDevHoldingPct,
-        devHoldingPct: seen?.devHoldingPct,
+        devHoldingPct: freshHolders?.devHoldingPct,
         entryTop10Pct: meta.entryTop10Pct,
-        top10Pct: seen?.top10HolderPct,
+        top10Pct: freshHolders?.top10HolderPct,
         flow: this.strategy.flowFor(pos.mint)
       });
       if (rug) {
@@ -1775,6 +1781,31 @@ export class Desk {
       reason: { code: verdict.code, message: verdict.message },
       ...(kind === "live" ? { book: "live" as const, ...(rugSlippageApplies(pos, verdict.code, now) ? { rugExit: true } : {}) } : {})
     });
+  }
+
+  /** Pool depth written after this fill. A leftover from the previous hold is not a drain. */
+  private liquidityAfterOpen(pos: Position): number | null {
+    const at = this.markLiquidityAt.get(pos.mint);
+    if (at == null || at < pos.openedAt) return null;
+    const usd = this.markLiquidity.get(pos.mint);
+    return usd != null && Number.isFinite(usd) ? usd : null;
+  }
+
+  /**
+   * A holder read that landed while this mint was already open.
+   * The scout sighting from before the fill is the entry snapshot, not a later dump.
+   * Written only from a chain read the desk already made. No extra Helius poll.
+   */
+  private noteHeldHolders(token: CandidateToken, at: number, fresh?: ReadonlySet<ChainFactField>): void {
+    const held = this.book.positions.has(token.mint) || this.liveBook?.positions.has(token.mint) === true;
+    if (!held) return;
+    const take = (field: ChainFactField) => !fresh || fresh.has(field);
+    if (!take("devHoldingPct") && !take("top10HolderPct")) return;
+    const prev = this.heldHolders.get(token.mint);
+    const dev = take("devHoldingPct") && typeof token.devHoldingPct === "number" && Number.isFinite(token.devHoldingPct) ? token.devHoldingPct : prev?.devHoldingPct;
+    const top = take("top10HolderPct") && typeof token.top10HolderPct === "number" && Number.isFinite(token.top10HolderPct) ? token.top10HolderPct : prev?.top10HolderPct;
+    if (dev == null && top == null) return;
+    this.heldHolders.set(token.mint, { at, devHoldingPct: dev ?? null, top10HolderPct: top ?? null });
   }
 
   // ---------------------------------------------------------------- v13.11 orders
@@ -2639,7 +2670,7 @@ export class Desk {
     if (!held) {
       this.remember(token, freshChain);
       this.book.mark(mint, token.priceUsd);
-    }
+    } else this.noteHeldHolders(token, Date.now(), freshChain);
     const rug = await this.rugs.lookup(token.devWallet);
     const filter = evaluateFilter(token, rug, this.config.rules, {
       allowUnlockedLp: this.allowUnlockedLp,
@@ -3787,6 +3818,10 @@ export class Desk {
     this.noRoute.delete(bookKey(kind, token.mint));
     this.collapseStreak.delete(bookKey(kind, token.mint));
     if (kind === "live") this.liveTokenAtoms.delete(token.mint);
+    this.markLiquidity.delete(token.mint);
+    this.markLiquidityAt.delete(token.mint);
+    this.heldHolders.delete(token.mint);
+    this.strategyExitRetryAt.delete(bookKey(kind, token.mint));
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
@@ -4508,7 +4543,10 @@ export class Desk {
     }
     const seen = kind === "paper" ? this.sightings.get(mint) : undefined;
     if (seen) this.sightings.set(mint, { ...seen, priceUsd });
-    if (origin?.liquidityUsd && origin.liquidityUsd > 0 && pos) this.markLiquidity.set(mint, origin.liquidityUsd);
+    if (origin?.liquidityUsd && origin.liquidityUsd > 0 && pos) {
+      this.markLiquidity.set(mint, origin.liquidityUsd);
+      this.markLiquidityAt.set(mint, Date.now());
+    }
     if (kind === "paper" || pos) book.mark(mint, priceUsd);
     if (pos && !pos.closing) book.noteMark(mint, priceUsd, Date.now());
     if (pos) {
@@ -4901,6 +4939,7 @@ export class Desk {
 
   private remember(token: CandidateToken, fresh?: ReadonlySet<ChainFactField>): void {
     this.sightings.set(token.mint, { ...token, social: { ...token.social } });
+    this.noteHeldHolders(token, Date.now(), fresh);
     this.rememberChain(token, Date.now(), fresh);
     // v13.11 supply from the first sighting where price and market cap came from the same read.
     if (!this.supplyByMint.has(token.mint) && (token.marketCapUsd ?? 0) > 0 && token.priceUsd > 0) {
