@@ -205,6 +205,12 @@ const SOLANA_POLL_METHODS = new Set(["getBalance", "getTokenAccountsByOwner", "g
  * of waiting behind marks or chips for one to age out. The lane ceilings do not move.
  */
 export const HELIUS_FRONT_RESERVE = 3;
+/**
+ * Helius swap lane. A curve sell is three sends once the fixed accounts are cached: the curve,
+ * a blockhash and the simulation. Buys and every other send stop at budget minus this many a
+ * minute, so those three are free the moment a stop or a target fires. The ceiling does not move.
+ */
+export const HELIUS_EXIT_RESERVE = 3;
 const LOW_PRIORITY_READ = new Set(["getAccountInfo", "getMultipleAccounts", "getSignaturesForAddress", "getTransaction", "getBlock"]);
 
 export function rpcMethod(body: string): string | null {
@@ -530,6 +536,11 @@ export class NetLimiter {
    */
   private headNeeds(b: Bucket): { tokens: number; reserve: number } {
     const priority = b.queue[0]?.priority ?? 1;
+    // v13.53 swap lane: a live sell runs at priority -1. It does not wait for a token, and every
+    // other send leaves HELIUS_EXIT_RESERVE of the minute free so a sell is never behind a buy.
+    if (b.spec.id === "helius:exec") {
+      return priority === -1 ? { tokens: Number.NEGATIVE_INFINITY, reserve: 0 } : { tokens: 1, reserve: HELIUS_EXIT_RESERVE };
+    }
     if (b.spec.id !== "helius") return { tokens: 1, reserve: 0 };
     if (priority === -1) return { tokens: Number.NEGATIVE_INFINITY, reserve: 0 };
     return { tokens: 1, reserve: HELIUS_FRONT_RESERVE };

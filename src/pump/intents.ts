@@ -241,7 +241,8 @@ async function buildCurve(
   const buyback = buybackRecipient(global);
   const ata = getAssociatedTokenAddressSync(args.mint, args.user, true, args.tokenProgram);
   const ixs: TransactionInstruction[] = [];
-  if (!(await connection.getAccountInfo(ata.toBase58()))) {
+  // A sell spends tokens that are already in this account. Only a buy may have to create it.
+  if (args.side === "buy" && !(await connection.getAccountInfo(ata.toBase58()))) {
     ixs.push(createAssociatedTokenAccountIdempotentInstruction(args.user, ata, args.user, args.mint, args.tokenProgram));
   }
   if (args.side === "buy") {

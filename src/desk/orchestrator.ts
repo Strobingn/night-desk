@@ -5622,7 +5622,7 @@ export class Desk {
         keypairPath: this.config.walletKeypairPath,
         readEnvSecret: this.config.readWalletSecret,
         rpcUrl: this.config.walletRpcUrl,
-        rpcFetch: this.net.fetchAt(1),
+        rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1),
         senderTipLamports: tipLamports(this.senderTipSol),
         idemKey: randomUUID()
       });
@@ -5644,7 +5644,7 @@ export class Desk {
       maxExitSlippage: input.exit ? slip : undefined,
       confirmedFill: input.confirmedFill === true,
       sellAnyway: input.exit === true && input.sellAnyway === true,
-      rpcFetch: this.net.fetchAt(1),
+      rpcFetch: this.net.fetchAt(input.side === "sell" ? -1 : 1),
       senderTipLamports: tipLamports(this.senderTipSol),
       idemKey: randomUUID()
     });

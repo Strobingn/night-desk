@@ -10,7 +10,9 @@ import { Transaction } from "@solana/web3.js";
 import { entryPriceAllowed } from "../agents/execution-math.js";
 import { HARD_RULES } from "../rules.js";
 import { IntentError, buildIntent, serializeUnsigned } from "../pump/intents.js";
-import { solanaConnection, type PumpConnection } from "../pump/rpc.js";
+import { solanaConnection, type AccountBytes, type PumpConnection } from "../pump/rpc.js";
+import { GLOBAL_CONFIG_PDA, GLOBAL_PDA } from "../pump/sdk.js";
+import { CURVE_FEE_CONFIG, SWAP_FEE_CONFIG } from "../pump/constants.js";
 import type { LiveSwapResult } from "./live-broker.js";
 import { CONFIRM_TIMEOUT_MS, isAmbiguousSendError, isNoSellRouteMessage, noSellRouteError, rejectedSend, sellExitImpactError, unconfirmedSend, withTimeout } from "./live-submit.js";
 import { loadDeskKeypair } from "./wallet-key.js";
@@ -89,6 +91,49 @@ async function defaultBroadcast(
   }
 }
 
+/** Pump program accounts that are the same for every coin and change only when Pump changes its fees. */
+const PROTOCOL_ACCOUNTS = new Set([GLOBAL_PDA.toBase58(), CURVE_FEE_CONFIG.toBase58(), GLOBAL_CONFIG_PDA.toBase58(), SWAP_FEE_CONFIG.toBase58()]);
+const PROTOCOL_TTL_MS = 10 * 60_000;
+/** A mint's token program never changes, and a Pump coin's supply is fixed. */
+const MINT_TTL_MS = 60 * 60_000;
+const fixedAccounts = new Map<string, { at: number; value: AccountBytes }>();
+
+/** Drop the cached fixed accounts. A swap that failed to build or simulate reads them again next time. */
+export function forgetFixedAccounts(): void {
+  fixedAccounts.clear();
+}
+
+/**
+ * The connection one swap is built on.
+ *
+ * Building a Pump swap read the same fixed accounts on every trade, and some of them twice. On a
+ * budget of 8 sends a minute that put about 40 seconds between reading the price and sending the
+ * order, and a falling coin moves past the 6% exit cap in less. Here each address is read once per
+ * swap, and the fixed ones are kept between swaps, so the price read is the last one before the send.
+ */
+export function swapConnection(base: PumpConnection, mint: string, now: () => number = Date.now): PumpConnection {
+  const seen = new Map<string, Promise<AccountBytes | null>>();
+  return {
+    getAccountInfo(address: string) {
+      const earlier = seen.get(address);
+      if (earlier) return earlier;
+      const ttl = PROTOCOL_ACCOUNTS.has(address) ? PROTOCOL_TTL_MS : address === mint ? MINT_TTL_MS : 0;
+      const kept = ttl > 0 ? fixedAccounts.get(address) : undefined;
+      const job =
+        kept && now() - kept.at < ttl
+          ? Promise.resolve<AccountBytes | null>(kept.value)
+          : base.getAccountInfo(address).then((value) => {
+              if (ttl > 0 && value) fixedAccounts.set(address, { at: now(), value });
+              return value;
+            });
+      seen.set(address, job);
+      return job;
+    },
+    getLatestBlockhash: () => base.getLatestBlockhash(),
+    simulateTransaction: (tx) => base.simulateTransaction(tx)
+  };
+}
+
 export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwapResult> {
   if (!req.rpcUrl?.trim()) throw new Error("LIVE_SWAP_FAILED: SOLANA_RPC_URL is missing. Nothing was sent.");
   const loaded = loadDeskKeypair({ keypairPath: req.keypairPath, readEnvSecret: req.readEnvSecret });
@@ -110,7 +155,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
     tokenAmount = BigInt(Math.floor(req.qty * 10 ** decimals));
     if (tokenAmount <= 0n) throw new Error("LIVE_SWAP_FAILED: token amount rounded to zero");
   }
-  const connection = req.connection ?? solanaConnection(req.rpcUrl, req.rpcFetch);
+  const connection = swapConnection(req.connection ?? solanaConnection(req.rpcUrl, req.rpcFetch), req.mint);
   let built;
   try {
     built = await buildIntent(connection, {
@@ -122,6 +167,7 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
       slippageBps: Math.round(slip * 10_000)
     });
   } catch (err) {
+    forgetFixedAccounts();
     const message = err instanceof IntentError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : String(err);
     if (req.side === "sell" && (isNoSellRouteMessage(message) || /insufficient liquidity|no liquidity|zero liquidity/i.test(message))) {
       throw noSellRouteError();
@@ -145,7 +191,10 @@ export async function executePumpLiveSwap(req: PumpLiveRequest): Promise<LiveSwa
   const blockhash = await connection.getLatestBlockhash();
   const unsigned = serializeUnsigned(loaded.keypair.publicKey.toBase58(), blockhash, built.instructions);
   const sim = await connection.simulateTransaction(unsigned.tx);
-  if (sim.err) throw new Error(`LIVE_SWAP_FAILED: simulation ${sim.err}. Nothing was sent.`);
+  if (sim.err) {
+    forgetFixedAccounts();
+    throw new Error(`LIVE_SWAP_FAILED: simulation ${sim.err}. Nothing was sent.`);
+  }
   const tx = Transaction.from(Buffer.from(unsigned.base64, "base64"));
   if (req.senderTipLamports != null && req.senderTipLamports > 0) {
     const { addTipToLegacy } = await import("./helius-sender.js");
