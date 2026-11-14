@@ -43,6 +43,8 @@ export interface MarketFlow {
   buys5m?: number | null;
   sells5m?: number | null;
   liquidityUsd?: number | null;
+  /** When that depth was actually read. It can be older than `at` when the quote carried none and a kept figure filled in. */
+  liquidityAt?: number;
 }
 
 export interface StrategyExitInput {

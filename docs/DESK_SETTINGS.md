@@ -311,6 +311,7 @@ Gap 1: it bought pools the desk had never measured.
   - depth of at least $5,000 (`ENGINE_LIVE_MIN_POOL_USD`), or the saved minimum liquidity when that is higher;
   - depth not down 25% or more from the Filter figure.
 - The pool is measured twice: when the signal fires, and again on the newest reading right before the order is sent, after the safety read, the bundle check and the wait for the one-buy lock.
+- The 60 seconds are the depth figure's own age. A quote that carries no depth is filled from the last kept figure for the exits, and that figure keeps the time it was read. A pool the feed prints as empty (zero) is kept as zero on the Tape quote and is not filled from an older figure.
 - A refusal is logged as `ENGINE_LIVE_NO_POOL` and shown on the Engine tab as the last live attempt. It is checked before any Helius read.
 - If the price feed never carries depth for a coin, that coin is not bought with real money.
 

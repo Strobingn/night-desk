@@ -222,6 +222,23 @@ describe("engine live variant", () => {
     }
   });
 
+  it("v13.57 a depth figure kept from minutes ago is not a measurement, however new the quote it rides on", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 6 });
+      await desk.submitCandidate(young());
+      const t = Date.now();
+      // New quotes, but the depth on them was read five minutes ago.
+      const stale = (at: number, priceUsd: number) => ({ ...quote(at, priceUsd), liquidityAt: t - 5 * 60_000 });
+      await desk.submitStrategyQuote(MINT, stale(t + 10_000, 1.01), t + 10_000);
+      await desk.submitStrategyQuote(MINT, stale(t + 22_000, 1.025), t + 22_000);
+      expect(buys()).toHaveLength(0);
+      expect(desk.strategyView().live?.lastSkip).toMatchObject({ code: "ENGINE_LIVE_NO_POOL" });
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("v13.57 a coin bought yesterday evening that dies after UTC midnight still counts", async () => {
     const desk = liveDesk();
     try {

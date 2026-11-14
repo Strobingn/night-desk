@@ -1419,7 +1419,9 @@ export class Desk {
    */
   private engineLiveDepth(fired: FiredSignal, now = Date.now()): { ok: true; depthUsd: number } | { ok: false; message: string } {
     const flow = this.strategy.flowFor(fired.token.mint);
-    const depth = flow && now - flow.at <= STRATEGY.fade.freshMs && flow.liquidityUsd != null && Number.isFinite(flow.liquidityUsd) ? flow.liquidityUsd : null;
+    // The depth's own age, not the quote's: a quote with no depth is filled from an older figure.
+    const readAt = flow ? flow.liquidityAt ?? flow.at : 0;
+    const depth = flow && now - readAt <= STRATEGY.fade.freshMs && flow.liquidityUsd != null && Number.isFinite(flow.liquidityUsd) ? flow.liquidityUsd : null;
     if (depth == null) return { ok: false, message: "No pool depth reading from the last minute for this coin. Real money is not spent on a pool the desk has not measured." };
     const floor = Math.max(ENGINE_LIVE_MIN_POOL_USD, this.minLiquidityUsd);
     if (depth < floor) return { ok: false, message: `Pool depth is ${money(depth)}, under the ${money(floor)} the engine needs to buy with real money.` };
@@ -1554,7 +1556,12 @@ export class Desk {
       const anchor = this.strategyFeed.get(mint);
       const feed = feedOf(q.source) ?? undefined;
       if (anchor && feed && anchor !== feed) continue;
-      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd: q.liquidityUsd ?? this.markLiquidity.get(mint) ?? null, buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt, ...(feed ? { feed } : {}) }, now);
+      // A quote without depth is filled from the last kept figure. That figure keeps its own age,
+      // so a pool that stopped printing depth is not read as measured just now.
+      const ownDepth = q.liquidityUsd != null;
+      const liquidityUsd = ownDepth ? q.liquidityUsd! : this.markLiquidity.get(mint) ?? null;
+      const liquidityAt = ownDepth ? q.flowAt ?? q.at : this.markLiquidityAt.get(mint) ?? 0;
+      this.strategyQuote(mint, { at: q.at, priceUsd: q.priceUsd, vol5mUsd: q.vol5mUsd, vol1hUsd: q.vol1hUsd, change1hPct: q.change1hPct, liquidityUsd, ...(liquidityUsd != null ? { liquidityAt } : {}), buys5m: q.buys5m ?? null, sells5m: q.sells5m ?? null, flowAt: q.flowAt, ...(feed ? { feed } : {}) }, now);
     }
     this.strategy.tick(now);
     this.recorder.flush();
