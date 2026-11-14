@@ -107,6 +107,8 @@ export interface ScorecardView {
   /** Set by the desk: live engine positions open, the live size and target, and why live is not trading (null when it is). */
   live?: {
     open: number;
+    /** Engine holdings with no sell route or a collapsed mark. On the book, not counted as open. */
+    dead?: number;
     tradeUsd: number;
     targetNetUsd: number;
     blocked: string | null;

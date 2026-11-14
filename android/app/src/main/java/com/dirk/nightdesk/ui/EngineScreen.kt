@@ -135,7 +135,7 @@ fun EngineScreen(
                     if (liveRow != null) {
                         Text(Strategy.label(liveRow), color = P.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            "Trading real money: $" + "%.2f".format(Locale.US, view.liveTradeUsd) + " a trade, take-profit about $" + "%.2f".format(Locale.US, view.liveTargetUsd) + " net. ${view.liveOpen} open now.",
+                            "Trading real money: $" + "%.2f".format(Locale.US, view.liveTradeUsd) + " a trade, take-profit about $" + "%.2f".format(Locale.US, view.liveTargetUsd) + " net. " + Strategy.liveOpenLine(view),
                             color = P.muted, fontSize = 12.sp, lineHeight = 16.sp
                         )
                         if (view.liveBlocked.isNotBlank()) Text("Not buying: ${view.liveBlocked}", color = P.down, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))

@@ -55,6 +55,12 @@ export interface StrategyExitInput {
   now: number;
   meta: StrategyMeta;
   flow?: MarketFlow | null;
+  /**
+   * v13.54 sell when the pool is draining, whatever the variant. The desk sets this for real money:
+   * a coin that has lost a quarter of its depth since the buy is sold while there is still a pool to
+   * sell into. Without it only the fade variants act on depth.
+   */
+  depthGuard?: boolean;
 }
 
 export interface StrategyExit {
@@ -127,7 +133,7 @@ export function assessStrategyExit(input: StrategyExitInput, cfg: StrategyConfig
   const trailing = meta.trailPct != null && meta.trailPct > 0;
   const flow = input.flow && now - input.flow.at <= cfg.fade.freshMs ? input.flow : null;
 
-  if (trailing && meta.fade && markFresh && flow && seen(flow.liquidityUsd) && good(meta.entryLiquidityUsd)) {
+  if ((input.depthGuard || (trailing && meta.fade)) && markFresh && flow && seen(flow.liquidityUsd) && good(meta.entryLiquidityUsd)) {
     if (flow.liquidityUsd <= meta.entryLiquidityUsd * (1 - cfg.fade.liquidityDrop)) {
       return exit("LIQUIDITY_DROP", `Pool depth fell to ${usd(flow.liquidityUsd)} from ${usd(meta.entryLiquidityUsd)} at the buy.`);
     }

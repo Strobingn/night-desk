@@ -1313,14 +1313,14 @@ export class Desk {
   private strategyCard(): ScorecardView {
     let mainOpen = 0;
     for (const pos of this.book.positions.values()) if (pos.strategy) mainOpen += 1;
-    let liveOpen = 0;
-    for (const pos of this.liveBook?.positions.values() ?? []) if (pos.strategy) liveOpen += 1;
+    const slots = this.engineLiveSlots();
     const card = this.strategy.scorecard();
     return {
       ...card,
       mainOpen,
       live: {
-        open: liveOpen,
+        open: slots.open,
+        dead: slots.dead,
         tradeUsd: this.liveTradeUsd,
         targetNetUsd: this.liveEngineTarget(),
         blocked: card.liveVariant ? this.liveEngineBlock() : "No live variant chosen.",
@@ -1364,6 +1364,24 @@ export class Desk {
     const net = this.liveNetTodayUsd();
     if (net <= -STRATEGY.live.dailyMaxLossUsd + 1e-9) return `Live is ${money(net)} on the day, past the engine's $${STRATEGY.live.dailyMaxLossUsd.toFixed(0)} live pause. It resumes on the next UTC day.`;
     return null;
+  }
+
+  /**
+   * The engine's live positions, split into ones that can still be traded and dead ones.
+   * A dead holding (no sell route, or a mark that collapsed and stayed there) is still on the book,
+   * but it is not an open trade: nothing can be sold and nothing more can be lost on it. It does
+   * not take one of the engine's slots, or six rugged coins would stop the engine for good.
+   * A position being closed, or a buy still in flight, is not counted here either.
+   */
+  private engineLiveSlots(): { open: number; dead: number } {
+    let open = 0;
+    let dead = 0;
+    for (const pos of this.liveBook?.positions.values() ?? []) {
+      if (!pos.strategy) continue;
+      if (this.liquidityGone.has(bookKey("live", pos.mint)) || this.deadHolding(pos, "live")) dead += 1;
+      else if (!pos.closing && !this.engineLivePending.has(pos.mint)) open += 1;
+    }
+    return { open, dead };
   }
 
   /** Coins the engine has a position in on either book. They stay quoted so trailing and fade exits have data. */
@@ -1521,8 +1539,8 @@ export class Desk {
     const live = this.liveBook!;
     if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
     // A buy still in flight holds a slot, so two signals in one pass cannot both take the last one.
-    const held = [...live.positions.values()].filter((pos) => pos.strategy && !pos.closing && !this.engineLivePending.has(pos.mint)).length;
-    const open = held + this.engineLivePending.size;
+    // Dead holdings are not open trades and do not hold a slot.
+    const open = this.engineLiveSlots().open + this.engineLivePending.size;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     this.engineLivePending.add(token.mint);
     try {
@@ -1690,7 +1708,9 @@ export class Desk {
       netPnlUsd: net?.netPnlUsd ?? null,
       now,
       meta,
-      flow: this.strategy.flowFor(pos.mint)
+      flow: this.strategy.flowFor(pos.mint),
+      // Real money leaves a draining pool on every variant, not only the fade ones.
+      depthGuard: kind === "live"
     });
     if (verdict.armBreakeven || verdict.patch) {
       pos.strategy = { ...meta, ...(verdict.armBreakeven ? { breakevenArmed: true } : {}), ...(verdict.patch ?? {}) };

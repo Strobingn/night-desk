@@ -45,6 +45,8 @@ data class StrategyView(
     /** The variant trading real money, or blank. */
     val liveVariant: String = "",
     val liveOpen: Int = 0,
+    /** v13.54 engine holdings with no sell route or a collapsed mark. Not counted as open. */
+    val liveDead: Int = 0,
     val liveTradeUsd: Double = 0.0,
     val liveTargetUsd: Double = 0.0,
     /** Why live is not trading right now. Blank when it is. */
@@ -184,6 +186,7 @@ object Strategy {
             liveSupported = json.has("liveVariant"),
             liveVariant = if (json.isNull("liveVariant")) "" else json.optText("liveVariant"),
             liveOpen = json.optJSONObject("live")?.optFinite("open")?.toInt() ?: 0,
+            liveDead = json.optJSONObject("live")?.optFinite("dead")?.toInt() ?: 0,
             liveTradeUsd = json.optJSONObject("live")?.optFinite("tradeUsd") ?: 0.0,
             liveTargetUsd = json.optJSONObject("live")?.optFinite("targetNetUsd") ?: 0.0,
             liveBlocked = json.optJSONObject("live")?.let { if (it.isNull("blocked")) "" else it.optText("blocked") } ?: "",
@@ -260,6 +263,12 @@ object Strategy {
         }
         if (view.liveSignals == 0) return "No signal has fired$since. Live buys only happen on a signal."
         return "${view.liveSignals} $kind ${if (view.liveSignals == 1) "signal" else "signals"}$since, no live buy yet."
+    }
+
+    /** "2 open now." or "0 open now. 6 dead (no sell route), not counted against the engine's limit." */
+    fun liveOpenLine(view: StrategyView): String {
+        val dead = if (view.liveDead > 0) " ${view.liveDead} dead (no sell route), not counted against the engine's limit." else ""
+        return "${view.liveOpen} open now.$dead"
     }
 
     /** "Saving market data: 12,340 quotes and 18 signals, kept 14 days." Blank when the desk does not record. */

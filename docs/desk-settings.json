@@ -14,9 +14,9 @@
     "note": "13.33 GET /api/settings returns the settings object and does not build /api/state or serve the SPA. Current prefs and rules come from /api/state, which is the KV store snapshot the desk also writes on POST /api/settings. Engine settings below are the code defaults Dirk approved (engine on for a live feed, $10 paper-loss pause kept). The 13.29 values stand until this release is deployed and re-pulled."
   },
   "version": {
-    "appVersion": "13.53",
-    "androidVersionName": "13.53",
-    "androidVersionCode": 1353,
+    "appVersion": "13.54",
+    "androidVersionName": "13.54",
+    "androidVersionCode": 1354,
     "applicationId": "com.dirk.nightdesk",
     "note": "APP_VERSION in this branch. Oracle was still 13.29 at the 1:46 PM ET pull. 13.39 live sells return a clear no-route reason and the card shows liquidity gone, on top of main aa1e16c (PR 40, the 13.39 Home charts and math audit) which includes 13.38 (PR 41). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6 is docs on top of the engine already shipped as 13.30 (main 2bc4475).",
     "claudeTip": "8b3fe9484c12e41efded821e223891907c3051d6",
@@ -84,6 +84,7 @@
     "13.38: manual paper and live buys use launchBundleSoon (1.5s) instead of an uncapped launchBundle. Unenriched quote and curve fallbacks, and ensureDepth's curve read, are also capped. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 929365c (PR 39).",
     "13.37: DAMM v2 is not a traditional LP lock. Rank traditional pools by real depth. A figure-less pool does not fail a coin that has another pool with data. Holder count is RugCheck totalHolders, not a top-20 sample; unknown stays fail-closed. No numeric trading or filter setting changed. Caps stay 10+8. Based on main 7c00007 (PR 38).",
     "13.36: lookup chain, primary-pool LP lock, unverified-kill counts, hard stop measured from the entry mark. No numeric trading or filter setting changed. Caps stay 10+8. Rebased onto main bfd761a (PR 36, the 13.35 redesign).",
+    "13.54: a dead live holding (no sell route, or a mark that collapsed and stayed there) no longer takes one of the engine's live slots. It stays on the live book. The engine card shows open and dead apart. maxOpen itself is unchanged. Live engine positions also sell when pool depth is down 25% from the buy on every variant, not only the fade ones.",
     "13.53: live sells. A Pump curve sell was 8 Helius sends on the 8 a minute swap lane, about 40 seconds from price read to send. It is now 3: fixed Pump accounts are kept 10 minutes and a coin's mint account 60 minutes, each address is read once per swap, and a sell does not read its token account. A live sell runs at priority -1 on the swap lane, does not wait for a token, and other sends leave 3 of the 8 a minute free for it. Ceilings stay 10 and 8, 18 together. Exit slippage stays 6%.",
     "13.52: fast sweep. Coins the free pre-filter parks (Pump stream creates with no volume yet, and coins killed only for low volume, thin liquidity or age) are looked up on DexScreener /tokens/v1 in batches of 30 at 10 s, 25 s, 45 s, 75 s, 2, 3, 5, 8 and 12 minutes, and go to enrich as soon as one-hour volume clears the existing floor. At most 60 DexScreener requests a minute (1,800 coin looks). No RPC read, no threshold changed.",
     "13.51: a holding whose mark has collapsed (under $0.01 and 99% below entry, or a 99% drop seen three times at least 1.5s apart) or whose read-only Jupiter sell quote finds no pool shows Liquidity gone, no sell route, without a sell attempt. Pump-route coins are not judged by that quote. Nothing is sent. Stops, settings, and the ledger stay. No numeric setting changed.",
@@ -1221,8 +1222,8 @@
     ],
     "docsInSamePr": "Every Night Desk release must update docs/DESK_SETTINGS.md and docs/desk-settings.json in the same PR, pulling the then-current Oracle values and any newly added settings, endpoints, or env names.",
     "current": {
-      "version": "13.53",
-      "androidVersionCode": 1353,
+      "version": "13.54",
+      "androidVersionCode": 1354,
       "applicationId": "com.dirk.nightdesk",
       "note": "Code in this branch (13.39 live sells). Not the host at the 1:46 PM ET pull. Based on main aa1e16c (PR 40, Home charts and math audit, including 13.38). Claude tip 8b3fe9484c12e41efded821e223891907c3051d6.",
       "liveOracleUntilThisRelease": {

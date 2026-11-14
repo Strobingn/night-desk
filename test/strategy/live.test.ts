@@ -141,6 +141,25 @@ describe("engine live variant", () => {
     }
   });
 
+  it("a dead holding does not hold an engine slot, and is reported as dead, not open", async () => {
+    const desk = liveDesk();
+    try {
+      desk.updateStrategy({ enabled: true, liveVariant: "launch-3", maxOpen: 1 });
+      await signal(desk);
+      expect(buys()).toHaveLength(1);
+      expect(desk.strategyView().live).toMatchObject({ open: 1, dead: 0 });
+      // The coin is rugged: no sell route. It stays on the book.
+      (desk as unknown as { noRoute: Set<string> }).noRoute.add(`live:${MINT}`);
+      expect(desk.strategyView().live).toMatchObject({ open: 0, dead: 1 });
+      await signal(desk, young({ mint: "EngineLive444444444444444444444444444444444", symbol: "EL4" }));
+      expect(buys()).toHaveLength(2);
+      expect(desk.liveBook!.positions.size).toBe(2);
+      expect(desk.strategyView().live).toMatchObject({ open: 1, dead: 1 });
+    } finally {
+      desk.stop();
+    }
+  });
+
   it("two signals in the same pass cannot both take the last live slot", async () => {
     const desk = liveDesk();
     try {

@@ -64,6 +64,19 @@ describe("trailing and fade exits", () => {
     expect(fadeReason(fade, { ...sellers, at: 100_000 - STRATEGY.fade.freshMs - 1 }, 100_000)).toBeNull();
   });
 
+  it("v13.54 real money sells a draining pool on a fixed-target variant too; paper does not", () => {
+    const fixed: StrategyMeta = { variant: "launch-1", signal: "launch", stopPct: 0.01, targetNetUsd: 3, timeLimitMs: 600_000, entryLiquidityUsd: 50_000 };
+    const draining = { flow: { at: 9_000, liquidityUsd: 37_000 } };
+    expect(at(fixed, 1.01, 0.2, 10_000, draining).action).toBe("hold");
+    expect(at(fixed, 1.01, 0.2, 10_000, { ...draining, depthGuard: true }).code).toBe("LIQUIDITY_DROP");
+    // A quarter is the line: 20% down holds.
+    expect(at(fixed, 1.01, 0.2, 10_000, { flow: { at: 9_000, liquidityUsd: 40_000 }, depthGuard: true }).action).toBe("hold");
+    // Stale depth, an old mark, or no depth recorded at the buy fire nothing.
+    expect(at(fixed, 1.01, 0.2, 100_000, { flow: { at: 100_000 - STRATEGY.fade.freshMs - 1, liquidityUsd: 1_000 }, depthGuard: true }).action).toBe("hold");
+    expect(at(fixed, 1.01, 0.2, 10_000, { ...draining, depthGuard: true, markFresh: false }).action).toBe("hold");
+    expect(at({ ...fixed, entryLiquidityUsd: undefined }, 1.01, 0.2, 10_000, { ...draining, depthGuard: true }).action).toBe("hold");
+  });
+
   it("a fade book sells when the pool drains, even before the target", () => {
     const fade: StrategyMeta = { ...base, fade: true, entryLiquidityUsd: 50_000 };
     expect(at(fade, 1.01, 0.2, 10_000, { flow: { at: 9_000, liquidityUsd: 40_000 } }).action).toBe("hold");
