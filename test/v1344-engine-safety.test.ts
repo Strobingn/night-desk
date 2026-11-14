@@ -8,7 +8,7 @@ import { STRATEGY } from "../src/strategy/config.js";
 import { LIVE_SURVIVAL_MS } from "../src/strategy/live-rug-gate.js";
 import type { FiredSignal } from "../src/strategy/engine.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
-import { engineSellRouteStub, testConfig } from "./helpers.js";
+import { engineSellRouteStub, holdLiveEntryRead, testConfig } from "./helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
 vi.mock("../src/market/live-broker.js", () => ({ executeLiveSwap: liveBroker.executeLiveSwap }));
@@ -49,6 +49,7 @@ function liveDesk(deps: ConstructorParameters<typeof Desk>[1] = {}): Desk {
     sellRoute: engineSellRouteStub,
     ...deps
   });
+  if (!deps.liveEntryRead) holdLiveEntryRead(desk);
   desk.setOperatorReady(true);
   return desk;
 }

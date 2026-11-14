@@ -6,14 +6,16 @@ import type { WalletBalances } from "../src/market/wallet-status.js";
 import { clampLiveDailyCapUsd } from "../src/rules.js";
 import {
   LIVE_SURVIVAL_MS,
+  LIVE_SURVIVAL_QUOTE_GRACE_MS,
   noteSurvival,
+  SurvivalWindow,
   OVERNIGHT_RUGS,
   OVERNIGHT_SURVIVORS,
   overnightBlocked,
   overnightCoins,
   overnightSurvivor
 } from "../src/strategy/live-rug-gate.js";
-import { engineSellRouteStub, testConfig } from "./helpers.js";
+import { engineSellRouteStub, holdLiveEntryRead, testConfig } from "./helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
 vi.mock("../src/market/live-broker.js", async () => {
@@ -26,6 +28,7 @@ const rich = async (): Promise<WalletBalances> => ({ sol: 0.5, usdc: 500, at: Da
 function liveDesk(): Desk {
   const secret = JSON.stringify([...Keypair.generate().secretKey]);
   const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), { walletBalances: rich, sellRoute: engineSellRouteStub });
+  holdLiveEntryRead(desk);
   desk.setOperatorReady(true);
   desk.updateStrategy({ enabled: true, liveVariant: "launch-1", maxOpen: 2 });
   return desk;
@@ -152,6 +155,102 @@ describe("v13.57 engine live rug gate", () => {
       await desk.submitStrategyQuote(next, quote(at + LIVE_SURVIVAL_MS, 1.03), at + LIVE_SURVIVAL_MS);
       expect(buys()).toHaveLength(1);
       expect(desk.strategyView().live?.lastSkip?.message).toMatch(/rug list/);
+    } finally {
+      desk.stop();
+    }
+  });
+
+  function gapsOf(step: number): number[] {
+    const gaps: number[] = [];
+    for (let covered = 0; covered < LIVE_SURVIVAL_MS + step; covered += step) gaps.push(step);
+    return gaps;
+  }
+
+  /** Poll expire every 2s between quotes, the way strategyPass does. A short window must stay open. */
+  function survivesCadence(gaps: number[]): boolean {
+    const window = new SurvivalWindow<string>();
+    let at = 0;
+    window.note("m", { at, liquidityUsd: 20_000, ageSeconds: 120 }, at, "fired", 1);
+    for (const gap of gaps) {
+      const next = at + gap;
+      for (let now = at + 2_000; now < next; now += 2_000) {
+        if (window.expire(now).length) return false;
+      }
+      at = next;
+      const status = window.note("m", { at, liquidityUsd: 20_000, ageSeconds: 120 }, at, "fired", 1.03);
+      if (status.status === "fail") return false;
+      if (status.status === "ready") return window.has("m");
+    }
+    return false;
+  }
+
+  async function armPool(desk: Desk, mint: string, liquidityUsd: number): Promise<number> {
+    const token = makeToken({
+      mint,
+      symbol: mint.slice(0, 6),
+      priceUsd: 1,
+      ageSeconds: 120,
+      volume5mUsd: 40_000,
+      liquidityUsd,
+      discoveredAt: Date.now(),
+      devWallet: mint
+    });
+    await desk.submitCandidate(token);
+    const t = Date.now();
+    await desk.submitStrategyQuote(mint, quote(t + 10_000, 1.01, liquidityUsd), t + 10_000);
+    await desk.submitStrategyQuote(mint, quote(t + 22_000, 1.025, liquidityUsd), t + 22_000);
+    return t + 22_000;
+  }
+
+  async function buysOnCadence(mint: string, gaps: number[]): Promise<void> {
+    liveBroker.executeLiveSwap.mockClear();
+    const desk = liveDesk();
+    desk.liveEntryRead = async () => ({ priceUsd: 1.4, liquidityUsd: 20_000 });
+    try {
+      expect(survivesCadence(gaps)).toBe(true);
+      let at = await armPool(desk, mint, 20_000);
+      expect(buys()).toHaveLength(0);
+      for (const gap of gaps) {
+        const next = at + gap;
+        for (let now = at + 2_000; now < next; now += 2_000) desk.strategyPass(now);
+        at = next;
+        await desk.submitStrategyQuote(mint, quote(at, 1.03, 20_000), at);
+        if (buys().length) break;
+      }
+      expect(buys()).toHaveLength(1);
+      expect(buys()[0]?.[0].markPriceUsd).toBe(1.4);
+      expect(desk.strategyView().live?.lastSkip?.message ?? "").not.toMatch(/not rechecked/);
+    } finally {
+      desk.stop();
+    }
+  }
+
+  it("buys a stable $20k pool when Tape quotes arrive every 16s, every 8s, or on a jittered gap", async () => {
+    const jitter = [11_000, 15_000, 7_000, 16_000, 9_000, 14_000, 12_000, 8_000, 13_000];
+    expect(jitter.reduce((sum, gap) => sum + gap, 0)).toBeGreaterThan(LIVE_SURVIVAL_MS);
+    await buysOnCadence("Cad16s111111111111111111111111111111111", gapsOf(16_000));
+    await buysOnCadence("Cad08s111111111111111111111111111111111", gapsOf(8_000));
+    await buysOnCadence("CadJit111111111111111111111111111111111", jitter);
+  });
+
+  it("waits out one Tape gap after 90s, then gives up", () => {
+    const window = new SurvivalWindow<string>();
+    window.note("m", { at: 0, liquidityUsd: 20_000, ageSeconds: 120 }, 0, "fired", 1);
+    window.note("m", { at: 80_000, liquidityUsd: 20_000, ageSeconds: 120 }, 80_000, "fired", 1);
+    expect(window.expire(LIVE_SURVIVAL_MS + LIVE_SURVIVAL_QUOTE_GRACE_MS - 1_000)).toHaveLength(0);
+    expect(window.has("m")).toBe(true);
+    expect(window.expire(LIVE_SURVIVAL_MS + LIVE_SURVIVAL_QUOTE_GRACE_MS + 1)).toHaveLength(1);
+  });
+
+  it("refuses when the pool drains between the last window sample and the lock read", async () => {
+    const desk = liveDesk();
+    desk.liveEntryRead = async () => ({ priceUsd: 1.4, liquidityUsd: 1_000 });
+    try {
+      const mint = "Drain1111111111111111111111111111111111";
+      const signalAt = await armPool(desk, mint, 20_000);
+      await desk.submitStrategyQuote(mint, quote(signalAt + LIVE_SURVIVAL_MS, 1.03, 20_000), signalAt + LIVE_SURVIVAL_MS);
+      expect(buys()).toHaveLength(0);
+      expect(desk.strategyView().live?.lastSkip?.message).toMatch(/Liquidity dropped|under the live floor/);
     } finally {
       desk.stop();
     }

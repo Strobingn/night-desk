@@ -7,7 +7,7 @@ import { streamSkipFreshMs, STREAM_FRESH_MS } from "../src/market/position-price
 import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_WATCH_MS } from "../src/strategy/rug-exit.js";
 import { LIVE_SURVIVAL_MS } from "../src/strategy/live-rug-gate.js";
 import type { WalletBalances } from "../src/market/wallet-status.js";
-import { engineSellRouteStub, testConfig } from "./helpers.js";
+import { engineSellRouteStub, holdLiveEntryRead, testConfig } from "./helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
 vi.mock("../src/market/live-broker.js", async () => {
@@ -20,6 +20,7 @@ const rich = async (): Promise<WalletBalances> => ({ sol: 0.5, usdc: 500, at: Da
 function liveDesk(): Desk {
   const secret = JSON.stringify([...Keypair.generate().secretKey]);
   const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), { walletBalances: rich, sellRoute: engineSellRouteStub });
+  holdLiveEntryRead(desk);
   desk.setOperatorReady(true);
   desk.updateStrategy({ enabled: true, liveVariant: "launch-1", maxOpen: 2 });
   return desk;

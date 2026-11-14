@@ -37,3 +37,13 @@ export function testDesk(overrides: Partial<DeskConfig> = {}, deps: { priceFetch
 export function engineSellRouteStub(): Promise<"route"> {
   return Promise.resolve("route");
 }
+
+/** Lock read that repeats the window's last sample, so a test does not call DexScreener. */
+export function holdLiveEntryRead(desk: Desk): void {
+  desk.liveEntryRead = async (mint) => {
+    const priceUsd = desk.liveWindows.price(mint);
+    const liquidityUsd = desk.liveWindows.track(mint)?.samples.at(-1)?.liquidityUsd;
+    if (!(priceUsd != null && priceUsd > 0) || liquidityUsd == null || !Number.isFinite(liquidityUsd)) return null;
+    return { priceUsd, liquidityUsd };
+  };
+}

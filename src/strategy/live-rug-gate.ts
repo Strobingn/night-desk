@@ -11,8 +11,13 @@ export const LIVE_SURVIVAL_MS = 90_000;
 export const LIVE_SURVIVAL_MAX_DROP = 0.2;
 /** A live engine buy needs a real pool, not a dust print. */
 export const LIVE_LIQUIDITY_FLOOR_USD = 10_000;
-/** The sample that authorizes the swap has to be this fresh. A few seconds, not the whole safety budget. */
+/** The direct read inside the buy lock has to be this fresh. Tape quotes are not held to it. */
 export const LIVE_RECHECK_FRESH_MS = 5_000;
+/**
+ * After the 90s mark, the window stays open this long for the next Tape quote.
+ * Tape quotes land about every 16s, so the grace has to cover one of those gaps.
+ */
+export const LIVE_SURVIVAL_QUOTE_GRACE_MS = 25_000;
 /** A watch with no new quote is abandoned so it does not hold a slot. */
 export const LIVE_SURVIVAL_GIVE_UP_MS = 180_000;
 
@@ -66,7 +71,7 @@ export function survivalStatus(track: SurvivalTrack, now: number): SurvivalStatu
     }
   }
   if (last.at - first.at < LIVE_SURVIVAL_MS) return { status: "waiting" };
-  if (now - last.at > LIVE_RECHECK_FRESH_MS || last.at > now) return { status: "fail", reason: "Liquidity was not rechecked." };
+  if (last.at > now) return { status: "waiting" };
   if (track.ageAtStart == null) return { status: "fail", reason: "Pool age unverified." };
   const ageSeconds = track.ageAtStart + (now - track.startedAt) / 1000;
   if (!(ageSeconds * 1000 >= LIVE_SURVIVAL_MS)) return { status: "fail", reason: "Pool is younger than the survival window." };
@@ -154,14 +159,19 @@ export class SurvivalWindow<T> {
     this.failures.delete(mint);
   }
 
-  /** Watches that never got a fresh quote. The caller logs the skip and frees the slot. */
+  /**
+   * Watches that never got a quote spanning the window. The 5s lock limit is not applied here:
+   * after 90s the next Tape quote is given LIVE_SURVIVAL_QUOTE_GRACE_MS to arrive.
+   */
   expire(now: number): Array<{ mint: string; fired: T; reason: string }> {
     const out: Array<{ mint: string; fired: T; reason: string }> = [];
     for (const [mint, row] of this.rows) {
       const last = row.track.samples[row.track.samples.length - 1];
-      const stale = last != null && now - last.at > LIVE_RECHECK_FRESH_MS && now - row.track.startedAt >= LIVE_SURVIVAL_MS;
+      const span = last ? last.at - row.track.startedAt : 0;
       const abandoned = now - row.track.startedAt > LIVE_SURVIVAL_GIVE_UP_MS;
-      if (!stale && !abandoned) continue;
+      const stillShort = span < LIVE_SURVIVAL_MS;
+      const graceOver = now > row.track.startedAt + LIVE_SURVIVAL_MS + LIVE_SURVIVAL_QUOTE_GRACE_MS;
+      if (!abandoned && !(stillShort && graceOver)) continue;
       this.rows.delete(mint);
       out.push({ mint, fired: row.fired, reason: "Liquidity was not rechecked." });
     }

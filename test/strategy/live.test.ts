@@ -5,7 +5,7 @@ import { Desk } from "../../src/desk/orchestrator.js";
 import { STRATEGY } from "../../src/strategy/config.js";
 import { LIVE_SURVIVAL_MS } from "../../src/strategy/live-rug-gate.js";
 import type { WalletBalances } from "../../src/market/wallet-status.js";
-import { engineSellRouteStub, testConfig } from "../helpers.js";
+import { engineSellRouteStub, holdLiveEntryRead, testConfig } from "../helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
 vi.mock("../../src/market/live-broker.js", () => ({ executeLiveSwap: liveBroker.executeLiveSwap }));
@@ -39,6 +39,7 @@ const rich = async (): Promise<WalletBalances> => ({ sol: 0.5, usdc: 100, at: Da
 function liveDesk(ready = true): Desk {
   const secret = base58Encode(Keypair.generate().secretKey);
   const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), { walletBalances: rich, sellRoute: engineSellRouteStub });
+  holdLiveEntryRead(desk);
   desk.setOperatorReady(ready);
   return desk;
 }
@@ -255,6 +256,7 @@ describe("engine live variant", () => {
         return { sol: 0.5, usdc: 100, at: Date.now(), error: null };
       }
     });
+    holdLiveEntryRead(desk);
     desk.setOperatorReady(true);
     try {
       desk.updateStrategy({ enabled: true, liveVariant: "launch-3" });

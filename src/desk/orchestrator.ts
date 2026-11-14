@@ -13,7 +13,7 @@ import { STRATEGY } from "../strategy/config.js";
 import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
 import { assessStrategyExit, strategyLinePrice, strategyStopPrice, type StrategyMeta } from "../strategy/exits.js";
 import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_LIQUIDITY_DROP, RUG_WATCH_MS } from "../strategy/rug-exit.js";
-import { LIVE_LIQUIDITY_FLOOR_USD, LIVE_RECHECK_FRESH_MS, survivalStatus, SurvivalWindow } from "../strategy/live-rug-gate.js";
+import { LIVE_LIQUIDITY_FLOOR_USD, LIVE_RECHECK_FRESH_MS, LIVE_SURVIVAL_MAX_DROP, survivalStatus, SurvivalWindow } from "../strategy/live-rug-gate.js";
 import { BoundedMap, LatencyStats } from "../strategy/latency.js";
 import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
@@ -581,12 +581,15 @@ export class Desk {
       launchBundle?: (mint: string) => Promise<BundleResult | null>;
       /** Tests inject the pre-buy sell quote. Production asks Jupiter. */
       sellRoute?: (token: CandidateToken) => Promise<"route" | "no_route" | "unknown">;
+      /** Tests inject the lock's liquidity and price read. Production asks DexScreener, then Jupiter. */
+      liveEntryRead?: (mint: string) => Promise<{ priceUsd: number; liquidityUsd: number } | null>;
     } = {}
   ) {
     this.config = config;
     this.mintAccounts = deps.mintAccounts ?? (process.env.VITEST ? async () => safeMintAccount() : undefined);
     this.launchBundleFn = deps.launchBundle;
     this.sellRouteOverride = deps.sellRoute ?? null;
+    this.liveEntryRead = deps.liveEntryRead ?? null;
     // v13.8: re-read pool depth before a buy when the sighting has none. Live feeds only (tests inject).
     this.depthFetch = deps.depthFetch ?? (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch ? deps.lookupFetch ?? this.net.fetchAt(0) : undefined);
     if (this.depthFetch) {
@@ -1644,7 +1647,7 @@ export class Desk {
       const paused = this.liveEngineBlock();
       if (paused) return skip(paused, "ENGINE_LIVE_PAUSED");
       await this.withLiveBuyLock(async () => {
-        const fresh = this.freshLiveEntry(aged);
+        const fresh = await this.freshLiveEntry(aged);
         if (!fresh.ok) return skip(fresh.reason);
         const route = await this.engineSellRoute(fresh.token);
         if (route !== "route") return skip(route === "no_route" ? "No sell route." : "Sell route unverified.");
@@ -1671,39 +1674,59 @@ export class Desk {
     }
   }
 
+  /** Tests inject the lock's liquidity and price read. Production asks DexScreener, then Jupiter. */
+  liveEntryRead: ((mint: string) => Promise<{ priceUsd: number; liquidityUsd: number } | null>) | null = null;
+
   /**
-   * The sample that authorizes the swap, read inside the buy lock. A quote that arrived during
-   * the safety or bundle wait is included. A stale or drained pool is not bought.
+   * Inside the buy lock. The window's own samples decide that the pool survived. This read is a new
+   * DexScreener or Jupiter quote, and it has to come back within a few seconds. A failed fetch is not a buy.
    */
-  private freshLiveEntry(token: CandidateToken): { ok: true; token: CandidateToken } | { ok: false; reason: string } {
-    const held = this.liveWindows.fired(token.mint);
-    const tape = this.tape?.get(token.mint);
-    const prior = this.liveWindows.track(token.mint)?.samples.at(-1);
-    if (held && tape && tape.priceUsd != null && tape.priceUsd > 0 && (prior == null || tape.at > prior.at)) {
-      this.liveWindows.note(
-        token.mint,
-        { at: tape.at, liquidityUsd: tape.liquidityUsd ?? null, ageSeconds: token.ageSeconds },
-        tape.at,
-        held,
-        tape.priceUsd
-      );
-    }
-    const failed = this.liveWindows.failure(token.mint);
-    if (failed) return { ok: false, reason: failed };
+  private async freshLiveEntry(token: CandidateToken): Promise<{ ok: true; token: CandidateToken } | { ok: false; reason: string }> {
     const track = this.liveWindows.track(token.mint);
     const last = track?.samples[track.samples.length - 1];
-    const wallAge = last?.wallAt == null ? Number.POSITIVE_INFINITY : Date.now() - last.wallAt;
-    const quoteAge = last == null ? Number.POSITIVE_INFINITY : Date.now() - last.at;
-    const stale = wallAge > LIVE_RECHECK_FRESH_MS || (quoteAge >= 0 && quoteAge > LIVE_RECHECK_FRESH_MS);
-    if (!track || !last || stale) return { ok: false, reason: "Liquidity was not rechecked." };
-    const verdict = survivalStatus(track, last.at);
+    if (!track || !last) return { ok: false, reason: "Liquidity was not rechecked." };
+    const verdict = survivalStatus(track, Math.max(last.at, Date.now()));
     if (verdict.status !== "ready") return { ok: false, reason: verdict.status === "fail" ? verdict.reason : "Liquidity was not rechecked." };
-    const price = this.liveWindows.price(token.mint);
-    if (!(price != null && price > 0)) return { ok: false, reason: "Price was not rechecked." };
+    const read = await this.readLiveEntry(token.mint);
+    if (!read || Date.now() - read.at > LIVE_RECHECK_FRESH_MS) return { ok: false, reason: "Liquidity was not rechecked." };
+    const first = track.samples[0]?.liquidityUsd;
+    if (first == null || !(read.liquidityUsd >= LIVE_LIQUIDITY_FLOOR_USD)) return { ok: false, reason: "Liquidity is under the live floor." };
+    if (read.liquidityUsd < first * (1 - LIVE_SURVIVAL_MAX_DROP)) return { ok: false, reason: "Liquidity dropped during the survival window." };
     return {
       ok: true,
-      token: { ...token, liquidityUsd: verdict.liquidityUsd, ageSeconds: verdict.ageSeconds, priceUsd: price }
+      token: { ...token, liquidityUsd: read.liquidityUsd, ageSeconds: verdict.ageSeconds, priceUsd: read.priceUsd }
     };
+  }
+
+  /** One direct quote for the swap. DexScreener first, then Jupiter, the same sources the Tape uses. */
+  private async readLiveEntry(mint: string): Promise<{ priceUsd: number; liquidityUsd: number; at: number } | null> {
+    const started = Date.now();
+    try {
+      const row = this.liveEntryRead ? await this.liveEntryRead(mint) : await this.fetchLiveEntry(mint);
+      const at = Date.now();
+      if (at - started > LIVE_RECHECK_FRESH_MS) return null;
+      if (!row || !(row.priceUsd > 0) || !Number.isFinite(row.priceUsd) || !Number.isFinite(row.liquidityUsd)) return null;
+      return { priceUsd: row.priceUsd, liquidityUsd: row.liquidityUsd, at };
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchLiveEntry(mint: string): Promise<{ priceUsd: number; liquidityUsd: number } | null> {
+    const fetchImpl = this.depthFetch ?? this.net.fetchAt(0);
+    try {
+      const dex = await fetchDexTape([mint], fetchImpl);
+      const row = dex.get(mint);
+      if (row?.priceUsd != null && row.priceUsd > 0 && row.liquidityKnown === true && Number.isFinite(row.liquidityUsd)) {
+        return { priceUsd: row.priceUsd, liquidityUsd: row.liquidityUsd };
+      }
+    } catch {
+      // Jupiter is the next source on the Tape path.
+    }
+    const jup = await fetchJupiterQuotes([mint], fetchImpl);
+    const quote = jup.get(mint);
+    if (quote && quote.priceUsd > 0 && quote.liquidityUsd > 0) return { priceUsd: quote.priceUsd, liquidityUsd: quote.liquidityUsd };
+    return null;
   }
 
   /** LP, an explicit authority, and the rug-wallet list. Null authorities are decided by the chain read that follows. */
