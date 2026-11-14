@@ -13,7 +13,7 @@ import {
   overnightCoins,
   overnightSurvivor
 } from "../src/strategy/live-rug-gate.js";
-import { testConfig } from "./helpers.js";
+import { engineSellRouteStub, testConfig } from "./helpers.js";
 
 const liveBroker = vi.hoisted(() => ({ executeLiveSwap: vi.fn() }));
 vi.mock("../src/market/live-broker.js", async () => {
@@ -25,7 +25,7 @@ const rich = async (): Promise<WalletBalances> => ({ sol: 0.5, usdc: 500, at: Da
 
 function liveDesk(): Desk {
   const secret = JSON.stringify([...Keypair.generate().secretKey]);
-  const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), { walletBalances: rich });
+  const desk = new Desk(testConfig({ mode: "live", liveRequested: true, readWalletSecret: () => secret }), { walletBalances: rich, sellRoute: engineSellRouteStub });
   desk.setOperatorReady(true);
   desk.updateStrategy({ enabled: true, liveVariant: "launch-1", maxOpen: 2 });
   return desk;

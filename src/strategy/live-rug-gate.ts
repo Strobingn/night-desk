@@ -11,8 +11,8 @@ export const LIVE_SURVIVAL_MS = 90_000;
 export const LIVE_SURVIVAL_MAX_DROP = 0.2;
 /** A live engine buy needs a real pool, not a dust print. */
 export const LIVE_LIQUIDITY_FLOOR_USD = 10_000;
-/** The sample that authorizes the swap has to be this fresh. */
-export const LIVE_RECHECK_FRESH_MS = 15_000;
+/** The sample that authorizes the swap has to be this fresh. A few seconds, not the whole safety budget. */
+export const LIVE_RECHECK_FRESH_MS = 5_000;
 /** A watch with no new quote is abandoned so it does not hold a slot. */
 export const LIVE_SURVIVAL_GIVE_UP_MS = 180_000;
 

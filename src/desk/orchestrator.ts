@@ -579,11 +579,14 @@ export class Desk {
       mintAccounts?: (mint: string) => Promise<MintAccountBytes | null>;
       /** Tests inject the creation-slot result. Production reads it once per mint. */
       launchBundle?: (mint: string) => Promise<BundleResult | null>;
+      /** Tests inject the pre-buy sell quote. Production asks Jupiter. */
+      sellRoute?: (token: CandidateToken) => Promise<"route" | "no_route" | "unknown">;
     } = {}
   ) {
     this.config = config;
     this.mintAccounts = deps.mintAccounts ?? (process.env.VITEST ? async () => safeMintAccount() : undefined);
     this.launchBundleFn = deps.launchBundle;
+    this.sellRouteOverride = deps.sellRoute ?? null;
     // v13.8: re-read pool depth before a buy when the sighting has none. Live feeds only (tests inject).
     this.depthFetch = deps.depthFetch ?? (config.feedMode !== "replay" && !config.demoFeed && !deps.priceFetch ? deps.lookupFetch ?? this.net.fetchAt(0) : undefined);
     if (this.depthFetch) {
@@ -1673,22 +1676,33 @@ export class Desk {
    * the safety or bundle wait is included. A stale or drained pool is not bought.
    */
   private freshLiveEntry(token: CandidateToken): { ok: true; token: CandidateToken } | { ok: false; reason: string } {
+    const held = this.liveWindows.fired(token.mint);
+    const tape = this.tape?.get(token.mint);
+    const prior = this.liveWindows.track(token.mint)?.samples.at(-1);
+    if (held && tape && tape.priceUsd != null && tape.priceUsd > 0 && (prior == null || tape.at > prior.at)) {
+      this.liveWindows.note(
+        token.mint,
+        { at: tape.at, liquidityUsd: tape.liquidityUsd ?? null, ageSeconds: token.ageSeconds },
+        tape.at,
+        held,
+        tape.priceUsd
+      );
+    }
     const failed = this.liveWindows.failure(token.mint);
     if (failed) return { ok: false, reason: failed };
     const track = this.liveWindows.track(token.mint);
     const last = track?.samples[track.samples.length - 1];
-    if (!track || !last?.wallAt || Date.now() - last.wallAt > LIVE_RECHECK_FRESH_MS) return { ok: false, reason: "Liquidity was not rechecked." };
+    const wallAge = last?.wallAt == null ? Number.POSITIVE_INFINITY : Date.now() - last.wallAt;
+    const quoteAge = last == null ? Number.POSITIVE_INFINITY : Date.now() - last.at;
+    const stale = wallAge > LIVE_RECHECK_FRESH_MS || (quoteAge >= 0 && quoteAge > LIVE_RECHECK_FRESH_MS);
+    if (!track || !last || stale) return { ok: false, reason: "Liquidity was not rechecked." };
     const verdict = survivalStatus(track, last.at);
     if (verdict.status !== "ready") return { ok: false, reason: verdict.status === "fail" ? verdict.reason : "Liquidity was not rechecked." };
     const price = this.liveWindows.price(token.mint);
+    if (!(price != null && price > 0)) return { ok: false, reason: "Price was not rechecked." };
     return {
       ok: true,
-      token: {
-        ...token,
-        liquidityUsd: verdict.liquidityUsd,
-        ageSeconds: verdict.ageSeconds,
-        ...(price != null ? { priceUsd: price } : {})
-      }
+      token: { ...token, liquidityUsd: verdict.liquidityUsd, ageSeconds: verdict.ageSeconds, priceUsd: price }
     };
   }
 
@@ -1703,12 +1717,11 @@ export class Desk {
     return { ok: true };
   }
 
-  /** A sell quote for the coins this buy would receive. Unknown and no-route both refuse. Tests do not call Jupiter. */
+  /** A sell quote for the coins this buy would receive. Tests inject this. Unknown and no-route both refuse. */
   sellRouteOverride: ((token: CandidateToken) => Promise<"route" | "no_route" | "unknown">) | null = null;
 
   private async engineSellRoute(token: CandidateToken): Promise<"route" | "no_route" | "unknown"> {
     if (this.sellRouteOverride) return this.sellRouteOverride(token);
-    if (process.env.VITEST) return "route";
     const price = token.priceUsd;
     const decimals = token.decimals ?? 6;
     if (!(price > 0) || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) return "unknown";
@@ -6218,6 +6231,7 @@ export class Desk {
    * ENGINE_LIVE_BUNDLE_MS covers two read-lane calls. A timeout and an RPC error are logged apart.
    * Manual buys keep the 1.5s launchBundleSoon budget.
    */
+  /** Fail-closed bundle read for an engine live buy. strategyLiveBuy is the only caller, so paper, manual, and lookup do not pay for it. */
   private async engineLiveBundle(mint: string, supply: bigint | null): Promise<BundleResult | BundleFailure | null> {
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;

@@ -32,3 +32,8 @@ export function testConfig(overrides: Partial<DeskConfig> = {}): DeskConfig {
 export function testDesk(overrides: Partial<DeskConfig> = {}, deps: { priceFetch?: typeof fetch } = {}): Desk {
   return new Desk(testConfig(overrides), deps);
 }
+
+/** Injected sell quote so an engine live buy test does not call Jupiter. */
+export function engineSellRouteStub(): Promise<"route"> {
+  return Promise.resolve("route");
+}

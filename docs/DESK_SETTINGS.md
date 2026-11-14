@@ -303,7 +303,7 @@ Not settings, but useful context: paper cash $549.86, paper equity $682.87 (mark
 
 The engine cannot live-buy a coin that rugs inside a minute. No numeric exit, cap, or pause changed except the live daily cap Dirk set to $500.
 
-- An engine live buy waits `LIVE_SURVIVAL_MS` (90 seconds) after the signal. Liquidity has to stay within 20% of the first sample and at or above the $10,000 live floor the whole time, and the pool's age has to cover that window. The coin is quoted again immediately before the swap.
+- An engine live buy waits `LIVE_SURVIVAL_MS` (90 seconds) after the signal. Every sample in that window has to stay within 20% of the first sample and at or above the $10,000 live floor, and the pool's age has to cover the window. The quote that confirms the window is the price for the swap, the entry-slippage check, the crash guard, and the sell quote. Inside the buy lock the engine reads liquidity again and refuses unless that sample is a few seconds old (`LIVE_RECHECK_FRESH_MS`, 5 seconds) and still inside the same rules.
 - The buy fails closed. Unknown, timed out, or missing safety, bundle, LP lock, liquidity, or sell route means no live buy. LP must be burned or locked (`onBondingCurve` does not pass). Mint and freeze authority must be revoked. The sell check is a quote, and no route means no buy.
 - A live engine coin whose pool dies adds its deployer wallet to `rugWallets`. A later engine live buy from that wallet is skipped. Manual buys do not read the list and do not wait out the window.
 - Live trade size stays $5. `liveDailyCapUsd` of $500 is inside the existing $1–$100,000 band. The phone's draft cap, when none is saved, is $500.
