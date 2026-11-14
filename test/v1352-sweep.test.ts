@@ -103,6 +103,14 @@ describe("v13.52 sweep schedule", () => {
     expect(sweep.size).toBe(0);
   });
 
+  it("keeps the earliest creation time when a parked coin is sighted again", () => {
+    const sweep = new SweepSchedule();
+    sweep.watch(create("a", { createdAt: 1_000 }), 0);
+    sweep.watch(create("a", { createdAt: 9_000, volume1hUsd: 5 }), 10);
+    const [entry] = sweep.due(10_000, 10);
+    expect(entry!.item.raw).toMatchObject({ createdAt: 1_000, volume1hUsd: 5 });
+  });
+
   it("drops the oldest coin when it is full", () => {
     const sweep = new SweepSchedule(SWEEP_LOOKS_MS, 2);
     sweep.watch(create("a"), 0);

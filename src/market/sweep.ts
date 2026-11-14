@@ -60,7 +60,9 @@ export class SweepSchedule {
     if (!mint || this.finished.has(mint)) return false;
     const prev = this.items.get(mint);
     if (prev) {
-      prev.raw = { ...prev.raw, ...defined(raw), observedAt: prev.raw.observedAt };
+      // A later listing can carry a newer pool's creation time. The coin keeps its earliest one.
+      const births = [prev.raw.createdAt, raw.createdAt].filter((at): at is number => typeof at === "number" && at > 0);
+      prev.raw = { ...prev.raw, ...defined(raw), observedAt: prev.raw.observedAt, ...(births.length ? { createdAt: Math.min(...births) } : {}) };
       if (bornAt != null && prev.bornAt == null) prev.bornAt = bornAt;
       return false;
     }
