@@ -11,7 +11,8 @@ import { HARD_RULES, SCORE_BAND, clampAgeMinutes, clampBuyUsd, clampCooldownHour
 import { autoBuyBlock } from "./auto-gates.js";
 import { STRATEGY } from "../strategy/config.js";
 import { StrategyEngine, defaultSettings as defaultStrategySettings, patchSettings as patchStrategySettings, type EngineQuote, type FiredSignal, type ScorecardView } from "../strategy/engine.js";
-import { assessStrategyExit, strategyLinePrice, type StrategyMeta } from "../strategy/exits.js";
+import { assessStrategyExit, strategyLinePrice, strategyStopPrice, type StrategyMeta } from "../strategy/exits.js";
+import { assessRugExit, rugSlippageApplies, RUG_EXIT_SLIPPAGE, RUG_LIQUIDITY_DROP, RUG_WATCH_MS } from "../strategy/rug-exit.js";
 import { BoundedMap, LatencyStats } from "../strategy/latency.js";
 import { ShadowStore } from "../strategy/store.js";
 import { classifyStopExit } from "./gap.js";
@@ -471,6 +472,8 @@ export class Desk {
   private walletTimer: NodeJS.Timeout | null = null;
   /** Display-only. A read-only quote found no pool. Never a sell and never a ledger write. */
   private noRoute = new Set<string>();
+  /** Last token-account raw amount seen for a live mint. 0 means the wallet holds none. Not a ledger write. */
+  private liveTokenAtoms = new Map<string, number>();
   /** Display-only count of collapsed marks. The chart series drops identical prints inside 2s. */
   private collapseStreak = new Map<string, CollapseStreak>();
   private routeProbeTimer: NodeJS.Timeout | null = null;
@@ -1368,7 +1371,7 @@ export class Desk {
 
   /**
    * The engine's live positions, split into ones that can still be traded and dead ones.
-   * A dead holding (no sell route, or a mark that collapsed and stayed there) is still on the book,
+   * A dead holding (no sell route, a collapsed mark, or a zero wallet token balance) is still on the book,
    * but it is not an open trade: nothing can be sold and nothing more can be lost on it. It does
    * not take one of the engine's slots, or six rugged coins would stop the engine for good.
    * A position being closed, or a buy still in flight, is not counted here either.
@@ -1378,7 +1381,9 @@ export class Desk {
     let dead = 0;
     for (const pos of this.liveBook?.positions.values() ?? []) {
       if (!pos.strategy) continue;
-      if (this.liquidityGone.has(bookKey("live", pos.mint)) || this.deadHolding(pos, "live")) dead += 1;
+      const key = bookKey("live", pos.mint);
+      const zeroBalance = this.liveTokenAtoms.get(pos.mint) === 0;
+      if (this.liquidityGone.has(key) || this.deadHolding(pos, "live") || zeroBalance) dead += 1;
       else if (!pos.closing && !this.engineLivePending.has(pos.mint)) open += 1;
     }
     return { open, dead };
@@ -1509,7 +1514,15 @@ export class Desk {
       if (!pos.strategy || pos.closing) continue;
       const at = this.liveBook!.markedAt(pos.mint);
       const mark = this.liveBook!.lastPrice.get(pos.mint);
-      if (at == null || mark == null || now - at > STRATEGY.watch.markFreshMs) continue;
+      if (at == null || mark == null) continue;
+      const fresh = now - at <= STRATEGY.watch.markFreshMs;
+      const throughStop = mark <= strategyStopPrice(pos.entryPrice, pos.entryMark, pos.strategy.stopPct);
+      const liq = this.markLiquidity.get(pos.mint);
+      const entryLiq = pos.strategy.entryLiquidityUsd;
+      const poolLeaving = now - pos.openedAt <= RUG_WATCH_MS && entryLiq != null && entryLiq > 0 && liq != null && liq <= entryLiq * (1 - RUG_LIQUIDITY_DROP);
+      // A stale mark still stops a live engine position. A quiet price stream must not hold the 1% stop.
+      if (!fresh && !throughStop && !poolLeaving) continue;
+      if (!this.freshMark("live", pos.mint, at)) continue;
       this.review(pos.mint, mark, "live");
     }
     // Keep the Tape quoter's pins in step with what the engine is watching or holding now.
@@ -1539,7 +1552,7 @@ export class Desk {
     const live = this.liveBook!;
     if (live.positions.has(token.mint) || this.engineLivePending.has(token.mint)) return skip("Already held on the live book.");
     // A buy still in flight holds a slot, so two signals in one pass cannot both take the last one.
-    // Dead holdings are not open trades and do not hold a slot.
+    // Dead holdings, including a zero wallet balance, are not open trades and do not hold a slot.
     const open = this.engineLiveSlots().open + this.engineLivePending.size;
     if (open >= this.strategy.settings.maxOpen) return skip(`The engine already has ${open} live. It holds ${this.strategy.settings.maxOpen} at most.`);
     this.engineLivePending.add(token.mint);
@@ -1698,6 +1711,37 @@ export class Desk {
     const book = this.bk(kind);
     const markAt = book.markedAt(pos.mint) ?? 0;
     const liquidityUsd = this.markLiquidity.get(pos.mint) ?? pos.liquidityUsd;
+    if (kind === "live") {
+      const seen = this.sightings.get(pos.mint);
+      const rug = assessRugExit({
+        now,
+        openedAt: pos.openedAt,
+        entryLiquidityUsd: meta.entryLiquidityUsd,
+        liquidityUsd,
+        entryDevHoldingPct: meta.entryDevHoldingPct,
+        devHoldingPct: seen?.devHoldingPct,
+        entryTop10Pct: meta.entryTop10Pct,
+        top10Pct: seen?.top10HolderPct,
+        flow: this.strategy.flowFor(pos.mint)
+      });
+      if (rug) {
+        this.strategyExitRetryAt.set(key, now + 2_000);
+        pos.closing = true;
+        this.bus.emit("risk.exit", {
+          mint: pos.mint,
+          symbol: pos.symbol,
+          qty: pos.qty,
+          markPrice: mark,
+          liquidityUsd: pos.liquidityUsd,
+          pnlPct: pos.entryPrice > 0 ? mark / pos.entryPrice - 1 : 0,
+          score: pos.score,
+          reason: { code: rug.code, message: rug.message },
+          book: "live" as const,
+          rugExit: true
+        });
+        return;
+      }
+    }
     const net = realizablePnl({ markPrice: mark, qty: pos.qty, costUsd: pos.costUsd, liquidityUsd, markAt, now });
     const verdict = assessStrategyExit({
       entryPrice: pos.entryPrice,
@@ -1729,7 +1773,7 @@ export class Desk {
       pnlPct: pos.entryPrice > 0 ? mark / pos.entryPrice - 1 : 0,
       score: pos.score,
       reason: { code: verdict.code, message: verdict.message },
-      ...(kind === "live" ? { book: "live" as const } : {})
+      ...(kind === "live" ? { book: "live" as const, ...(rugSlippageApplies(pos, verdict.code, now) ? { rugExit: true } : {}) } : {})
     });
   }
 
@@ -3742,6 +3786,7 @@ export class Desk {
     book.positions.set(token.mint, position);
     this.noRoute.delete(bookKey(kind, token.mint));
     this.collapseStreak.delete(bookKey(kind, token.mint));
+    if (kind === "live") this.liveTokenAtoms.delete(token.mint);
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
@@ -3809,7 +3854,8 @@ export class Desk {
           priceFeed: pos.priceFeed,
           exit: true,
           confirmedFill: recent,
-          sellAnyway: order.reason.code === "MANUAL_CLOSE" && order.sellAnyway === true
+          sellAnyway: order.reason.code === "MANUAL_CLOSE" && order.sellAnyway === true,
+          rugExit: order.rugExit === true
         });
         void this.refreshWallet();
         this.applySell(pos, {
@@ -3880,6 +3926,7 @@ export class Desk {
       });
       // v13.39: no route is not a write-off. The tokens stay in the wallet; a later retry can fill.
       // A healthy cached quote is not residual value. Only a quote we already know is drained counts.
+      if (kind === "live" && /wallet holds none/i.test(message)) this.liveTokenAtoms.set(pos.mint, 0);
       if (kind === "live" && isNoSellRouteMessage(message)) {
         const cached = this.lastQuoteUsd.get(pos.mint);
         const quoteUsd = cached != null && Number.isFinite(cached) && cached <= QUOTE_SIDE_GONE_USD ? cached : 0;
@@ -4021,7 +4068,7 @@ export class Desk {
       pnlPct: view.pnlPct,
       score: pos.score,
       reason: { code: view.code, message: view.message },
-      ...(kind === "live" ? { book: "live" as const } : {})
+      ...(kind === "live" ? { book: "live" as const, ...(rugSlippageApplies(pos, view.code, Date.now()) ? { rugExit: true } : {}) } : {})
     };
     this.bus.emit("risk.exit", order);
   }
@@ -5631,8 +5678,11 @@ export class Desk {
     confirmedFill?: boolean;
     /** Manual close that the operator confirmed past the exit cap. Engine exits never set this. */
     sellAnyway?: boolean;
+    /** Engine live rug exit. The saved exit cap stays 6%. This send may go up to RUG_EXIT_SLIPPAGE. */
+    rugExit?: boolean;
   }): Promise<LiveSwapResult> {
-    const slip = input.exit ? (this.maxExitSlippage ?? this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack) : this.config.rules.maxEntrySlippage;
+    const savedExit = this.maxExitSlippage ?? this.config.rules.maxEntrySlippage + HARD_RULES.exitImpactSlack;
+    const slip = input.exit ? (input.rugExit === true ? RUG_EXIT_SLIPPAGE : savedExit) : this.config.rules.maxEntrySlippage;
     if (usesPumpRoute(input)) {
       const sol = await this.solUsd();
       if (!sol) throw new Error("LIVE_SWAP_FAILED: no fresh SOL/USD price. Nothing was sent.");

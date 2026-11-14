@@ -270,7 +270,6 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
   }
   if (confirmed?.value?.err) throw rejectedSend(signature, req.side);
 
-  const inAmount = Number(quote.inAmount ?? amount);
   const outAmount = Number(quote.outAmount);
   let qty: number;
   let notionalUsd: number;
@@ -292,6 +291,14 @@ export async function executeLiveSwap(req: LiveSwapRequest): Promise<LiveSwapRes
     qty,
     notionalUsd,
     feeUsd,
-    slippage: Math.abs(inAmount - amount) / amount || 0.01
+    slippage: realizedFillSlippage(req.side, req.markPriceUsd, fillPriceUsd)
   };
+}
+
+/** Fill versus the mark the order was priced at. A quote whose in-amount matches the request is not 1%. */
+export function realizedFillSlippage(side: "buy" | "sell", markPriceUsd: number | undefined, fillPriceUsd: number): number {
+  const mark = markPriceUsd ?? 0;
+  if (!(mark > 0) || !(fillPriceUsd > 0) || !Number.isFinite(mark) || !Number.isFinite(fillPriceUsd)) return 0;
+  const raw = side === "buy" ? (fillPriceUsd - mark) / mark : (mark - fillPriceUsd) / mark;
+  return raw > 0 && Number.isFinite(raw) ? raw : 0;
 }
