@@ -293,4 +293,43 @@ describe("v13.52 fast sweep in the scout", () => {
     expect(scout.prefilterView().sweep).toMatchObject({ promoted: 1, watching: 1 });
     scout.stop();
   });
+  it("keeps the earliest birth time when a later look shows a newer pool", async () => {
+    const mint = mintOf();
+    const aged = { ...thresholds, maxAgeSeconds: 600 };
+    const scout = new Scout({
+      bus: new EventBus<DeskEvents>(),
+      feedMode: "live",
+      demo: false,
+      rpcUrl: RPC,
+      pumpWsUrl: "ws://unused",
+      fetchImpl: (async (input: unknown) => {
+        const url = String(input);
+        if (!url.startsWith(DEX)) return Response.json({ pairs: [] });
+        // A pool created a few seconds ago, on a coin first listed an hour ago.
+        return Response.json([{ baseToken: { address: mint }, priceUsd: "0.00002", volume: { h1: 50_000 }, liquidity: { usd: 9_000 }, pairCreatedAt: Date.now() - 5_000 }]);
+      }) as typeof fetch,
+      prefilter: () => aged,
+      killMemory: new KillMemory(),
+      onStatus: () => {}
+    });
+    scout.ingest(create(mint, { devWallet: undefined, createdAt: Date.now() - 3_600_000, volume1hUsd: 300, liquidityUsd: 9_000 }), "dexscreener");
+    scout.ingest(create(mint, { devWallet: undefined }), "jupiter");
+    await scout.sweepTick(Date.now() + 11_000);
+    expect(scout.prefilterView().sweep.promoted).toBe(0); // still an hour old: past the ten-minute limit
+    scout.stop();
+  });
+});
+
+describe("v13.52 DexScreener row depth flag", () => {
+  it("says depth is unknown when the priced pair prints none, whatever another pair prints", async () => {
+    const { fetchDexTape } = await import("../src/market/tape-quotes.js");
+    const mint = mintOf();
+    const priced = { baseToken: { address: mint }, priceUsd: "0.00002", volume: { h1: 50_000 } };
+    const unpriced = { baseToken: { address: mint }, liquidity: { usd: 9_000 }, volume: { h1: 10 } };
+    for (const rows of [[priced, unpriced], [unpriced, priced]]) {
+      const out = await fetchDexTape([mint], (async () => Response.json(rows)) as typeof fetch);
+      expect(out.get(mint)).toMatchObject({ priceUsd: 0.00002, liquidityUsd: 0 });
+      expect(out.get(mint)!.liquidityKnown).toBeUndefined();
+    }
+  });
 });

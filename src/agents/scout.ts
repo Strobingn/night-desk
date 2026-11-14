@@ -508,7 +508,9 @@ export class Scout {
     }
     // A Pump stream create is the coin's birth: the desk saw it happen. A listing with no
     // creation time gets no age made up for it.
-    const born = row?.createdAt ?? item.raw.createdAt ?? item.bornAt;
+    // The earliest time known wins: a second, newer pool does not make the coin young again.
+    const births = [row?.createdAt, item.raw.createdAt, item.bornAt].filter((at): at is number => typeof at === "number" && at > 0);
+    const born = births.length ? Math.min(...births) : undefined;
     const fresh: RawSighting = {
       ...item.raw,
       ...(row?.priceUsd != null ? { priceUsd: row.priceUsd } : {}),

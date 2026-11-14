@@ -41,7 +41,7 @@ export interface DexTapeRow {
   marketCapUsd?: number;
   /** When the pair was created, unix ms. Absent when the pair does not say. */
   createdAt?: number;
-  /** True when a pair printed a depth figure, zero included. liquidityUsd is 0 either way when it did not. */
+  /** True when the pair this row was taken from printed a depth figure, zero included. liquidityUsd is 0 when it did not. */
   liquidityKnown?: boolean;
 }
 
@@ -100,7 +100,6 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
       // The coin is as old as its oldest pair.
       const born = Math.min(cand.createdAt ?? Infinity, prev.createdAt ?? Infinity);
       if (Number.isFinite(born)) cand.createdAt = born;
-      if (prev.liquidityKnown) cand.liquidityKnown = true;
     }
     const better =
       !prev ||
@@ -111,7 +110,6 @@ export async function fetchDexTape(mints: string[], fetchImpl: FetchLike): Promi
       prev.vol1hUsd = cand.vol1hUsd;
       prev.vol5mUsd = cand.vol5mUsd;
       if (cand.createdAt != null) prev.createdAt = cand.createdAt;
-      if (cand.liquidityKnown) prev.liquidityKnown = true;
     }
   }
   return out;
