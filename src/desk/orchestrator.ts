@@ -309,6 +309,8 @@ const LIVE_BALANCE_CACHE_MS = 60_000;
 const RECENT_LIVE_FILL_MS = 30_000;
 /** How long that sell waits for a fresh wallet read before it sends the confirmed amount. */
 const RECENT_FILL_BALANCE_MS = 750;
+/** One automatic live exit per position. A failure must not fill the Helius lanes on the next pass. */
+const AUTO_EXIT_RETRY_MS = 20_000;
 
 export class Desk {
   readonly bus = new EventBus<DeskEvents>();
@@ -403,6 +405,8 @@ export class Desk {
   /** Price feed each watched coin is anchored to. A quote from another feed is not used. */
   private strategyFeed = new BoundedMap<string, string | undefined>(400);
   private strategyExitRetryAt = new Map<string, number>();
+  /** Next time an automatic live exit may be attempted for this book key. Manual sells ignore it. */
+  private autoExitRetryAt = new Map<string, number>();
   /** Live engine buys in flight. They count against the engine's open limit before they fill. */
   private engineLivePending = new Set<string>();
   /** v13.44 what the live engine has done since the desk started, so the phone can say why it is not buying. */
@@ -1386,9 +1390,7 @@ export class Desk {
     let dead = 0;
     for (const pos of this.liveBook?.positions.values() ?? []) {
       if (!pos.strategy) continue;
-      const key = bookKey("live", pos.mint);
-      const zeroBalance = this.liveTokenAtoms.get(pos.mint) === 0;
-      if (this.liquidityGone.has(key) || this.deadHolding(pos, "live") || zeroBalance) dead += 1;
+      if (this.enginePositionDead(pos)) dead += 1;
       else if (!pos.closing && !this.engineLivePending.has(pos.mint)) open += 1;
     }
     return { open, dead };
@@ -1517,6 +1519,8 @@ export class Desk {
     }
     for (const pos of [...(this.liveBook?.positions.values() ?? [])]) {
       if (!pos.strategy || pos.closing) continue;
+      // A dead holding's old mark sits under the stop forever. Retrying it fills the Helius lanes.
+      if (this.enginePositionDead(pos)) continue;
       const at = this.liveBook!.markedAt(pos.mint);
       const mark = this.liveBook!.lastPrice.get(pos.mint);
       if (at == null || mark == null) continue;
@@ -1735,7 +1739,9 @@ export class Desk {
         flow
       });
       if (rug) {
+        if (kind === "live" && this.liveExitCooling(pos.mint, now)) return;
         this.strategyExitRetryAt.set(key, now + 2_000);
+        if (kind === "live") this.noteLiveExitAttempt(pos.mint, now);
         pos.closing = true;
         this.bus.emit("risk.exit", {
           mint: pos.mint,
@@ -1771,8 +1777,10 @@ export class Desk {
       this.persist();
     }
     if (verdict.action !== "exit" || !verdict.code) return;
+    if (kind === "live" && this.liveExitCooling(pos.mint, now)) return;
     // A refused exit (thin pool, unverified mark) is retried, but not on every tick.
     this.strategyExitRetryAt.set(key, now + (verdict.code === "STRATEGY_STOP" || verdict.code === "ENGINE_TRAIL" || verdict.code === "LIQUIDITY_DROP" ? 15_000 : 60_000));
+    if (kind === "live") this.noteLiveExitAttempt(pos.mint, now);
     pos.closing = true;
     this.bus.emit("risk.exit", {
       mint: pos.mint,
@@ -3833,6 +3841,7 @@ export class Desk {
     this.markLiquidityAt.delete(token.mint);
     this.heldHolders.delete(token.mint);
     this.strategyExitRetryAt.delete(bookKey(kind, token.mint));
+    this.autoExitRetryAt.delete(bookKey(kind, token.mint));
     book.noteMark(token.mint, fill.markUsd > 0 ? fill.markUsd : fill.priceUsd, fill.at);
     const sample = sampleOf(token, score);
     if (this.surfacedNearMiss.has(token.mint)) {
@@ -4083,6 +4092,8 @@ export class Desk {
   private review(mint: string, mark: number, kind: BookKind = "paper", shockConfirmed = false): void {
     const pos = kind === "live" ? this.liveBook?.positions.get(mint) : this.book.positions.get(mint);
     if (!pos || pos.closing) return;
+    // Dead engine positions are not sold on their own. A manual Sell anyway does not come through here.
+    if (kind === "live" && this.enginePositionDead(pos)) return;
     // A spike that no other feed confirms is not a trail or a stop. A drop still is.
     if (this.sellUnverified(pos, mark)) return;
     // The first absurd post-fill mark is not a rug. A second agreeing print still stops.
@@ -4101,6 +4112,12 @@ export class Desk {
       if (pos.strategy) this.strategyExit(pos, mark, kind);
       return;
     }
+    // The retry gap blocks another send. The peak still moves, so a trail is not measured from a stale high.
+    if (kind === "live" && this.liveExitCooling(mint)) {
+      if (peakRose || armChanged) this.persist();
+      return;
+    }
+    if (kind === "live") this.noteLiveExitAttempt(mint);
     pos.closing = true;
     if (view.code === "STOP_LOSS" && this.config.rules.revengeCooldownMs > 0) {
       this.cooldowns.set(bookKey(kind, mint), Date.now() + this.config.rules.revengeCooldownMs);
@@ -4131,6 +4148,27 @@ export class Desk {
       message: `Executor skipped live ${token.symbol}. ${message}`,
       detail: score.toFixed(2)
     });
+  }
+
+  /**
+   * Same dead set as engineLiveSlots: no sell route, a collapsed mark, or a known zero token balance.
+   * These stay on the book. Automatic exits do not try them.
+   */
+  private enginePositionDead(pos: Position): boolean {
+    if (!pos.strategy) return false;
+    const key = bookKey("live", pos.mint);
+    return this.liquidityGone.has(key) || this.deadHolding(pos, "live") || this.liveTokenAtoms.get(pos.mint) === 0;
+  }
+
+  /** True while this live position is inside the automatic-exit gap. */
+  private liveExitCooling(mint: string, now = Date.now()): boolean {
+    const at = this.autoExitRetryAt.get(bookKey("live", mint));
+    return at != null && now < at;
+  }
+
+  /** The next automatic live exit for this mint waits AUTO_EXIT_RETRY_MS. A manual sell does not. */
+  private noteLiveExitAttempt(mint: string, now = Date.now()): void {
+    this.autoExitRetryAt.set(bookKey("live", mint), now + AUTO_EXIT_RETRY_MS);
   }
 
   /**
